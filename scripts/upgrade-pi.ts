@@ -16,7 +16,9 @@ if (target === undefined || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(target)) {
   process.exit(2);
 }
 
-const run = (command: string, args: string[]) => execFileSync(command, args, { stdio: "inherit" });
+// On Windows, pnpm is a .cmd shim, which only runs through a shell.
+const run = (command: string, args: string[]) =>
+  execFileSync(command, args, { stdio: "inherit", shell: process.platform === "win32" });
 
 const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
   dependencies: Record<string, string>;
