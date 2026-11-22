@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { applyImmutable } from "@earendil-works/chord/delta";
+import { BACKGROUND_CONTEXT } from "../agent/pi/shared.ts";
+import { applyImmutable } from "../agent/pi/shared.ts";
 import {
   ConversationTranscript,
   type ConversationView,
@@ -8,7 +8,7 @@ import {
   type EntryRecord,
   type Page,
   type TaskGraph,
-} from "@earendil-works/pi-durable";
+} from "../agent/pi/shared.ts";
 import PartySocket from "partysocket";
 import {
   MAX_ENTRY_PAGE,

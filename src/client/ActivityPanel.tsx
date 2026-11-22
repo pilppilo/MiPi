@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode, Ref } from "react";
-import type { BlockedReason, TaskGraph, TaskGraphNode } from "@earendil-works/pi-durable";
+import type { BlockedReason, TaskGraph, TaskGraphNode } from "../agent/pi/shared.ts";
 
 interface ActivityPanelProps {
   readonly graph: TaskGraph | undefined;

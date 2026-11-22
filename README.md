@@ -4,19 +4,19 @@ An always-on personal agent built on [Pi Durable](https://www.npmjs.com/package/
 
 The build plan and milestones live in Linear (project **MiPi**). This README covers how to work on the code.
 
-> Pi Durable is experimental and breaks between minor versions. Every Pi Durable import on the server goes through `src/agent/pi/`, so an upgrade is fixed in one folder.
+> Pi Durable is experimental and breaks between minor versions. Every Pi import goes through `src/agent/pi/`, so an upgrade is fixed in one folder; `test/contract.test.ts` is the test that fails first and points at it.
 
 ## Layout
 
-| Path                             | What it is                                                              |
-| -------------------------------- | ----------------------------------------------------------------------- |
-| `src/worker/`                    | The Worker: routing (and, from later milestones, auth)                  |
-| `src/agent/agent-do.ts`          | The Durable Object (`MipiAgent`): opens the harness, alarms, WebSockets |
-| `src/agent/harness.ts`           | Agent composition: model, tools, prompt sections                        |
-| `src/agent/pi/`                  | The only server code that imports `@earendil-works/*`                   |
-| `src/tools/`                     | Tools (`schedule`, `search_history`)                                    |
-| `src/lib/`                       | Small helpers with no Pi imports                                        |
-| `src/protocol.ts`, `src/client/` | WebSocket protocol and the React web client                             |
+| Path                             | What it is                                                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `src/worker/`                    | The Worker: routing (and, from later milestones, auth)                                                                                                       |
+| `src/agent/agent-do.ts`          | The Durable Object (`MipiAgent`): opens the harness, alarms, WebSockets                                                                                      |
+| `src/agent/harness.ts`           | Agent composition: model, tools, prompt sections                                                                                                             |
+| `src/agent/pi/`                  | The only code that imports `@earendil-works/*` (lint-enforced): `durable.ts` for the server, `shared.ts` for the browser, `storage.ts` for the upgrade guard |
+| `src/tools/`                     | Tools (`schedule`, `search_history`)                                                                                                                         |
+| `src/lib/`                       | Small helpers with no Pi imports                                                                                                                             |
+| `src/protocol.ts`, `src/client/` | WebSocket protocol and the React web client                                                                                                                  |
 
 ## Commands
 
@@ -24,7 +24,7 @@ You need Node.js 22.19 or newer and pnpm 11 (`corepack enable` picks the version
 
 ```sh
 pnpm install
-pnpm check   # format, Worker types, tsc, build, deploy dry run
+pnpm check   # format, lint (incl. the Pi import rule), Worker types, tsc, build, deploy dry run
 pnpm test    # Pi Durable runs for real on Durable Object SQLite; the model is faked
 ```
 

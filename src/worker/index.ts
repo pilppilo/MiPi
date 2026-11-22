@@ -32,8 +32,9 @@ export default {
       if (request.method !== "POST") {
         return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
       }
-      const sessionId = crypto.randomUUID();
-      return json({ sessionId, url: `/sessions/${sessionId}` }, 201);
+      // One session per owner (pulled forward from M3): every visit opens the same Durable Object.
+      const sessionId = encodeURIComponent(env.MIPI_OWNER);
+      return json({ sessionId, url: `/sessions/${sessionId}` }, 200);
     }
 
     const sessionMatch = sessionSocketRoute.exec(url.pathname);

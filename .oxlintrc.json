@@ -1,0 +1,25 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["dist/**", ".wrangler/**", "worker-configuration.d.ts"],
+  "rules": {
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": ["@earendil-works/*", "@earendil-works/**"],
+            "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+          }
+        ]
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": ["src/agent/pi/**", "test/**", "vitest.config.ts"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { assertValidOp, type Op } from "@earendil-works/chord/delta";
+import { assertValidOp, type Op } from "./agent/pi/shared.ts";
 import type {
   BlockedReason,
   ConversationView,
@@ -8,7 +8,7 @@ import type {
   TaskGraph,
   TaskGraphNode,
   TaskGraphState,
-} from "@earendil-works/pi-durable";
+} from "./agent/pi/shared.ts";
 
 export const ROOT_CONVERSATION_ID = 1;
 export const MAX_PROMPT_CHARACTERS = 100_000;

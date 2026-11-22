@@ -22,6 +22,8 @@
     "run_worker_first": ["/api/*"],
   },
   "vars": {
+    // The one person this agent belongs to: names the single session (Durable Object) everything lives in.
+    "MIPI_OWNER": "jerome",
     // OpenCode Go model id for new conversations.
     "MIPI_MODEL": "deepseek-v4.1-flash",
   },
