@@ -15,6 +15,7 @@ COD-169: hardening before M4.
 - The deploy, rollback and restore workflows use the GitHub Environment of their lane (`staging` or `production`; auto-deploys from `main` use `staging`). Repository secrets stay the fallback.
 - New optional secret `ADMIN_TOKEN_PREVIOUS`: while a lane's token is rotated, the backup and the rollback's version check try it after `ADMIN_TOKEN`.
 - `pnpm check` builds and dry-runs both lanes (`scripts/dry-run.ts`).
+- `AGENTS.md`: a Code style section for every coding agent, adapted from Pi's own rules, and the Layout now lists `src/lib/` and `src/protocol.ts`.
 - The owner's time zone is no longer module state: stamps take it explicitly, and scheduled deliveries read it from the agent's session (`app.settings`), written from `MIPI_TIMEZONE` when the agent opens.
 
 **Pi Durable**

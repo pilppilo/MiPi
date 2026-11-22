@@ -52,9 +52,25 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 - `src/agent/`: the agent: Durable Object (`agent-do.ts`), harness, stamps, startup guard, export and restore.
 - `src/worker/`: HTTP routes, auth (spike lock), admin API.
 - `src/tools/`: tools, registered only through profiles.
+- `src/lib/`: small helpers with no Pi imports.
+- `src/protocol.ts`: WebSocket command/event protocol and wire validation.
 - `src/client/`: the web door.
 - `scripts/`: deploy, release notes, upgrade, ledger.
 - `docs/pi-durable-ledger.md`: every Pi Durable workaround, use of its internals, deliberate difference, and upstream item MiPi waits on.
+
+## Code style
+
+- Read files in full before wide-ranging edits, before changing files you haven't inspected, and when auditing. Don't rely on search snippets alone.
+- Before designing a fix, check how sibling modules (other doors, tools, or scripts) handle the same concern and follow that pattern; if you deviate, explain why.
+- Check `node_modules` for external API types (especially `@earendil-works/*`) instead of guessing, then use Pi types through `src/agent/pi/` (never import `@earendil-works/*` directly outside `src/agent/pi/` and `test/`).
+- Top-level imports only in `src/agent/`, `src/worker/`, `src/tools/`, and `scripts/`: no `await import()`, `import("pkg").Type`, or dynamic type imports (in `src/client/`, dynamic imports are allowed only for code-splitting, with a comment).
+- No `any` unless unavoidable.
+- Erasable TypeScript only (`erasableSyntaxOnly`; scripts run with Node's type stripping): no parameter properties, `enum`, `namespace`, or `import =`. Use explicit fields assigned in the constructor.
+- Use tagged unions (`kind` field + `switch`) instead of `"field" in x`, and end each new `switch` with an exhaustiveness check (`const _: never = value.kind`) so a new variant fails to compile; existing switches get it when next touched. Reserve `in` for `unknown` values at trust boundaries, feature detection, or persisted/wire formats that a version bump would have to change (note it in a comment).
+- Validate only at trust boundaries (`src/worker/`, `src/protocol.ts`, tool schemas, external responses, and stored data read back: socket attachments, `app_meta`, documents an older build wrote). Don't add redundant `typeof`/`instanceof`/`Array.isArray` checks on values TypeScript already guarantees.
+- Never remove or downgrade code to silence type errors from an outdated dependency: upgrade it (`pnpm upgrade:pi` for `@earendil-works/*`).
+- Don't remove code that looks intentional (especially `pi-ledger` workarounds, startup guards, or Durable Object safety wrappers); leave it in place and flag it in the PR description and Linear issue for the owner to decide.
+- Don't add ad-hoc backward-compatibility shims unless asked. During `alpha`, handle breaking persisted-data changes through the startup guard and a `**One-way:**` changeset warning (from `0.1.0-beta.1` onward, data must survive upgrades and pass fixture-DB tests).
 
 ## Pi Durable rules
 
