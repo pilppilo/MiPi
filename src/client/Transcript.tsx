@@ -1,4 +1,4 @@
-import type { ToolDiagnostic } from "@earendil-works/pi-durable";
+import type { ToolDiagnostic } from "../agent/pi/shared.ts";
 import type {
   TranscriptEntry,
   TranscriptGap,

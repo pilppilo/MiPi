@@ -1,0 +1,200 @@
+/**
+ * The contract between MiPi and Pi Durable: every name `src/agent/pi/` exports, used once against the real packages
+ * on real Durable Object SQLite (only the model is faked). After a Pi Durable upgrade this is the test that fails
+ * first and names the seam file to fix.
+ */
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createModels } from "@earendil-works/pi-ai/models";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxText,
+  fauxToolCall,
+} from "@earendil-works/pi-ai/providers/faux";
+import { describe, expect, it } from "vitest";
+import * as context from "../src/agent/pi/context.ts";
+import * as durable from "../src/agent/pi/durable.ts";
+import * as schema from "../src/agent/pi/schema.ts";
+import * as shared from "../src/agent/pi/shared.ts";
+import { openDurableObjectSqliteStorage } from "../src/agent/pi/sqlite.ts";
+import {
+  BUILT_IN_TASKS,
+  storedSchemaVersion,
+  storedTaskVersions,
+  SUPPORTED_SCHEMA_VERSION,
+  supportedTaskVersions,
+  tasksNewerThanSupported,
+} from "../src/agent/pi/storage.ts";
+import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
+
+const ctx = context.BACKGROUND_CONTEXT;
+
+/** Every runtime name of a seam module, each defined (a type-only export never shows up here). */
+const runtimeNames = (module: Record<string, unknown>): string[] => {
+  for (const [name, value] of Object.entries(module)) {
+    expect(value, `${name} is undefined: the package no longer exports it`).toBeDefined();
+  }
+  return Object.keys(module).sort();
+};
+
+describe("Pi seam contract", () => {
+  it("exports exactly the names MiPi uses, all defined", () => {
+    // Adding a name to a seam file means adding it here too, on purpose.
+    expect(runtimeNames(durable)).toEqual([
+      "AssistantEntry",
+      "Harness",
+      "UserEntry",
+      "configure",
+      "createRegistry",
+      "defineDoc",
+      "defineDocFamily",
+      "defineExtension",
+      "defineTask",
+      "section",
+    ]);
+    expect(runtimeNames(shared)).toEqual([
+      "BACKGROUND_CONTEXT",
+      "CompactionEntry",
+      "ConversationTranscript",
+      "ResetEntry",
+      "ToolResultEntry",
+      "applyImmutable",
+      "assertValidOp",
+    ]);
+    expect(runtimeNames(schema)).toEqual(["int", "obj", "oneOf", "opt", "str"]);
+    expect(runtimeNames(context)).toEqual(["BACKGROUND_CONTEXT"]);
+    expect(shared.BACKGROUND_CONTEXT).toBe(context.BACKGROUND_CONTEXT);
+  });
+
+  it("runs a tool-using turn through the seam on Durable Object SQLite", async () => {
+    const stub = env.AGENT.getByName("contract-turn");
+    await runInDurableObject(stub, async (_instance, state) => {
+      // Let MipiAgent finish opening its own harness before opening one beside it.
+      await state.blockConcurrencyWhile(async () => {});
+
+      const faux = fauxProvider();
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("echo", { text: "hi", times: 2, mode: "plain" })], {
+          stopReason: "toolUse",
+        }),
+        fauxAssistantMessage([fauxText("Echoed.")]),
+      ]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+
+      const Notes = durable.defineDoc<{ count: number }>({
+        kind: "contract.notes",
+        version: 1,
+        scope: "session",
+        initial: () => ({ count: 0 }),
+        checkpointWhen: () => false,
+      });
+      const Marks = durable.defineDocFamily<{ seen: boolean }, null>({
+        family: true,
+        kind: "contract.marks",
+        version: 1,
+        scope: "session",
+        initial: () => ({ seen: false }),
+        checkpointWhen: () => false,
+      });
+      const echo: durable.ToolRegistration = {
+        name: "echo",
+        description: "Echo text",
+        parameters: schema.obj({
+          text: schema.str({ minLength: 1 }),
+          times: schema.opt(schema.int({ minimum: 1, maximum: 3 })),
+          mode: schema.oneOf(["plain", "loud"]),
+        }),
+        replay: "safe",
+        execute: async (args: { text: string; times?: number }) => ({
+          output: [{ type: "text" as const, text: args.text.repeat(args.times ?? 1) }],
+        }),
+      };
+      const extension = durable.defineExtension({
+        name: "contract",
+        tasks: [DeliverScheduledInstruction],
+        tools: [echo],
+        sections: [durable.section("contract", () => "Contract test.", { tag: false })],
+      });
+      const registry = durable.createRegistry();
+      registry.install(extension);
+
+      const storage = await openDurableObjectSqliteStorage(state.storage);
+      const harness = await durable.Harness.open(
+        storage,
+        {
+          models,
+          registry,
+          settings: { extensions: [extension] },
+          conversationCreated: (tx, conversation) =>
+            conversation.parent === undefined
+              ? durable.configure(tx, conversation.id, {
+                  model: { provider: "faux", modelId: "faux-1" },
+                  tools: [echo],
+                })
+              : undefined,
+        },
+        ctx,
+      );
+      try {
+        const root = await harness.root(ctx);
+        const submission = await root.submit(
+          { type: "input", content: "Echo hi twice", requestId: "contract-1" },
+          ctx,
+        );
+        await submission.wait(ctx);
+        await harness.waitForIdle(ctx);
+
+        await root.commit(async (tx) => {
+          (await tx.doc(Notes)).count += 1;
+          (await tx.doc(Marks, "a", null)).seen = true;
+        }, ctx);
+        expect(await harness.snapshot(Notes, ctx)).toEqual({ count: 1 });
+
+        const entries = (await root.entries({}, 50, undefined, ctx)).items;
+        expect(entries.some((entry) => durable.UserEntry.is(entry))).toBe(true);
+        expect(entries.some((entry) => durable.AssistantEntry.is(entry))).toBe(true);
+        const messages = (await root.context(ctx)).messages;
+        expect(messages).toEqual(
+          expect.arrayContaining([expect.objectContaining({ role: "toolResult", isError: false })]),
+        );
+
+        // The storage readers the M2b guard depends on.
+        expect(SUPPORTED_SCHEMA_VERSION).toBeGreaterThan(0);
+        expect(storedSchemaVersion(state.storage.sql)).toBe(SUPPORTED_SCHEMA_VERSION);
+        const stored = storedTaskVersions(state.storage.sql);
+        expect(stored).toMatchObject({ "pi.tool": 4, "pi.generation": 3 });
+        const supported = supportedTaskVersions([DeliverScheduledInstruction]);
+        expect(supported).toMatchObject({
+          "pi.tool": 4,
+          "pi.generation": 3,
+          "pi.compaction": 1,
+          "app.deliver-scheduled-instruction": 1,
+        });
+        expect(tasksNewerThanSupported(stored, supported)).toEqual([]);
+      } finally {
+        await harness.close(ctx);
+      }
+    });
+    await evictDurableObject(stub);
+  });
+
+  it("reports stored tasks newer than this build", () => {
+    const supported = supportedTaskVersions([]);
+    expect(BUILT_IN_TASKS.map(({ definition }) => definition.name)).toEqual([
+      "pi.tool",
+      "pi.generation",
+      "pi.compaction",
+    ]);
+    expect(
+      tasksNewerThanSupported({ "pi.tool": 5, "pi.generation": 3, "other.kind": 9 }, supported),
+    ).toEqual([{ kind: "pi.tool", stored: 5, supported: 4 }]);
+  });
+
+  it("applies chord deltas the client receives", () => {
+    const op: shared.Op = ["s", ["a"], 1];
+    expect(() => shared.assertValidOp(op)).not.toThrow();
+    expect(shared.applyImmutable({ a: 0, b: 2 }, [op])).toEqual({ a: 1, b: 2 });
+  });
+});

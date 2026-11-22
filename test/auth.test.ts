@@ -29,7 +29,7 @@ describe("spike lock (M1, until Access)", () => {
     const allowed = await exports.default.fetch(
       withSpikeToken(url("/api/sessions"), { method: "POST" }),
     );
-    expect(allowed.status).toBe(201);
+    expect(allowed.status).toBe(200);
     await allowed.body?.cancel();
 
     const wrong = await exports.default.fetch(

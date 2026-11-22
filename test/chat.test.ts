@@ -411,17 +411,20 @@ describe("chat application", () => {
     reopenedSocket.close(1000, "test complete");
   });
 
-  it("creates an opaque session URL", async () => {
+  it("always returns the owner's one session", async () => {
     const response = await exports.default.fetch(
       withSpikeToken("https://example.com/api/sessions", {
         method: "POST",
       }),
     );
 
-    expect(response.status).toBe(201);
-    const result = await response.json<{ sessionId: string; url: string }>();
-    expect(result.sessionId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(result.url).toBe(`/sessions/${result.sessionId}`);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ sessionId: "jerome", url: "/sessions/jerome" });
+
+    const again = await exports.default.fetch(
+      withSpikeToken("https://example.com/api/sessions", { method: "POST" }),
+    );
+    expect(await again.json()).toEqual({ sessionId: "jerome", url: "/sessions/jerome" });
   });
 
   it("opens a session WebSocket with the root conversation", async () => {

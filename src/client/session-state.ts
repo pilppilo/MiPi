@@ -1,5 +1,5 @@
-import type { JsonValue } from "@earendil-works/chord/json";
-import type { AssistantMessage, Message, NestedToolCalls } from "@earendil-works/pi-ai";
+import type { JsonValue } from "../agent/pi/shared.ts";
+import type { AssistantMessage, Message, NestedToolCalls } from "../agent/pi/shared.ts";
 import type {
   AgentState,
   CompactionReason,
@@ -12,8 +12,8 @@ import type {
   TranscriptItem,
   TranscriptView,
   UsageState,
-} from "@earendil-works/pi-durable";
-import { CompactionEntry, ResetEntry, ToolResultEntry } from "@earendil-works/pi-durable";
+} from "../agent/pi/shared.ts";
+import { CompactionEntry, ResetEntry, ToolResultEntry } from "../agent/pi/shared.ts";
 import {
   ROOT_CONVERSATION_ID,
   parseScheduledInstruction,

@@ -1,6 +1,36 @@
 /**
- * The Pi Durable seam. Server code imports Pi Durable from here, never from `@earendil-works/pi-durable` directly,
- * so a breaking upgrade is fixed in `src/agent/pi/` only. For now this re-exports the package as-is; M2a narrows it
- * to MiPi's own interface and adds the lint rule that enforces it.
+ * The Pi Durable seam for server code. Everything MiPi's server uses from `@earendil-works/pi-durable` is named here,
+ * so a breaking upgrade (a rename, a moved export, a changed shape) fails to compile in this folder first and is fixed
+ * here. The lint rule in `.oxlintrc.json` keeps other folders from importing the package directly; the contract test
+ * (`test/contract.test.ts`) calls each value once.
+ *
+ * Adding a name: export it here, then use it through this file.
  */
-export * from "@earendil-works/pi-durable";
+export {
+  AssistantEntry,
+  configure,
+  createRegistry,
+  defineDoc,
+  defineDocFamily,
+  defineExtension,
+  defineTask,
+  Harness,
+  section,
+  UserEntry,
+} from "@earendil-works/pi-durable";
+
+export type {
+  Conversation,
+  ConversationId,
+  ConversationRecord,
+  ConversationView,
+  Cursor,
+  EntryId,
+  EntryRecord,
+  HarnessOptions,
+  TaskGraph,
+  ToolExecutionApi,
+  ToolRegistration,
+  Wake,
+  WatchHandle,
+} from "@earendil-works/pi-durable";

@@ -1,4 +1,4 @@
-import { type SubmitEvent, useState } from "react";
+import { type SubmitEvent, useEffect, useState } from "react";
 import { ChatSession } from "./ChatSession.tsx";
 import { loadUsername, MAX_USERNAME_CHARACTERS, saveUsername } from "./identity.ts";
 
@@ -29,23 +29,34 @@ function LandingPage() {
   const [error, setError] = useState<string>();
   const [username, setUsername] = useState(() => loadUsername() ?? "");
 
-  const createSession = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
+  const openSession = async (name: string): Promise<void> => {
     setCreating(true);
     setError(undefined);
     try {
-      saveUsername(username);
+      saveUsername(name);
+      // There is one session per owner: this returns the same address every time.
       const response = await fetch("/api/sessions", { method: "POST" });
-      if (!response.ok) throw new Error(`Session creation failed (${response.status})`);
+      if (!response.ok) throw new Error(`Opening MiPi failed (${response.status})`);
       const result = (await response.json()) as { readonly url?: unknown };
       if (typeof result.url !== "string")
         throw new Error("The server returned an invalid session URL");
       window.location.assign(result.url);
     } catch (error) {
       setCreating(false);
-      setError(error instanceof Error ? error.message : "Session creation failed");
+      setError(error instanceof Error ? error.message : "Opening MiPi failed");
     }
   };
+
+  const createSession = (event: SubmitEvent<HTMLFormElement>): void => {
+    event.preventDefault();
+    void openSession(username);
+  };
+
+  // A returning visitor goes straight back to the one session.
+  useEffect(() => {
+    const saved = loadUsername();
+    if (saved !== undefined) void openSession(saved);
+  }, []);
 
   return (
     <main>
@@ -54,8 +65,8 @@ function LandingPage() {
         <p>Your always-on personal agent.</p>
       </header>
       <section aria-labelledby="create-session-heading">
-        <h2 id="create-session-heading">Start a session</h2>
-        <p>Create an isolated durable session, send messages, and fork its transcript.</p>
+        <h2 id="create-session-heading">Open MiPi</h2>
+        <p>Choose the name your messages are shown with.</p>
         <form onSubmit={createSession}>
           <p>
             <label htmlFor="username">Display name</label>{" "}
@@ -70,7 +81,7 @@ function LandingPage() {
             />
           </p>
           <button type="submit" disabled={creating}>
-            {creating ? "Creating session…" : "Create session"}
+            {creating ? "Opening…" : "Open"}
           </button>
         </form>
         {error === undefined ? null : <p role="alert">{error}</p>}
