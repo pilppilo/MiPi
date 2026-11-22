@@ -280,6 +280,31 @@ body:has(.session-workspace) {
   overflow-wrap: anywhere;
 }
 
+.runtime-tools {
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+
+.runtime-tools dd + dt {
+  margin-inline-start: 0.5rem;
+}
+
+.runtime-information select {
+  font: inherit;
+  max-inline-size: 16rem;
+}
+
+.system-toggle {
+  display: inline-block;
+  margin-block-start: 0.25rem;
+  font-size: 0.875em;
+}
+
+.product-link {
+  color: inherit;
+  text-decoration: none;
+}
+
 .transcript {
   --transcript-entry-gap: 0.875rem;
 

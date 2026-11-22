@@ -8,6 +8,9 @@ export { MipiAgent } from "../agent/agent-do.ts";
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
   Response.json(body, { status, headers });
 
+/** The one agent: every door, alarm and admin call goes to the owner's Durable Object. */
+const ownerAgent = (env: Env) => env.AGENT.getByName(env.MIPI_OWNER);
+
 const sessionSocketRoute = /^\/api\/sessions\/([^/]+)\/?$/;
 
 export default {
@@ -43,15 +46,15 @@ export default {
     if (url.pathname === "/api/spike/probe") {
       if (request.method !== "GET")
         return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
-      // Plan facts are per account, so any object will do.
-      return json(await env.AGENT.getByName("spike-probe").spikeProbe(), 200);
+      // Plan facts are per account; the owner's object answers like any other.
+      return json(await ownerAgent(env).spikeProbe(), 200);
     }
 
     if (url.pathname === "/api/sessions" || url.pathname === "/api/sessions/") {
       if (request.method !== "POST") {
         return json({ error: "Method not allowed" }, 405, { Allow: "POST" });
       }
-      // One session per owner (pulled forward from M3): every visit opens the same Durable Object.
+      // One session per owner: every visit opens the same Durable Object.
       const sessionId = encodeURIComponent(env.MIPI_OWNER);
       return json({ sessionId, url: `/sessions/${sessionId}` }, 200);
     }
@@ -64,7 +67,11 @@ export default {
       if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return json({ error: "WebSocket upgrade required" }, 426, { Upgrade: "websocket" });
       }
-      return env.AGENT.getByName(sessionMatch[1]).fetch(request);
+      // Only the owner's session exists; any other id is not found, and never creates an object.
+      if (sessionMatch[1] !== encodeURIComponent(env.MIPI_OWNER)) {
+        return json({ error: "Not found" }, 404);
+      }
+      return ownerAgent(env).fetch(request);
     }
 
     return json({ error: "Not found" }, 404);

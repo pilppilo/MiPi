@@ -103,7 +103,29 @@ export interface ConversationSummary {
   readonly owner?: {
     readonly conversationId: number;
   };
+  /** From the first message; unset before it. */
+  readonly title?: string;
+  /** The tool profile the conversation runs with. */
+  readonly profile?: string;
 }
+
+/** A model or tool profile a conversation can switch to. */
+export interface Choice {
+  readonly id: string;
+  readonly name: string;
+}
+
+/** What the pickers offer: `options.list`'s result. */
+export interface Options {
+  readonly models: readonly Choice[];
+  readonly profiles: readonly Choice[];
+  /** The model a conversation without its own runs on (`MIPI_MODEL`). */
+  readonly defaultModel: string;
+  /** Set when the live model list couldn't be read: the model picker is then unavailable. */
+  readonly modelsError?: string;
+}
+
+export const MAX_CHOICE_ID_CHARACTERS = 128;
 
 export type ClientCommand =
   | {
@@ -141,6 +163,19 @@ export type ClientCommand =
       readonly requestId: string;
       readonly conversationId: number;
       readonly content: string;
+    }
+  | {
+      /** The models and tool profiles a conversation can switch to. */
+      readonly type: "options.list";
+      readonly requestId: string;
+    }
+  | {
+      /** Switches a conversation's model, tool profile, or both, from its next request. */
+      readonly type: "conversation.configure";
+      readonly requestId: string;
+      readonly conversationId: number;
+      readonly model?: string;
+      readonly profile?: string;
     };
 export type ClientCommandType = Exclude<ClientCommand["type"], "presence.typing">;
 
@@ -154,6 +189,8 @@ export type CommandResult =
       readonly submissionId?: number;
       /** For `conversation.entries`. */
       readonly page?: { readonly items: readonly EntryRecord[]; readonly next?: Cursor };
+      /** For `options.list`. */
+      readonly options?: Options;
     }
   | {
       readonly type: "command.result";
@@ -241,12 +278,46 @@ const optionalCommandId = (value: unknown, name: string): number | undefined => 
   return value;
 };
 
+const optionalChoiceId = (value: unknown, name: string): string | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_CHOICE_ID_CHARACTERS) {
+    throw new InvalidClientCommand(
+      `${name} must be a non-empty string of at most ${MAX_CHOICE_ID_CHARACTERS} characters`,
+    );
+  }
+  return value;
+};
+
+const parseChoices = (value: unknown, name: string): Choice[] => {
+  if (!Array.isArray(value)) throw new Error(`${name} is invalid`);
+  return value.map((item) => {
+    if (!isRecord(item) || typeof item.id !== "string" || typeof item.name !== "string") {
+      throw new Error(`${name} is invalid`);
+    }
+    return { id: item.id, name: item.name };
+  });
+};
+
+const parseOptions = (value: unknown): Options => {
+  if (!isRecord(value) || typeof value.defaultModel !== "string") {
+    throw new Error("Options are invalid");
+  }
+  return {
+    models: parseChoices(value.models, "options.models"),
+    profiles: parseChoices(value.profiles, "options.profiles"),
+    defaultModel: value.defaultModel,
+    ...(typeof value.modelsError === "string" ? { modelsError: value.modelsError } : {}),
+  };
+};
+
 const commandTypes = new Set<ClientCommandType>([
   "conversation.open",
   "conversation.entries",
   "conversation.create",
   "conversation.fork",
   "prompt.submit",
+  "options.list",
+  "conversation.configure",
 ]);
 
 const requireCommandType = (value: unknown): ClientCommandType => {
@@ -377,6 +448,8 @@ const parseConversationSummary = (value: unknown): ConversationSummary => {
       conversationId: requireId(value.owner.conversationId, "conversation.owner.conversationId"),
     };
   }
+  if (typeof value.title === "string") summary.title = value.title;
+  if (typeof value.profile === "string") summary.profile = value.profile;
   return summary;
 };
 
@@ -431,6 +504,22 @@ export function parseClientCommand(message: string): ClientCommand {
         requestId,
         conversationId: requireId(value.conversationId, "conversationId"),
         content: value.content,
+      };
+    }
+    case "options.list":
+      return { type: value.type, requestId };
+    case "conversation.configure": {
+      const model = optionalChoiceId(value.model, "model");
+      const profile = optionalChoiceId(value.profile, "profile");
+      if (model === undefined && profile === undefined) {
+        throw new InvalidClientCommand("conversation.configure needs a model or a profile");
+      }
+      return {
+        type: value.type,
+        requestId,
+        conversationId: requireId(value.conversationId, "conversationId"),
+        ...(model === undefined ? {} : { model }),
+        ...(profile === undefined ? {} : { profile }),
       };
     }
     case "conversation.entries": {
@@ -546,6 +635,7 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
           ...(value.page === undefined
             ? {}
             : { page: value.page as unknown as { items: EntryRecord[]; next?: Cursor } }),
+          ...(value.options === undefined ? {} : { options: parseOptions(value.options) }),
         };
       }
       if (value.ok === false) {

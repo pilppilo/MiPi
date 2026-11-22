@@ -13,6 +13,8 @@ The build plan and milestones live in Linear (project **MiPi**). This README cov
 | `src/worker/`                    | The Worker: routing (and, from later milestones, auth)                                                                                                       |
 | `src/agent/agent-do.ts`          | The Durable Object (`MipiAgent`): opens the harness, alarms, WebSockets                                                                                      |
 | `src/agent/harness.ts`           | Agent composition: model, tools, prompt sections                                                                                                             |
+| `src/agent/profiles.ts`          | Tool profiles (`default`, `empty`, `pidu`) and `toolsFor()`, the only place tools are offered                                                                |
+| `src/agent/conversations.ts`     | Per-conversation profile and title, and channel bindings (which conversation a door talks to)                                                                |
 | `src/agent/pi/`                  | The only code that imports `@earendil-works/*` (lint-enforced): `durable.ts` for the server, `shared.ts` for the browser, `storage.ts` for the upgrade guard |
 | `src/tools/`                     | Tools (`schedule`, `search_history`)                                                                                                                         |
 | `src/lib/`                       | Small helpers with no Pi imports                                                                                                                             |

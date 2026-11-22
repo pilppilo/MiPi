@@ -44,6 +44,36 @@ function render(
 }
 
 describe("transcript rendering", () => {
+  it("hides system entries when asked, and shows them otherwise", () => {
+    const system: TranscriptEntry = {
+      id: 1,
+      conversationId: 1,
+      kind: "pi.system",
+      role: "system",
+      text: "You are MiPi, a concise personal assistant.",
+      canFork: false,
+    };
+    const reply: TranscriptEntry = {
+      ...system,
+      id: 2,
+      kind: "pi.assistant",
+      role: "assistant",
+      text: "Hi",
+    };
+    const markup = (hideSystem: boolean) =>
+      renderToStaticMarkup(
+        createElement(TranscriptList, {
+          entries: [system, reply],
+          tools: [],
+          runActive: false,
+          hideSystem,
+        }),
+      );
+    expect(markup(true)).not.toContain("concise personal assistant");
+    expect(markup(true)).toContain("Hi");
+    expect(markup(false)).toContain("concise personal assistant");
+  });
+
   it("keeps the fork action inside the entry header", () => {
     const userEntry: TranscriptEntry = {
       id: 1,

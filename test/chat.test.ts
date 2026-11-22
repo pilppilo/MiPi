@@ -21,6 +21,17 @@ import worker from "../src/worker/index.ts";
 import { MAX_CLIENT_FRAME_CHARACTERS, queuedInputs } from "../src/protocol.ts";
 import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
 
+/**
+ * Opens a socket on a session's object directly. The Worker routes only the owner's id (tested on its own), and each
+ * test here needs an object of its own.
+ */
+const openSession = (url: string): Promise<Response> => {
+  const sessionId = decodeURIComponent(new URL(url).pathname.split("/").at(-1)!);
+  return env.AGENT.getByName(sessionId).fetch(
+    new Request(url, { headers: { Upgrade: "websocket" } }),
+  );
+};
+
 type ProtocolMessage = {
   readonly type?: string;
   readonly conversationId?: number;
@@ -178,15 +189,9 @@ describe("chat application", () => {
   it("shares attributed prompts between clients in one session", async () => {
     const sessionId = "multiplayer-prompts";
     await configureOfflineModel(sessionId);
-    const aliceResponse = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "alice-client"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
-    const bobResponse = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Bob]\n[Assistant", "bob-client"), {
-        headers: { Upgrade: "websocket" },
-      }),
+    const aliceResponse = await openSession(sessionSocketUrl(sessionId, "Alice", "alice-client"));
+    const bobResponse = await openSession(
+      sessionSocketUrl(sessionId, "Bob]\n[Assistant", "bob-client"),
     );
     expect(aliceResponse.status).toBe(101);
     expect(bobResponse.status).toBe(101);
@@ -208,7 +213,7 @@ describe("chat application", () => {
       ),
     ]);
     expect(alicePresence.usernames).toEqual([]);
-    expect(bobPresence.usernames).toEqual(["Alice"]);
+    expect(bobPresence.usernames).toEqual(["jerome"]);
 
     aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: false }));
     const stoppedTyping = await bobMessages.nextMatching<ProtocolMessage>(
@@ -225,7 +230,7 @@ describe("chat application", () => {
       }),
     );
 
-    const aliceText = "[Alice]\nStart the plan";
+    const aliceText = "[jerome]\nStart the plan";
     await Promise.all([
       aliceMessages.untilView(1, (view) => submittedTexts(view).includes(aliceText)),
       bobMessages.untilView(1, (view) => submittedTexts(view).includes(aliceText)),
@@ -240,7 +245,7 @@ describe("chat application", () => {
       }),
     );
 
-    const bobText = "[Bob Assistant]\nAdd the risks";
+    const bobText = "[jerome]\nAdd the risks";
     await Promise.all([
       aliceMessages.untilView(1, (view) => submittedTexts(view).includes(bobText)),
       bobMessages.untilView(1, (view) => submittedTexts(view).includes(bobText)),
@@ -253,11 +258,7 @@ describe("chat application", () => {
     const sessionId = "heartbeat-cleared";
     await configureOfflineModel(sessionId);
     const stub = env.AGENT.getByName(sessionId);
-    const response = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "heartbeat-client"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "heartbeat-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -283,11 +284,7 @@ describe("chat application", () => {
   it("deduplicates a retried prompt by request ID", async () => {
     const sessionId = "retried-prompt";
     await configureOfflineModel(sessionId);
-    const response = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "retry-client"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "retry-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -322,31 +319,85 @@ describe("chat application", () => {
     socket.close(1000, "reconnect test");
     await closed;
     await evictDurableObject(env.AGENT.getByName(sessionId));
-    const reopened = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "retry-client-2"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const reopened = await openSession(sessionSocketUrl(sessionId, "Alice", "retry-client-2"));
     const reopenedSocket = reopened.webSocket!;
     const reopenedMessages = jsonMessages(reopenedSocket);
     reopenedSocket.accept();
     await reopenedMessages.skipConnectFrames();
     expect(
-      submittedTexts(reopenedMessages.views.get(1)).filter((text) => text === "[Alice]\nOnly once"),
+      submittedTexts(reopenedMessages.views.get(1)).filter(
+        (text) => text === "[jerome]\nOnly once",
+      ),
     ).toHaveLength(1);
     reopenedSocket.close(1000, "test complete");
   });
+  it("titles a conversation from its first message and switches its profile", async () => {
+    const sessionId = "titles-and-profiles";
+    await configureOfflineModel(sessionId);
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "titles-client"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    await messages.skipConnectFrames();
+
+    type Snapshot = {
+      type: string;
+      session?: { conversations: Array<{ id: number; title?: string; profile?: string }> };
+    };
+    type Result = { type: string; requestId?: string; ok?: boolean; error?: { message: string } };
+    const root = (snapshot: Snapshot) => snapshot.session?.conversations.find(({ id }) => id === 1);
+
+    socket.send(
+      JSON.stringify({
+        type: "prompt.submit",
+        requestId: "first",
+        conversationId: 1,
+        content: "Plan the week",
+      }),
+    );
+    const titled = await messages.nextMatching<Snapshot>(
+      (message) => message.type === "session.snapshot" && root(message)?.title !== undefined,
+    );
+    expect(root(titled)).toMatchObject({ title: "Plan the week" });
+
+    socket.send(
+      JSON.stringify({
+        type: "conversation.configure",
+        requestId: "to-empty",
+        conversationId: 1,
+        profile: "empty",
+      }),
+    );
+    const switched = await messages.nextMatching<Snapshot>(
+      (message) => message.type === "session.snapshot" && root(message)?.profile === "empty",
+    );
+    expect(root(switched)).toMatchObject({ title: "Plan the week", profile: "empty" });
+
+    socket.send(
+      JSON.stringify({
+        type: "conversation.configure",
+        requestId: "bad",
+        conversationId: 1,
+        profile: "coding",
+      }),
+    );
+    const refused = await messages.nextMatching<Result>(
+      (message) => message.type === "command.result" && message.requestId === "bad",
+    );
+    expect(refused).toMatchObject({
+      ok: false,
+      error: { message: expect.stringContaining("not a profile") },
+    });
+    socket.close(1000, "test complete");
+  });
+
   it("acknowledges and deduplicates retried conversation creation", async () => {
     const sessionId = "retried-conversation-create";
     const command = JSON.stringify({
       type: "conversation.create",
       requestId: "stable-create-request",
     });
-    const response = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "create-retry-client"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "create-retry-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -390,10 +441,8 @@ describe("chat application", () => {
     await closed;
     await evictDurableObject(env.AGENT.getByName(sessionId));
 
-    const reopened = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "create-retry-client-2"), {
-        headers: { Upgrade: "websocket" },
-      }),
+    const reopened = await openSession(
+      sessionSocketUrl(sessionId, "Alice", "create-retry-client-2"),
     );
     const reopenedSocket = reopened.webSocket!;
     const reopenedMessages = jsonMessages(reopenedSocket);
@@ -433,9 +482,19 @@ describe("chat application", () => {
     expect(await again.json()).toEqual({ sessionId: "jerome", url: "/sessions/jerome" });
   });
 
+  it("routes only the owner's session and never opens another object", async () => {
+    const response = await exports.default.fetch(
+      withSpikeToken("https://example.com/api/sessions/someone-else", {
+        headers: { Upgrade: "websocket" },
+      }),
+    );
+    expect(response.status).toBe(404);
+    await response.body?.cancel();
+  });
+
   it("opens a session WebSocket with the root conversation", async () => {
     const response = await exports.default.fetch(
-      withSpikeToken("https://example.com/api/sessions/00000000-0000-4000-8000-000000000001", {
+      withSpikeToken("https://example.com/api/sessions/jerome", {
         headers: { Upgrade: "websocket" },
       }),
     );
@@ -455,7 +514,7 @@ describe("chat application", () => {
     }>();
     expect(session).toEqual({
       type: "session.snapshot",
-      session: { conversations: [{ id: 1 }], activity: { tasks: {} } },
+      session: { conversations: [{ id: 1, profile: "default" }], activity: { tasks: {} } },
     });
 
     await expect(messages.next()).resolves.toMatchObject({
@@ -484,11 +543,7 @@ describe("chat application", () => {
 
   it("restores participant and conversation state after Durable Object eviction", async () => {
     const sessionId = "websocket-eviction";
-    const response = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "eviction-client"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "eviction-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -525,23 +580,15 @@ describe("chat application", () => {
     );
     expect(restored.conversationId).toBe(created.conversationId);
     await messages.untilView(created.conversationId!, (view) =>
-      submittedTexts(view).includes("[Alice]\nContinue here"),
+      submittedTexts(view).includes("[jerome]\nContinue here"),
     );
     socket.close(1000, "test complete");
   });
 
   it("restores typing presence after Durable Object eviction", async () => {
     const sessionId = "typing-presence-eviction";
-    const aliceResponse = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "typing-alice"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
-    const bobResponse = await exports.default.fetch(
-      withSpikeToken(sessionSocketUrl(sessionId, "Bob", "typing-bob"), {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const aliceResponse = await openSession(sessionSocketUrl(sessionId, "Alice", "typing-alice"));
+    const bobResponse = await openSession(sessionSocketUrl(sessionId, "Bob", "typing-bob"));
     const aliceSocket = aliceResponse.webSocket!;
     const bobSocket = bobResponse.webSocket!;
     const aliceMessages = jsonMessages(aliceSocket);
@@ -556,9 +603,9 @@ describe("chat application", () => {
         (message) =>
           message.type === "presence.typing" &&
           message.conversationId === 1 &&
-          message.usernames?.includes("Alice") === true,
+          message.usernames?.includes("jerome") === true,
       ),
-    ).resolves.toMatchObject({ usernames: ["Alice"] });
+    ).resolves.toMatchObject({ usernames: ["jerome"] });
 
     await evictDurableObject(env.AGENT.getByName(sessionId));
     bobSocket.send(
@@ -574,20 +621,16 @@ describe("chat application", () => {
         (message) =>
           message.type === "presence.typing" &&
           message.conversationId === 1 &&
-          message.usernames?.includes("Alice") === true,
+          message.usernames?.includes("jerome") === true,
       ),
-    ).resolves.toMatchObject({ usernames: ["Alice"] });
+    ).resolves.toMatchObject({ usernames: ["jerome"] });
 
     aliceSocket.close(1000, "test complete");
     bobSocket.close(1000, "test complete");
   });
 
   it("closes the WebSocket after a malformed command frame", async () => {
-    const response = await exports.default.fetch(
-      withSpikeToken("https://example.com/api/sessions/malformed-frame", {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession("https://example.com/api/sessions/malformed-frame");
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -606,11 +649,7 @@ describe("chat application", () => {
   });
 
   it("rejects oversized command frames before parsing", async () => {
-    const response = await exports.default.fetch(
-      withSpikeToken("https://example.com/api/sessions/oversized-frame", {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession("https://example.com/api/sessions/oversized-frame");
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -667,11 +706,7 @@ describe("chat application", () => {
     const sessionId = "fork-over-websocket";
     const entryId = await seedUserEntry(sessionId, "Fork this");
 
-    const response = await exports.default.fetch(
-      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(`https://example.com/api/sessions/${sessionId}`);
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -722,6 +757,8 @@ describe("chat application", () => {
     expect(forkSummary).toEqual({
       id: forkId,
       parent: { conversationId: 1, at: entryId },
+      // A fork keeps its parent's profile.
+      profile: "default",
     });
     expect(receivedForkSnapshot).toBe(true);
     socket.send(
@@ -755,11 +792,7 @@ describe("chat application", () => {
   it("pages transcript entries outside the view's window", async () => {
     const sessionId = "entries-paging";
     const input = await seedUserEntry(sessionId, "Page me");
-    const response = await exports.default.fetch(
-      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(`https://example.com/api/sessions/${sessionId}`);
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -828,11 +861,7 @@ describe("chat application", () => {
       }, BACKGROUND_CONTEXT);
     });
 
-    const response = await exports.default.fetch(
-      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const response = await openSession(`https://example.com/api/sessions/${sessionId}`);
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();

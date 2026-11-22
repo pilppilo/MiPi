@@ -1,5 +1,5 @@
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
-import { env, exports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels, fauxProvider, type FauxResponseStep } from "@earendil-works/pi-ai";
 import {
@@ -13,9 +13,19 @@ import {
 } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
-import { withSpikeToken } from "./spike.ts";
 import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
 import { expectAlarm } from "./alarm.ts";
+
+/**
+ * Opens a socket on a session's object directly. The Worker routes only the owner's id (tested on its own), and each
+ * test here needs an object of its own.
+ */
+const openSession = (url: string): Promise<Response> => {
+  const sessionId = decodeURIComponent(new URL(url).pathname.split("/").at(-1)!);
+  return env.AGENT.getByName(sessionId).fetch(
+    new Request(url, { headers: { Upgrade: "websocket" } }),
+  );
+};
 
 const context = BACKGROUND_CONTEXT;
 
@@ -103,11 +113,7 @@ describe("session recovery", () => {
     await evictDurableObject(stub);
 
     let status: string | undefined;
-    const wake = await exports.default.fetch(
-      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
-        headers: { Upgrade: "websocket" },
-      }),
-    );
+    const wake = await openSession(`https://example.com/api/sessions/${sessionId}`);
     expect(wake.status).toBe(101);
     wake.webSocket!.accept();
     wake.webSocket!.close(1000, "test setup complete");

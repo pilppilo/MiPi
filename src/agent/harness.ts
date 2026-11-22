@@ -14,9 +14,10 @@ import {
   MODEL_PROVIDER,
   type ReadEnv,
 } from "./pi/models.ts";
+import { ConversationMeta } from "./conversations.ts";
+import { DEFAULT_PROFILE, type ProfileName, profileTools, toolsFor } from "./profiles.ts";
 import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
-import { conversationSearchExtension, searchHistoryTool } from "../tools/search.ts";
-import { scheduleTool } from "../tools/schedule.ts";
+import { conversationSearchExtension } from "../tools/search.ts";
 
 /** MiPi's own durable task definitions, for the startup guard's version check. */
 export const APP_TASKS = [DeliverScheduledInstruction] as const;
@@ -28,6 +29,8 @@ export interface HarnessConfig {
   readonly readEnv?: ReadEnv;
   /** The owner's IANA time zone for message stamps (`MIPI_TIMEZONE`). */
   readonly timeZone?: string;
+  /** The tool profile new top-level conversations start on (`MIPI_PROFILE`). Default: `default`. */
+  readonly profile?: ProfileName;
   /** Tests only: other model access and default model. */
   readonly models?: HarnessOptions["models"];
   readonly model?: { readonly provider: string; readonly modelId: string };
@@ -47,7 +50,8 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
   const chatExtension = defineExtension({
     name: "chat",
     tasks: [DeliverScheduledInstruction],
-    tools: [scheduleTool, searchHistoryTool],
+    // Registration only: what a conversation is offered comes from its profile (`toolsFor`).
+    tools: profileTools(),
     sections: [
       // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
       // The time comes with each message instead (`stamp.ts`).
@@ -60,6 +64,7 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
       ),
     ],
   });
+  const profile = config.profile ?? DEFAULT_PROFILE;
   const registry = createRegistry();
   registry.install(chatExtension);
   registry.install(conversationSearchExtension);
@@ -70,7 +75,7 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
     },
     // The default model has no `off` level; `low` is its lightest.
     thinkingLevel: "low" as const,
-    tools: [scheduleTool, searchHistoryTool],
+    tools: toolsFor(profile),
   };
 
   return {
@@ -81,9 +86,12 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
       compaction: compactionSettings(goModels()),
       stream: { cacheRetention: CACHE_RETENTION },
     },
-    conversationCreated: (tx, conversation) =>
-      conversation.owner === undefined && conversation.parent === undefined
-        ? configure(tx, conversation.id, defaultAgent)
-        : undefined,
+    // New top-level conversations start on the configured profile; a channel binding may switch it in the same commit.
+    // Forks keep their parent's agent and profile, and subagents are configured by the tool that creates them.
+    conversationCreated: async (tx, conversation) => {
+      if (conversation.owner !== undefined || conversation.parent !== undefined) return;
+      await configure(tx, conversation.id, defaultAgent);
+      (await tx.doc(ConversationMeta, conversation.id)).profile = profile;
+    },
   };
 }
