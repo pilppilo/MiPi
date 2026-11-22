@@ -10,7 +10,7 @@ The build plan and milestones live in Linear (project **MiPi**). This README cov
 
 | Path                             | What it is                                                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/worker/`                    | The Worker: routing and authentication                                                                                                       |
+| `src/worker/`                    | The Worker: routing and authentication                                                                                                                       |
 | `src/agent/agent-do.ts`          | The Durable Object (`MipiAgent`): opens the harness, alarms, WebSockets                                                                                      |
 | `src/agent/harness.ts`           | Agent composition: model, tools, prompt sections                                                                                                             |
 | `src/agent/profiles.ts`          | Tool profiles (`default`, `empty`, `pidu`) and `toolsFor()`, the only place tools are offered                                                                |
