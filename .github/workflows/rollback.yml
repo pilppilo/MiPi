@@ -54,10 +54,12 @@ jobs:
           name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
           url="https://$name.$subdomain.workers.dev"
           echo "WORKER_URL=$url" >> "$GITHUB_ENV"
+          # /api/health answers 200 to any token, with the version only for the right one. `|| true` keeps a failed
+          # request (5xx, no answer) from ending the step under `set -e` before the next token is tried.
           deployed=""
           for token in "$ADMIN_TOKEN" "$ADMIN_TOKEN_PREVIOUS"; do
             [ -n "$token" ] || continue
-            deployed="$(curl -fsS -H "Authorization: Bearer $token" "$url/api/health" | jq -r '.version // empty')"
+            deployed="$(curl -fsS -H "Authorization: Bearer $token" "$url/api/health" | jq -r '.version // empty' || true)"
             [ -n "$deployed" ] && break
           done
           if [ -z "$deployed" ]; then
