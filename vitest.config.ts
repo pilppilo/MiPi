@@ -7,7 +7,9 @@ export default defineConfig({
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
-      miniflare: { bindings: { OPENCODE_API_KEY: "test-opencode-key" } },
+      miniflare: {
+        bindings: { OPENCODE_API_KEY: "test-opencode-key", MIPI_SPIKE_TOKEN: "test-spike-token" },
+      },
     }),
   ],
 });

@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
+import { withSpikeToken } from "./spike.ts";
 import { createHarnessOptions } from "../src/agent/harness.ts";
 import { expectAlarm } from "./alarm.ts";
 import worker from "../src/worker/index.ts";
@@ -172,12 +173,14 @@ describe("chat application", () => {
     const sessionId = "multiplayer-prompts";
     await configureOfflineModel(sessionId);
     const aliceResponse = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "alice-client"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "alice-client"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const bobResponse = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Bob]\n[Assistant", "bob-client"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Bob]\n[Assistant", "bob-client"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     expect(aliceResponse.status).toBe(101);
     expect(bobResponse.status).toBe(101);
@@ -245,8 +248,9 @@ describe("chat application", () => {
     await configureOfflineModel(sessionId);
     const stub = env.AGENT.getByName(sessionId);
     const response = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "heartbeat-client"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "heartbeat-client"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -274,8 +278,9 @@ describe("chat application", () => {
     const sessionId = "retried-prompt";
     await configureOfflineModel(sessionId);
     const response = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "retry-client"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "retry-client"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -312,8 +317,9 @@ describe("chat application", () => {
     await closed;
     await evictDurableObject(env.AGENT.getByName(sessionId));
     const reopened = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "retry-client-2"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "retry-client-2"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const reopenedSocket = reopened.webSocket!;
     const reopenedMessages = jsonMessages(reopenedSocket);
@@ -331,8 +337,9 @@ describe("chat application", () => {
       requestId: "stable-create-request",
     });
     const response = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "create-retry-client"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "create-retry-client"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -378,8 +385,9 @@ describe("chat application", () => {
     await evictDurableObject(env.AGENT.getByName(sessionId));
 
     const reopened = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "create-retry-client-2"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "create-retry-client-2"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const reopenedSocket = reopened.webSocket!;
     const reopenedMessages = jsonMessages(reopenedSocket);
@@ -404,9 +412,11 @@ describe("chat application", () => {
   });
 
   it("creates an opaque session URL", async () => {
-    const response = await exports.default.fetch("https://example.com/api/sessions", {
-      method: "POST",
-    });
+    const response = await exports.default.fetch(
+      withSpikeToken("https://example.com/api/sessions", {
+        method: "POST",
+      }),
+    );
 
     expect(response.status).toBe(201);
     const result = await response.json<{ sessionId: string; url: string }>();
@@ -416,8 +426,9 @@ describe("chat application", () => {
 
   it("opens a session WebSocket with the root conversation", async () => {
     const response = await exports.default.fetch(
-      "https://example.com/api/sessions/00000000-0000-4000-8000-000000000001",
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken("https://example.com/api/sessions/00000000-0000-4000-8000-000000000001", {
+        headers: { Upgrade: "websocket" },
+      }),
     );
 
     expect(response.status).toBe(101);
@@ -465,8 +476,9 @@ describe("chat application", () => {
   it("restores participant and conversation state after Durable Object eviction", async () => {
     const sessionId = "websocket-eviction";
     const response = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "eviction-client"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "eviction-client"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -512,12 +524,14 @@ describe("chat application", () => {
   it("restores typing presence after Durable Object eviction", async () => {
     const sessionId = "typing-presence-eviction";
     const aliceResponse = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Alice", "typing-alice"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Alice", "typing-alice"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const bobResponse = await exports.default.fetch(
-      sessionSocketUrl(sessionId, "Bob", "typing-bob"),
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken(sessionSocketUrl(sessionId, "Bob", "typing-bob"), {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const aliceSocket = aliceResponse.webSocket!;
     const bobSocket = bobResponse.webSocket!;
@@ -561,8 +575,9 @@ describe("chat application", () => {
 
   it("closes the WebSocket after a malformed command frame", async () => {
     const response = await exports.default.fetch(
-      "https://example.com/api/sessions/malformed-frame",
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken("https://example.com/api/sessions/malformed-frame", {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -583,8 +598,9 @@ describe("chat application", () => {
 
   it("rejects oversized command frames before parsing", async () => {
     const response = await exports.default.fetch(
-      "https://example.com/api/sessions/oversized-frame",
-      { headers: { Upgrade: "websocket" } },
+      withSpikeToken("https://example.com/api/sessions/oversized-frame", {
+        headers: { Upgrade: "websocket" },
+      }),
     );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -605,10 +621,12 @@ describe("chat application", () => {
 
   it("requires a GET WebSocket upgrade on session socket routes", async () => {
     const nonGetResponse = await worker.fetch(
-      new Request("https://example.com/api/sessions/non-get-upgrade", {
-        method: "POST",
-        headers: { Upgrade: "websocket" },
-      }),
+      withSpikeToken(
+        new Request("https://example.com/api/sessions/non-get-upgrade", {
+          method: "POST",
+          headers: { Upgrade: "websocket" },
+        }),
+      ),
       env,
     );
 
@@ -617,7 +635,7 @@ describe("chat application", () => {
     await nonGetResponse.body?.cancel();
 
     const nonUpgradeResponse = await worker.fetch(
-      new Request("https://example.com/api/sessions/non-upgrade"),
+      withSpikeToken(new Request("https://example.com/api/sessions/non-upgrade")),
       env,
     );
     expect(nonUpgradeResponse.status).toBe(426);
@@ -625,9 +643,11 @@ describe("chat application", () => {
     await nonUpgradeResponse.body?.cancel();
 
     const extraSegmentResponse = await worker.fetch(
-      new Request("https://example.com/api/sessions/opaque/extra", {
-        headers: { Upgrade: "websocket" },
-      }),
+      withSpikeToken(
+        new Request("https://example.com/api/sessions/opaque/extra", {
+          headers: { Upgrade: "websocket" },
+        }),
+      ),
       env,
     );
     expect(extraSegmentResponse.status).toBe(404);
@@ -638,9 +658,11 @@ describe("chat application", () => {
     const sessionId = "fork-over-websocket";
     const entryId = await seedUserEntry(sessionId, "Fork this");
 
-    const response = await exports.default.fetch(`https://example.com/api/sessions/${sessionId}`, {
-      headers: { Upgrade: "websocket" },
-    });
+    const response = await exports.default.fetch(
+      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
+        headers: { Upgrade: "websocket" },
+      }),
+    );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -724,9 +746,11 @@ describe("chat application", () => {
   it("pages transcript entries outside the view's window", async () => {
     const sessionId = "entries-paging";
     const input = await seedUserEntry(sessionId, "Page me");
-    const response = await exports.default.fetch(`https://example.com/api/sessions/${sessionId}`, {
-      headers: { Upgrade: "websocket" },
-    });
+    const response = await exports.default.fetch(
+      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
+        headers: { Upgrade: "websocket" },
+      }),
+    );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
@@ -795,9 +819,11 @@ describe("chat application", () => {
       }, BACKGROUND_CONTEXT);
     });
 
-    const response = await exports.default.fetch(`https://example.com/api/sessions/${sessionId}`, {
-      headers: { Upgrade: "websocket" },
-    });
+    const response = await exports.default.fetch(
+      withSpikeToken(`https://example.com/api/sessions/${sessionId}`, {
+        headers: { Upgrade: "websocket" },
+      }),
+    );
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
