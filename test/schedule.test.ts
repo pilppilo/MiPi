@@ -13,6 +13,7 @@ import {
   MemoryStorage,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it, vi } from "vitest";
+import { AgentSettings } from "../src/agent/settings.ts";
 import { DeliverScheduledInstruction, ScheduleDeliveries } from "../src/tools/schedule-task.ts";
 import { scheduleTool } from "../src/tools/schedule.ts";
 
@@ -76,6 +77,50 @@ describe("scheduled instructions", () => {
           expect.objectContaining({
             role: "toolResult",
             isError: true,
+          }),
+        ]),
+      );
+    } finally {
+      await harness.close(context);
+    }
+  });
+
+  it("stamps a one-off delivery in the owner's time zone as this agent recorded it", async () => {
+    const faux = fauxProvider();
+    faux.setResponses([fauxAssistantMessage([fauxText("Done.")])]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const registry = createRegistry();
+    registry.install(defineExtension({ name: "schedule", tasks: [DeliverScheduledInstruction] }));
+    const harness = await Harness.open(new MemoryStorage(), { models, registry }, context);
+    try {
+      const root = await harness.root(context);
+      await root.configure({ model: { provider: "faux", modelId: "faux-1" }, tools: [] }, context);
+      await harness.commit(async (tx) => {
+        (await tx.doc(AgentSettings)).timeZone = "Europe/Helsinki";
+      }, context);
+      const delivery = await root.commit(
+        (tx) =>
+          tx.createTask(
+            DeliverScheduledInstruction,
+            {
+              id: "schedule:tz",
+              conversationId: root.id,
+              instruction: "Stretch",
+              runAt: Date.now() - 1,
+            },
+            { ownership: { kind: "conversation" }, background: true },
+          ),
+        context,
+      );
+      await harness.waitForTask(delivery, context);
+      expect((await root.context(context)).messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "user",
+            content: expect.stringMatching(
+              /^Scheduled instruction due now \(.+ GMT\+[23]\): Stretch$/,
+            ),
           }),
         ]),
       );

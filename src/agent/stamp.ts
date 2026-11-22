@@ -8,15 +8,12 @@
 
 export const DEFAULT_TIME_ZONE = "America/Chicago";
 
-let agentTimeZone = DEFAULT_TIME_ZONE;
-
-/** Sets the owner's time zone (`MIPI_TIMEZONE`) for stamps made without one. Invalid zones are ignored. */
-export function setAgentTimeZone(timeZone: string | undefined): void {
-  if (timeZone !== undefined && isTimeZone(timeZone)) agentTimeZone = timeZone;
-}
-
-export function agentTimeZoneName(): string {
-  return agentTimeZone;
+/**
+ * The owner's time zone (`MIPI_TIMEZONE`) for one agent. Passed explicitly, never kept in module state, so two agents
+ * or two tests can't change each other's stamps. Invalid or missing zones fall back to `DEFAULT_TIME_ZONE`.
+ */
+export function ownerTimeZone(timeZone: string | undefined): string {
+  return timeZone !== undefined && isTimeZone(timeZone) ? timeZone : DEFAULT_TIME_ZONE;
 }
 
 function isTimeZone(timeZone: string): boolean {
@@ -28,10 +25,10 @@ function isTimeZone(timeZone: string): boolean {
   }
 }
 
-/** `Sun, Nov 22, 2026, 12:40 CST`: minute precision, with the zone, in the owner's time zone by default. */
-export function localTime(at: number, timeZone: string = agentTimeZone): string {
+/** `Sun, Nov 22, 2026, 12:40 CST`: minute precision, with the zone. An invalid zone falls back to the default. */
+export function localTime(at: number, timeZone: string | undefined): string {
   return new Intl.DateTimeFormat("en-US", {
-    timeZone: isTimeZone(timeZone) ? timeZone : agentTimeZone,
+    timeZone: ownerTimeZone(timeZone),
     weekday: "short",
     year: "numeric",
     month: "short",
@@ -45,8 +42,13 @@ export function localTime(at: number, timeZone: string = agentTimeZone): string 
 
 /** A user message as the model sees it: `[speaker · local time]` on the first line, then the text. */
 // pi-ledger L3: the time travels with each message, not in the system prompt.
-export function stampInput(speaker: string, content: string, at: number = Date.now()): string {
-  return `[${speaker} · ${localTime(at)}]\n${content}`;
+export function stampInput(
+  speaker: string,
+  content: string,
+  timeZone: string | undefined,
+  at: number = Date.now(),
+): string {
+  return `[${speaker} · ${localTime(at, timeZone)}]\n${content}`;
 }
 
 /** The system-prompt line that tells the model how to read stamps. Static, so the prompt prefix never changes. */

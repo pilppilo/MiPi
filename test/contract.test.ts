@@ -26,6 +26,17 @@ import {
   supportedTaskVersions,
   tasksNewerThanSupported,
 } from "../src/agent/pi/storage.ts";
+import {
+  type ExportCursor,
+  type ExportHeader,
+  exportHeader,
+  exportPage,
+  type ExportRow,
+  restoreRows,
+  restoreSchema,
+  rowCounts,
+  tablesWithoutRowid,
+} from "../src/agent/maintenance.ts";
 import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
 
 const ctx = context.BACKGROUND_CONTEXT;
@@ -70,6 +81,9 @@ describe("Pi seam contract", () => {
   });
 
   it("runs a tool-using turn through the seam on Durable Object SQLite", async () => {
+    let exported:
+      | { header: ExportHeader; rows: ExportRow[]; counts: Record<string, number> }
+      | undefined;
     const stub = env.AGENT.getByName("contract-turn");
     await runInDurableObject(stub, async (_instance, state) => {
       // Let MipiAgent finish opening its own harness before opening one beside it.
@@ -183,10 +197,35 @@ describe("Pi seam contract", () => {
           "app.deliver-scheduled-instruction": 1,
         });
         expect(tasksNewerThanSupported(stored, supported)).toEqual([]);
+
+        // The backup copies Pi Durable's tables by rowid: every table has one, and an export restores row for row.
+        const sql = state.storage.sql;
+        expect(tablesWithoutRowid(sql)).toEqual([]);
+        const header = exportHeader(sql);
+        const rows: ExportRow[] = [];
+        let cursor: ExportCursor | undefined;
+        do {
+          const page = exportPage(sql, header.schema, cursor);
+          rows.push(...page.rows);
+          cursor = page.next;
+        } while (cursor !== undefined);
+        exported = { header, rows, counts: rowCounts(sql) };
       } finally {
         await harness.close(ctx);
       }
     });
+
+    // Into a fresh object, as a restore does: the same rows come back.
+    await runInDurableObject(
+      env.AGENT.getByName("contract-turn-copy"),
+      async (_instance, state) => {
+        await state.blockConcurrencyWhile(async () => {});
+        await state.storage.deleteAll();
+        restoreSchema(state.storage.sql, exported!.header);
+        restoreRows(state.storage.sql, exported!.header.schema, exported!.rows);
+        expect(rowCounts(state.storage.sql)).toEqual(exported!.counts);
+      },
+    );
     await evictDurableObject(stub);
   });
 

@@ -1,5 +1,6 @@
 import { type ConversationId, defineDoc, defineTask } from "../agent/pi/durable.ts";
 import { formatScheduledInstruction } from "../protocol.ts";
+import { AgentSettings } from "../agent/settings.ts";
 import { localTime } from "../agent/stamp.ts";
 
 export type ScheduleCadence = {
@@ -237,15 +238,19 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
     },
     deliver: async (task, runtime, context) => {
       try {
+        // A recurring schedule has its own zone; otherwise the owner's, as this agent recorded it.
+        let timeZone = task.input.recurrence?.timezone;
+        if (timeZone === undefined) {
+          await runtime.commit(async (tx) => {
+            timeZone = (await tx.doc(AgentSettings)).timeZone;
+          }, context);
+        }
         const conversation = await runtime.conversation(task.input.conversationId, context);
         if (conversation !== undefined) {
           const submission = await conversation.submit(
             {
               type: "input",
-              content: formatScheduledInstruction(
-                task.input,
-                localTime(Date.now(), task.input.recurrence?.timezone),
-              ),
+              content: formatScheduledInstruction(task.input, localTime(Date.now(), timeZone)),
               requestId: task.input.id,
               whenBusy: "followUp",
             },

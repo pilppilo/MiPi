@@ -6,7 +6,7 @@ import {
   type HarnessOptions,
 } from "./pi/durable.ts";
 import { compactionSettings } from "./pi/compaction.ts";
-import { setAgentTimeZone, STAMP_INSTRUCTIONS } from "./stamp.ts";
+import { STAMP_INSTRUCTIONS } from "./stamp.ts";
 import {
   createGoModels,
   DEFAULT_MODEL_ID,
@@ -27,8 +27,6 @@ export interface HarnessConfig {
   readonly modelId?: string;
   /** Reads Worker bindings, for model API keys (`OPENCODE_API_KEY`). Default: none, so models are unauthenticated. */
   readonly readEnv?: ReadEnv;
-  /** The owner's IANA time zone for message stamps (`MIPI_TIMEZONE`). */
-  readonly timeZone?: string;
   /** The tool profile new top-level conversations start on (`MIPI_PROFILE`). Default: `default`. */
   readonly profile?: ProfileName;
   /** Tests only: other model access and default model. */
@@ -46,7 +44,6 @@ export const CACHE_RETENTION = "long" as const;
 
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
 export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions {
-  setAgentTimeZone(config.timeZone);
   const chatExtension = defineExtension({
     name: "chat",
     tasks: [DeliverScheduledInstruction],

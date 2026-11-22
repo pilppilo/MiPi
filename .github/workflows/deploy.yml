@@ -28,11 +28,16 @@ jobs:
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # Each lane's secrets live in its GitHub Environment (repository secrets are the fallback). Auto-deploys from main
+    # have no inputs, hence the default.
+    environment: ${{ inputs.target || 'staging' }}
     env:
       TARGET: ${{ inputs.target || 'staging' }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      # Only while rotating a lane's ADMIN_TOKEN: the old value, which the running Worker still has.
+      ADMIN_TOKEN_PREVIOUS: ${{ secrets.ADMIN_TOKEN_PREVIOUS }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -53,7 +58,7 @@ jobs:
             if [ -z "${!name}" ]; then missing="$missing $name"; fi
           done
           if [ -n "$missing" ]; then
-            echo "::error::Missing repository secrets:$missing (Settings → Secrets and variables → Actions)"
+            echo "::error::Missing secrets:$missing (Settings → Environments → $TARGET, or repository secrets)"
             exit 1
           fi
           for name in MIPI_SPIKE_TOKEN ADMIN_TOKEN; do

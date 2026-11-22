@@ -29,12 +29,16 @@ jobs:
   rollback:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The lane's secrets come from its GitHub Environment (repository secrets are the fallback).
+    environment: ${{ inputs.target }}
     env:
       TARGET: ${{ inputs.target }}
       VERSION: ${{ inputs.version }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      # Only while rotating a lane's ADMIN_TOKEN: the old value, which the running Worker still has.
+      ADMIN_TOKEN_PREVIOUS: ${{ secrets.ADMIN_TOKEN_PREVIOUS }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,7 +54,18 @@ jobs:
           name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
           url="https://$name.$subdomain.workers.dev"
           echo "WORKER_URL=$url" >> "$GITHUB_ENV"
-          deployed="$(curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" "$url/api/health" | jq -r .version)"
+          # /api/health answers 200 to any token, with the version only for the right one. `|| true` keeps a failed
+          # request (5xx, no answer) from ending the step under `set -e` before the next token is tried.
+          deployed=""
+          for token in "$ADMIN_TOKEN" "$ADMIN_TOKEN_PREVIOUS"; do
+            [ -n "$token" ] || continue
+            deployed="$(curl -fsS -H "Authorization: Bearer $token" "$url/api/health" | jq -r '.version // empty' || true)"
+            [ -n "$deployed" ] && break
+          done
+          if [ -z "$deployed" ]; then
+            echo "::error::$url/api/health showed no version: check this lane's ADMIN_TOKEN (or ADMIN_TOKEN_PREVIOUS)"
+            exit 1
+          fi
           echo "DEPLOYED=$deployed" >> "$GITHUB_ENV"
           echo "Deployed on $TARGET: $deployed"
 

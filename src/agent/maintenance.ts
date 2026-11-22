@@ -16,11 +16,26 @@ export type MetaKey =
   | "schema_version"
   | "task_versions"
   | "maintenance"
+  /** When the running export or restore began (ms since the epoch). */
+  | "maintenance_started_at"
   | "restoring";
 
 export type Meta = Partial<Record<MetaKey, string>>;
 
 const quote = (identifier: string): string => `"${identifier.replaceAll('"', '""')}"`;
+
+/** An export left running this long is abandoned: its script died, so the agent opens again. */
+export const STALE_EXPORT_MS = 10 * 60_000;
+
+/**
+ * Whether an export flag is left over from a run that died. Only an export expires: a restore (or the `restoring`
+ * flag) never does, so partial data never opens. A flag without a start time is from a build before the time was kept.
+ */
+export function isStaleExport(meta: Meta, now: number = Date.now()): boolean {
+  if (meta.maintenance !== "export" || meta.restoring !== undefined) return false;
+  const started = Number(meta.maintenance_started_at);
+  return !Number.isFinite(started) || now - started >= STALE_EXPORT_MS;
+}
 
 export function ensureMeta(sql: SqlStorage): void {
   sql.exec(`CREATE TABLE IF NOT EXISTS ${META_TABLE} (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
@@ -122,11 +137,39 @@ export function readSchema(sql: SqlStorage): readonly SchemaObject[] {
     }));
 }
 
+/**
+ * Tables the export can't page: it walks every table by `rowid`, which a `WITHOUT ROWID` table doesn't have. Pi
+ * Durable 1.6.0 has none; a later version that adds one fails here, before the agent closes, and in the contract test.
+ */
+export function tablesWithoutRowid(
+  sql: SqlStorage,
+  schema: readonly SchemaObject[] = readSchema(sql),
+): string[] {
+  return schema
+    .filter(({ type, sql: ddl }) => type === "table" && /\bWITHOUT\s+ROWID\b/i.test(ddl))
+    .map(({ name }) => name);
+}
+
+/** Throws a clear error when the data has a table the export can't copy. */
+export function assertExportable(sql: SqlStorage): void {
+  const tables = tablesWithoutRowid(sql);
+  if (tables.length > 0) {
+    throw new Error(
+      `Export can't copy WITHOUT ROWID table(s) ${tables.join(", ")}: maintenance.ts needs a key-based page for them`,
+    );
+  }
+}
+
 const tablesOf = (schema: readonly SchemaObject[]): readonly string[] =>
   schema.filter(({ type }) => type === "table").map(({ name }) => name);
 
 export function exportHeader(sql: SqlStorage, now: Date = new Date()): ExportHeader {
-  const { maintenance: _maintenance, restoring: _restoring, ...meta } = readMeta(sql);
+  const {
+    maintenance: _maintenance,
+    maintenance_started_at: _startedAt,
+    restoring: _restoring,
+    ...meta
+  } = readMeta(sql);
   return {
     format: "mipi-export",
     formatVersion: 1,
