@@ -10,7 +10,7 @@ The build plan and milestones live in Linear (project **MiPi**). This README cov
 
 | Path                             | What it is                                                                                                                                                   |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `src/worker/`                    | The Worker: routing (and, from later milestones, auth)                                                                                                       |
+| `src/worker/`                    | The Worker: routing and authentication                                                                                                       |
 | `src/agent/agent-do.ts`          | The Durable Object (`MipiAgent`): opens the harness, alarms, WebSockets                                                                                      |
 | `src/agent/harness.ts`           | Agent composition: model, tools, prompt sections                                                                                                             |
 | `src/agent/profiles.ts`          | Tool profiles (`default`, `empty`, `pidu`) and `toolsFor()`, the only place tools are offered                                                                |
@@ -49,7 +49,20 @@ Secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secret
 - **Pi Durable ledger:** [`docs/pi-durable-ledger.md`](docs/pi-durable-ledger.md) records every workaround, use of Pi Durable internals, and deliberate difference from Pi Durable, plus the upstream work MiPi is waiting on. Code that belongs to an entry carries a `pi-ledger L<n>` comment; `pnpm check` keeps the two in step, and `pnpm ledger` prints the open entries.
 - **Upgrading Pi Durable:** `pnpm upgrade:pi <version>`, fix `src/agent/pi/` until `pnpm check` and `pnpm test` pass, add a changeset. If the release changes stored data so older builds can't read it, put a `> [!WARNING]` line with `**One-way:**` in the changeset. Merge, use it on staging for a day, then deploy production.
 - **Rolling back:** Actions → **rollback** (target, release tag). It refuses to cross a one-way release unless forced. After a one-way release, the old build refuses the newer data until you restore a backup taken before the upgrade: Actions → **restore** (the deploy run's ID and the backup's version). `restore` can also roll storage back to a point-in-time bookmark from the agent's status.
-- **Admin API** (`/api/admin/*`, `Authorization: Bearer $ADMIN_TOKEN`): status, paged export, restore. `node scripts/deploy.ts` wraps it. Only the startup guard really protects the data: a rollback from the Cloudflare dashboard or `wrangler rollback` skips the workflow's one-way check, but never the guard.
+- **Admin API** (`/api/admin/*`, Access service token when enabled, otherwise `Authorization: Bearer $ADMIN_TOKEN`): status, paged export, restore. `node scripts/deploy.ts` wraps it. Only the startup guard really protects the data: a rollback from the Cloudflare dashboard or `wrangler rollback` skips the workflow's one-way check, but never the guard.
+
+## Cloudflare Access
+
+Configure staging first in Cloudflare Zero Trust under **Access controls → Applications**. Add a **Self-hosted** application for the staging hostname with an Allow policy for the owner's sign-in identity. Use the hostname application for WebSocket support. Add a separate application for the exact `/api/health` path with a Bypass policy. When the Telegram and relay handlers are deployed, configure exact-path bypass applications for their endpoints and verify each handler's own authentication.
+
+Create a service token under **Access controls → Service credentials → Service Tokens**. Add a Service Auth policy selecting that token. In the matching GitHub Environment, set:
+
+- Variables `ACCESS_TEAM_DOMAIN` (the team's Access domain), `ACCESS_AUD` (the application's AUD), and `ACCESS_SERVICE_CLIENT_ID` (the service token's client ID).
+- Secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` for backup, deploy, and rollback requests.
+
+Keep the existing admin token available for deployments before Access is enabled. Set `MIPI_ACCESS_SKIP` only for localhost development. Use a separate application and token for production.
+
+On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on protected web routes. Verify Telegram and relay authentication once their handlers are present.
 
 ## Versions and changes
 
