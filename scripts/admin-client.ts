@@ -1,0 +1,89 @@
+/**
+ * The deploy scripts' client for a deployed Worker's admin API. Kept apart from `deploy.ts` (which runs on import) so
+ * tests can drive it with a fake `fetch`.
+ */
+
+export class AdminError extends Error {
+  /** The HTTP status, or undefined when the Worker couldn't be reached. */
+  readonly status: number | undefined;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
+export type Fetch = (input: URL, init: RequestInit) => Promise<Response>;
+export type AdminCall = <T>(method: string, path: string, body?: unknown) => Promise<T>;
+
+/**
+ * Calls the admin API with the first token, and on a 401 tries the next ones in order (`ADMIN_TOKEN`, then
+ * `ADMIN_TOKEN_PREVIOUS` while a lane's token is being rotated: the running Worker still has the old one). The first
+ * token that works is kept for later calls.
+ */
+export function adminClient(
+  url: string,
+  tokens: readonly string[],
+  fetcher: Fetch = fetch,
+): AdminCall {
+  const usable = tokens.filter((token) => token.length > 0);
+  if (usable.length === 0) throw new AdminError("ADMIN_TOKEN is not set");
+  let current = 0;
+  return async <T>(method: string, path: string, body?: unknown): Promise<T> => {
+    for (;;) {
+      let response: Response;
+      try {
+        response = await fetcher(new URL(path, url), {
+          method,
+          headers: {
+            Authorization: `Bearer ${usable[current]}`,
+            "Content-Type": "application/json",
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+      } catch (error) {
+        throw new AdminError(
+          `${method} ${path}: ${url} could not be reached (${(error as Error).message})`,
+        );
+      }
+      if (response.status === 401 && current + 1 < usable.length) {
+        await response.body?.cancel();
+        current += 1;
+        continue;
+      }
+      const text = await response.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = { error: text.slice(0, 200) };
+      }
+      if (!response.ok) {
+        const hint =
+          response.status === 401 || response.status === 403
+            ? " (check this lane's ADMIN_TOKEN; while rotating it, set ADMIN_TOKEN_PREVIOUS to the old one)"
+            : "";
+        throw new AdminError(
+          `${method} ${path}: HTTP ${response.status} ${(parsed as { error?: string }).error ?? ""}${hint}`,
+          response.status,
+        );
+      }
+      return parsed as T;
+    }
+  };
+}
+
+/**
+ * Whether there is an agent to back up. Only a 404 means there isn't (a first deploy: no Worker, or one without the
+ * admin API). Anything else that fails, such as a wrong token, a 5xx or no answer, throws: a deploy must not go ahead
+ * without the backup it was supposed to take.
+ */
+export async function hasAgentToBackUp(call: AdminCall): Promise<boolean> {
+  try {
+    await call("GET", "/api/admin/status");
+    return true;
+  } catch (error) {
+    if (error instanceof AdminError && error.status === 404) return false;
+    throw error;
+  }
+}

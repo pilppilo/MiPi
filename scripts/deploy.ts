@@ -1,6 +1,7 @@
 /**
  * Backup, restore, and rollback checks for a deployed MiPi, used by the GitHub workflows (deploy, rollback, restore).
- * Talks to the Worker's admin API with `ADMIN_TOKEN` from the environment.
+ * Talks to the Worker's admin API with `ADMIN_TOKEN` from the environment (and `ADMIN_TOKEN_PREVIOUS`, if set, while
+ * a lane's token is being rotated).
  *
  *   node scripts/deploy.ts status          --url https://mipi.example.workers.dev
  *   node scripts/deploy.ts backup          --url … --out backup.json
@@ -13,6 +14,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { adminClient as createAdminClient, hasAgentToBackUp } from "./admin-client.ts";
 import { oneWayReleasesCrossed, parseChangelog } from "./release-notes.ts";
 
 interface ExportRow {
@@ -51,30 +53,9 @@ function required(name: keyof typeof flags): string {
   return value;
 }
 
-function adminClient(url: string) {
-  const token = process.env.ADMIN_TOKEN;
-  if (token === undefined || token.length === 0) throw new Error("ADMIN_TOKEN is not set");
-  return async <T>(method: string, path: string, body?: unknown): Promise<T> => {
-    const response = await fetch(new URL(path, url), {
-      method,
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
-    const text = await response.text();
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      parsed = { error: text.slice(0, 200) };
-    }
-    if (!response.ok) {
-      throw new Error(
-        `${method} ${path}: HTTP ${response.status} ${(parsed as { error?: string }).error ?? ""}`,
-      );
-    }
-    return parsed as T;
-  };
-}
+/** The admin API with this lane's `ADMIN_TOKEN`, falling back to `ADMIN_TOKEN_PREVIOUS` during a rotation. */
+const adminClient = (url: string) =>
+  createAdminClient(url, [process.env.ADMIN_TOKEN ?? "", process.env.ADMIN_TOKEN_PREVIOUS ?? ""]);
 
 const countsOf = (rows: readonly ExportRow[]): Record<string, number> => {
   const counts: Record<string, number> = {};
@@ -112,11 +93,9 @@ async function backup(): Promise<void> {
   const url = required("url");
   const out = required("out");
   const call = adminClient(url);
-  try {
-    await call("GET", "/api/admin/status");
-  } catch (error) {
-    // A first deploy has nothing to back up.
-    console.log(`No backup: ${url} has no admin API yet (${(error as Error).message})`);
+  // Only a first deploy (404) goes ahead without a backup; a wrong token or a failing Worker stops the deploy.
+  if (!(await hasAgentToBackUp(call))) {
+    console.log(`No backup: ${url} has no agent yet (404)`);
     return;
   }
   for (let attempt = 1; attempt <= 2; attempt += 1) {

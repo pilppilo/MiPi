@@ -38,11 +38,15 @@ jobs:
   restore:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The lane's secrets come from its GitHub Environment (repository secrets are the fallback).
+    environment: ${{ inputs.target }}
     env:
       TARGET: ${{ inputs.target }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+      # Only while rotating a lane's ADMIN_TOKEN: the old value, which the running Worker still has.
+      ADMIN_TOKEN_PREVIOUS: ${{ secrets.ADMIN_TOKEN_PREVIOUS }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

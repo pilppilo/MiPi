@@ -40,7 +40,9 @@ pnpm test    # Pi Durable runs for real on Durable Object SQLite; the model is f
 | staging    | `mipi-staging` | automatically after `check` passes on `main`        |
 | production | `mipi`         | by hand: Actions → **deploy** → target `production` |
 
-Each lane has its own Durable Object storage. Every deploy backs up the target's agent first (a 30-day workflow artifact). The workflows need the repository secrets `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, and `ADMIN_TOKEN` (24+ random characters).
+Each lane has its own Durable Object storage. Every deploy backs up the target's agent first (a 30-day workflow artifact); if the backup can't be taken (a wrong token, a failing Worker), the deploy stops. Only a lane with no agent yet (404) deploys without one.
+
+Secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets; `OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN` and `ADMIN_TOKEN` (24+ random characters) per lane in the GitHub Environments `staging` and `production` (a repository secret of the same name is the fallback). To rotate a lane's `ADMIN_TOKEN`, set the new one and put the old one in `ADMIN_TOKEN_PREVIOUS` for one deploy, then delete it.
 
 - **Startup guard.** Before Pi Durable opens the stored data, the agent checks the stored schema and task versions. Data from a newer build is refused with a 503 that names both versions; nothing runs, nothing is corrupted.
 - **Agents:** [`AGENTS.md`](AGENTS.md) holds the rules for every coding agent (Grok Bot, Claude, others); `CLAUDE.md` imports it.

@@ -30,7 +30,8 @@ import { fetchLiveGoModelIds, ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
 import { isProfileName, PROFILE_NAMES, PROFILES, profileOrDefault } from "./profiles.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
-import { stampInput } from "./stamp.ts";
+import { AgentSettings } from "./settings.ts";
+import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import {
   type ExportCursor,
@@ -39,7 +40,9 @@ import {
   type ExportRow,
   exportHeader,
   exportPage,
+  assertExportable,
   fingerprint,
+  isStaleExport,
   type Meta,
   readMeta,
   readSchema,
@@ -231,7 +234,15 @@ export class MipiAgent extends DurableObject<Env> {
   /** Opens the agent unless maintenance is running or the startup guard refuses the stored data. */
   async #start(): Promise<void> {
     const sql = this.ctx.storage.sql;
-    const meta = readMeta(sql);
+    let meta = readMeta(sql);
+    if (isStaleExport(meta)) {
+      // The script that began this export died; nothing is half-written by an export, so the agent opens again.
+      reportError("Abandoned a stale export", new Error("The export never ended"), {
+        startedAt: meta.maintenance_started_at,
+      });
+      writeMeta(sql, { maintenance: undefined, maintenance_started_at: undefined });
+      meta = readMeta(sql);
+    }
     if (meta.maintenance === "export" || meta.maintenance === "restore") {
       this.#state = { kind: "maintenance", mode: meta.maintenance };
       reportError("Started during maintenance", new Error(`A ${meta.maintenance} was running`), {
@@ -318,11 +329,20 @@ export class MipiAgent extends DurableObject<Env> {
   /** Starts an export: closes the harness, pauses everything, and returns the header. Works on refused data too. */
   async exportBegin(): Promise<ExportHeader> {
     return this.#exclusive(async () => {
-      if (this.#state.kind === "maintenance") {
+      // An abandoned export doesn't block a new one; a running restore does.
+      if (
+        this.#state.kind === "maintenance" &&
+        !(this.#state.mode === "export" && isStaleExport(readMeta(this.ctx.storage.sql)))
+      ) {
         throw new Error(`A ${this.#state.mode} is already running`);
       }
+      // Before anything closes: data the export can't copy is refused while the agent keeps running.
+      assertExportable(this.ctx.storage.sql);
       await this.#shutdown();
-      writeMeta(this.ctx.storage.sql, { maintenance: "export" });
+      writeMeta(this.ctx.storage.sql, {
+        maintenance: "export",
+        maintenance_started_at: String(Date.now()),
+      });
       this.#state = { kind: "maintenance", mode: "export" };
       // No alarm while exporting: the run that began the export ends it.
       await this.ctx.storage.deleteAlarm();
@@ -348,7 +368,10 @@ export class MipiAgent extends DurableObject<Env> {
         this.#exportFingerprint !== undefined &&
         fingerprint(this.ctx.storage.sql) === this.#exportFingerprint;
       this.#exportFingerprint = undefined;
-      writeMeta(this.ctx.storage.sql, { maintenance: undefined });
+      writeMeta(this.ctx.storage.sql, {
+        maintenance: undefined,
+        maintenance_started_at: undefined,
+      });
       await this.#start();
       return { consistent };
     });
@@ -370,7 +393,11 @@ export class MipiAgent extends DurableObject<Env> {
       }
       await this.#shutdown();
       const sql = this.ctx.storage.sql;
-      writeMeta(sql, { restoring: "1", maintenance: "restore" });
+      writeMeta(sql, {
+        restoring: "1",
+        maintenance: "restore",
+        maintenance_started_at: String(Date.now()),
+      });
       this.#state = { kind: "maintenance", mode: "restore" };
       await this.ctx.storage.deleteAll();
       writeMeta(sql, { ...header.meta, restoring: "1", maintenance: "restore" });
@@ -397,7 +424,11 @@ export class MipiAgent extends DurableObject<Env> {
       if (mismatched.length > 0) {
         throw new Error(`Restored rows don't match the export: ${mismatched.join(", ")}`);
       }
-      writeMeta(sql, { restoring: undefined, maintenance: undefined });
+      writeMeta(sql, {
+        restoring: undefined,
+        maintenance: undefined,
+        maintenance_started_at: undefined,
+      });
       await this.#start();
     });
     return this.adminStatus();
@@ -434,6 +465,18 @@ export class MipiAgent extends DurableObject<Env> {
     return outcome.value;
   }
 
+  /** An object that stayed in memory through an abandoned export opens again on the next request. */
+  async #reopenIfStaleExport(): Promise<void> {
+    if (this.#state.kind !== "maintenance" || this.#state.mode !== "export") return;
+    if (!isStaleExport(readMeta(this.ctx.storage.sql))) return;
+    await this.#exclusive(async () => {
+      if (this.#state.kind === "maintenance" && this.#state.mode === "export") {
+        this.#exportFingerprint = undefined;
+        await this.#start();
+      }
+    });
+  }
+
   #requireMaintenance(mode: "export" | "restore"): void {
     if (this.#state.kind !== "maintenance" || this.#state.mode !== mode) {
       throw new Error(`No ${mode} is running`);
@@ -449,7 +492,6 @@ export class MipiAgent extends DurableObject<Env> {
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage);
     const options = createHarnessOptions({
       modelId: this.env.MIPI_MODEL,
-      timeZone: this.env.MIPI_TIMEZONE,
       profile: profileOrDefault(this.env.MIPI_PROFILE),
       readEnv: (name) => {
         const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
@@ -481,6 +523,12 @@ export class MipiAgent extends DurableObject<Env> {
     let activity: WatchHandle<TaskGraph> | undefined;
     try {
       this.#harness = harness;
+      // Tasks (scheduled deliveries) read the owner's time zone from the session, not from module state.
+      const timeZone = ownerTimeZone(this.env.MIPI_TIMEZONE);
+      await harness.commit(async (tx) => {
+        const settings = await tx.doc(AgentSettings);
+        if (settings.timeZone !== timeZone) settings.timeZone = timeZone;
+      }, BACKGROUND_CONTEXT);
       activity = await harness.watchTaskGraph(BACKGROUND_CONTEXT);
       this.#activity = activity;
       activity.start(async (call) => {
@@ -514,6 +562,7 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    await this.#reopenIfStaleExport();
     if (this.#state.kind !== "open") return this.#refusal();
     if (request.method !== "GET") {
       return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
@@ -828,7 +877,11 @@ export class MipiAgent extends DurableObject<Env> {
         const submission = await conversation.submit(
           {
             type: "input",
-            content: stampInput(ownerName(this.env.MIPI_OWNER), command.content),
+            content: stampInput(
+              ownerName(this.env.MIPI_OWNER),
+              command.content,
+              this.env.MIPI_TIMEZONE,
+            ),
             requestId,
             // Queue behind a running turn instead of rejecting; the inbox places it after the current answer.
             whenBusy: "followUp",

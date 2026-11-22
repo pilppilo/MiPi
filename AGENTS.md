@@ -32,7 +32,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 - Node 22 (`.node-version`) and pnpm 11 via Corepack (`corepack enable`). Run `pnpm install` once per checkout.
 - Scripts are Node (`node scripts/*.ts`), not shell, so they run on Windows too. Don't add bash-only steps to `package.json` scripts; use Node or `shx`.
 - Files use LF line endings (`.gitattributes`). On Windows, keep `core.autocrlf` off or rely on `.gitattributes`; the format check fails on CRLF.
-- Local secrets go in `.dev.vars` (copy `.dev.vars.example`); never commit it. Deployed secrets live in GitHub Actions secrets: `OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, `ADMIN_TOKEN`, plus Cloudflare credentials.
+- Local secrets go in `.dev.vars` (copy `.dev.vars.example`); never commit it. Deployed secrets live in GitHub: per lane in the Environments `staging` and `production` (`OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, `ADMIN_TOKEN`, and `ADMIN_TOKEN_PREVIOUS` only while rotating), with repository secrets as the fallback and for the Cloudflare credentials.
 
 ## Commands
 

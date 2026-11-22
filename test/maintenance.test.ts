@@ -9,6 +9,8 @@ import { describe, expect, it } from "vitest";
 import type { AdminStatus } from "../src/agent/agent-do.ts";
 import {
   exportPage,
+  isStaleExport,
+  STALE_EXPORT_MS,
   readSchema,
   restoreRows,
   restoreSchema,
@@ -233,6 +235,93 @@ describe("export and restore", () => {
     const status = await call<AdminStatus>("GET", "/api/admin/status");
     expect(status.state).toEqual({ kind: "maintenance", mode: "restore" });
     expect(status.meta.restoring).toBe("1");
+  });
+});
+
+describe("abandoned maintenance", () => {
+  const backdate = (owner: string, ms: number) =>
+    runInDurableObject(env.AGENT.getByName(owner), async (_instance, state) => {
+      state.storage.sql.exec(
+        "UPDATE app_meta SET value = ? WHERE key = 'maintenance_started_at'",
+        String(Date.now() - ms),
+      );
+    });
+
+  it("opens again after an export whose script died, once the flag is 10 minutes old", async () => {
+    const owner = "export-abandoned";
+    const { call, stub } = forOwner(owner);
+    await seed(owner, "hello");
+    await call("POST", "/api/admin/export/begin");
+
+    // Restarted, but the export is recent: it may still be running, so the agent stays closed.
+    await evictDurableObject(stub);
+    expect((await call<AdminStatus>("GET", "/api/admin/status")).state).toEqual({
+      kind: "maintenance",
+      mode: "export",
+    });
+
+    await backdate(owner, STALE_EXPORT_MS);
+    await evictDurableObject(stub);
+    const status = await call<AdminStatus>("GET", "/api/admin/status");
+    expect(status.state).toEqual({ kind: "open" });
+    expect(status.meta.maintenance).toBeUndefined();
+    expect(status.meta.maintenance_started_at).toBeUndefined();
+  });
+
+  it("opens again on the next request when the object stayed in memory", async () => {
+    const owner = "export-abandoned-live";
+    const { call, ownerEnv } = forOwner(owner);
+    await seed(owner, "hello");
+    await call("POST", "/api/admin/export/begin");
+    await backdate(owner, STALE_EXPORT_MS + 1_000);
+
+    const socket = await worker.fetch(
+      withSpikeToken(`${base}/api/sessions/${owner}`, { headers: { Upgrade: "websocket" } }),
+      ownerEnv,
+    );
+    expect(socket.status).toBe(101);
+    socket.webSocket!.accept();
+    socket.webSocket!.close(1000, "done");
+    // A new export starts normally afterwards.
+    expect((await exportAll(call)).consistent).toBe(true);
+  });
+
+  it("never opens a restore, however old", async () => {
+    const owner = "restore-abandoned";
+    const { call, stub } = forOwner(owner);
+    await seed(owner, "hello");
+    const exported = await exportAll(call);
+    await call("POST", "/api/admin/restore/begin", {
+      header: exported.header,
+      confirm: MIPI_VERSION,
+    });
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO app_meta (key, value) VALUES ('maintenance_started_at', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        String(Date.now() - 24 * 60 * 60_000),
+      );
+    });
+    await evictDurableObject(stub);
+    expect((await call<AdminStatus>("GET", "/api/admin/status")).state).toEqual({
+      kind: "maintenance",
+      mode: "restore",
+    });
+    expect(isStaleExport({ maintenance: "export", restoring: "1" }, Date.now())).toBe(false);
+  });
+});
+
+describe("export preconditions", () => {
+  it("refuses a table without a rowid before closing the agent", async () => {
+    const owner = "export-without-rowid";
+    const { call, stub } = forOwner(owner);
+    await seed(owner, "hello");
+    await runInDurableObject(stub, async (_instance, state) => {
+      state.storage.sql.exec("CREATE TABLE keyed (k TEXT PRIMARY KEY, v TEXT) WITHOUT ROWID");
+    });
+    await expect(call("POST", "/api/admin/export/begin")).rejects.toThrow(
+      /WITHOUT ROWID table\(s\) keyed/,
+    );
+    expect((await call<AdminStatus>("GET", "/api/admin/status")).state).toEqual({ kind: "open" });
   });
 });
 
