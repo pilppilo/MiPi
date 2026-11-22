@@ -13,7 +13,6 @@ import {
   MemoryStorage,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it, vi } from "vitest";
-import { formatScheduledInstruction } from "../src/protocol.ts";
 import { DeliverScheduledInstruction, ScheduleDeliveries } from "../src/tools/schedule-task.ts";
 import { scheduleTool } from "../src/tools/schedule.ts";
 
@@ -70,7 +69,9 @@ describe("scheduled instructions", () => {
         expect.arrayContaining([
           expect.objectContaining({
             role: "user",
-            content: "Scheduled instruction due now: Check the oven",
+            content: expect.stringMatching(
+              /^Scheduled instruction due now \(\w{3}, \w{3} \d+, \d{4}, \d{2}:\d{2} [A-Z]{3,4}\): Check the oven$/,
+            ),
           }),
           expect.objectContaining({
             role: "toolResult",
@@ -176,7 +177,11 @@ describe("scheduled instructions", () => {
         expect.arrayContaining([
           expect.objectContaining({
             role: "user",
-            content: formatScheduledInstruction(scheduled),
+            content: expect.stringMatching(
+              new RegExp(
+                `^Scheduled instruction due now \\(.+\\): ${scheduled.instruction}\\n\\nThis instruction recurs\\.`,
+              ),
+            ),
           }),
         ]),
       );

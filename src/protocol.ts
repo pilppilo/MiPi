@@ -18,22 +18,32 @@ export const MAX_ENTRY_PAGE = 100;
 // JSON may escape each prompt code unit as six characters.
 export const MAX_CLIENT_FRAME_CHARACTERS =
   MAX_PROMPT_CHARACTERS * 6 + MAX_REQUEST_ID_CHARACTERS + 1024;
-const SCHEDULED_INSTRUCTION_PREFIX = "Scheduled instruction due now: ";
+const SCHEDULED_INSTRUCTION_PREFIX = "Scheduled instruction due now";
+/** `Scheduled instruction due now: …`, or with the delivery's local time: `… due now (Sun, Nov 22, 2026, 12:40 CST): …`. */
+const SCHEDULED_INSTRUCTION_HEAD = /^Scheduled instruction due now(?: \(([^)\n]*)\))?: /;
 const RECURRENCE_NOTE_PREFIX = "\n\nThis instruction recurs.";
 
 /** Input submitted when a scheduled instruction is due. Self-contained; no system-prompt support needed. */
-export function formatScheduledInstruction(scheduled: {
-  readonly id: string;
-  readonly instruction: string;
-  readonly recurrence?: {
-    readonly cadence: {
-      readonly unit: "minute" | "hour" | "day" | "week" | "month";
-      readonly interval: number;
+export function formatScheduledInstruction(
+  scheduled: {
+    readonly id: string;
+    readonly instruction: string;
+    readonly recurrence?: {
+      readonly cadence: {
+        readonly unit: "minute" | "hour" | "day" | "week" | "month";
+        readonly interval: number;
+      };
+      readonly timezone: string;
     };
-    readonly timezone: string;
-  };
-}): string {
-  const text = `${SCHEDULED_INSTRUCTION_PREFIX}${scheduled.instruction}`;
+  },
+  /** The delivery's local time (`localTime()`), so the model knows when it ran without a clock in the prompt. */
+  deliveredAt?: string,
+): string {
+  const head =
+    deliveredAt === undefined
+      ? SCHEDULED_INSTRUCTION_PREFIX
+      : `${SCHEDULED_INSTRUCTION_PREFIX} (${deliveredAt.replaceAll(/[()\n]/g, "")})`;
+  const text = `${head}: ${scheduled.instruction}`;
   if (scheduled.recurrence === undefined) return text;
   const { interval, unit } = scheduled.recurrence.cadence;
   const cadence = `${interval} ${unit}${interval === 1 ? "" : "s"}`;
@@ -42,8 +52,9 @@ export function formatScheduledInstruction(scheduled: {
 
 /** The instruction text of a scheduled delivery input, or `undefined` for ordinary input. */
 export function parseScheduledInstruction(content: string): string | undefined {
-  if (!content.startsWith(SCHEDULED_INSTRUCTION_PREFIX)) return undefined;
-  const text = content.slice(SCHEDULED_INSTRUCTION_PREFIX.length);
+  const head = SCHEDULED_INSTRUCTION_HEAD.exec(content);
+  if (head === null) return undefined;
+  const text = content.slice(head[0].length);
   const note = text.lastIndexOf(RECURRENCE_NOTE_PREFIX);
   return note === -1 ? text : text.slice(0, note);
 }

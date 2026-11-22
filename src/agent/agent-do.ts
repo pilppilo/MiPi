@@ -16,6 +16,7 @@ import {
 import { openDurableObjectSqliteStorage } from "./pi/sqlite.ts";
 import { normalizeUsername } from "../lib/identity.ts";
 import { APP_TASKS, createHarnessOptions } from "./harness.ts";
+import { stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import {
   type ExportCursor,
@@ -156,8 +157,6 @@ const reciprocateClose = (socket: WebSocket, code: number, reason: string): void
     // The socket is already closed or the peer is no longer reachable.
   }
 };
-
-const attributedPrompt = (username: string, content: string): string => `[${username}]\n${content}`;
 
 const conversationSummary = (conversation: ConversationRecord): ConversationSummary => ({
   id: conversation.id,
@@ -436,6 +435,7 @@ export class MipiAgent extends DurableObject<Env> {
       {
         ...createHarnessOptions({
           modelId: this.env.MIPI_MODEL,
+          timeZone: this.env.MIPI_TIMEZONE,
           readEnv: (name) => {
             const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
             return typeof value === "string" ? value : undefined;
@@ -780,10 +780,7 @@ export class MipiAgent extends DurableObject<Env> {
         const submission = await conversation.submit(
           {
             type: "input",
-            content: attributedPrompt(
-              connectionState(socket)?.username ?? "Guest",
-              command.content,
-            ),
+            content: stampInput(connectionState(socket)?.username ?? "Guest", command.content),
             requestId: command.requestId,
             // Queue behind a running turn instead of rejecting; the inbox places it after the current answer.
             whenBusy: "followUp",
