@@ -1,28 +1,38 @@
 name: deploy
 
-# Deploys main to the `mipi` Worker after `check` passes on it, or on demand.
+# Every push to main deploys to staging (`mipi-staging`) after `check` passes. Production (`mipi`) deploys only by
+# hand: Actions → deploy → Run workflow → target: production. Every deploy backs up the target's agent first (when
+# it has one) and keeps the backup as a workflow artifact for 30 days; restore.yml can put it back.
 on:
   workflow_run:
     workflows: [check]
     types: [completed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      target:
+        description: Where to deploy
+        type: choice
+        options: [staging, production]
+        default: staging
 
 permissions:
   contents: read
 
 concurrency:
-  group: deploy
+  group: deploy-${{ inputs.target || 'staging' }}
   cancel-in-progress: false
 
 jobs:
   deploy:
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
+      TARGET: ${{ inputs.target || 'staging' }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,20 +49,41 @@ jobs:
           MIPI_SPIKE_TOKEN: ${{ secrets.MIPI_SPIKE_TOKEN }}
         run: |
           missing=""
-          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID OPENCODE_API_KEY MIPI_SPIKE_TOKEN; do
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID OPENCODE_API_KEY MIPI_SPIKE_TOKEN ADMIN_TOKEN; do
             if [ -z "${!name}" ]; then missing="$missing $name"; fi
           done
           if [ -n "$missing" ]; then
             echo "::error::Missing repository secrets:$missing (Settings → Secrets and variables → Actions)"
             exit 1
           fi
-          if [ "${#MIPI_SPIKE_TOKEN}" -lt 24 ]; then
-            echo "::error::MIPI_SPIKE_TOKEN is shorter than 24 characters; use a long random string"
-            exit 1
-          fi
+          for name in MIPI_SPIKE_TOKEN ADMIN_TOKEN; do
+            value="${!name}"
+            if [ "${#value}" -lt 24 ]; then
+              echo "::error::$name is shorter than 24 characters; use a long random string"
+              exit 1
+            fi
+          done
+
+      - name: Worker URL
+        run: |
+          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r .result.subdomain)"
+          name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
+          echo "WORKER_URL=https://$name.$subdomain.workers.dev" >> "$GITHUB_ENV"
+
+      - name: Back up the agent
+        run: node scripts/deploy.ts backup --url "$WORKER_URL" --out "$RUNNER_TEMP/backup.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: backup-${{ env.TARGET }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/backup.json
+          if-no-files-found: ignore
+          retention-days: 30
 
       - name: Build
-        run: pnpm build
+        run: |
+          if [ "$TARGET" = staging ]; then export CLOUDFLARE_ENV=staging; fi
+          pnpm build
 
       - name: Deploy with secrets
         env:
@@ -63,24 +94,24 @@ jobs:
           secrets="$RUNNER_TEMP/worker-secrets.json"
           trap 'rm -f "$secrets"' EXIT
           umask 077
-          jq -n --arg key "$OPENCODE_API_KEY" --arg token "$MIPI_SPIKE_TOKEN" \
-            '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $token}' > "$secrets"
+          jq -n --arg key "$OPENCODE_API_KEY" --arg spike "$MIPI_SPIKE_TOKEN" --arg admin "$ADMIN_TOKEN" \
+            '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}' > "$secrets"
           # Secrets ship with the version itself, so no deployed version ever runs without its key.
           pnpm exec wrangler deploy --secrets-file "$secrets" \
             --message "$version (${GITHUB_SHA::7})" --tag "$version"
 
       - name: Health check
         run: |
-          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
-            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r .result.subdomain)"
-          url="https://mipi.$subdomain.workers.dev"
+          expected="$(node -p 'require("./package.json").version')"
           for attempt in 1 2 3 4 5 6; do
-            if curl -fsS "$url/api/health" | grep -q '"ok":true'; then
-              echo "Healthy: $url"
-              echo "### Deployed to $url" >> "$GITHUB_STEP_SUMMARY"
+            health="$(curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/api/health" || true)"
+            if [ "$(printf '%s' "$health" | jq -r .version 2>/dev/null)" = "$expected" ]; then
+              echo "Healthy: $WORKER_URL $health"
+              echo "### Deployed MiPi $expected to $TARGET: $WORKER_URL" >> "$GITHUB_STEP_SUMMARY"
+              node scripts/deploy.ts status --url "$WORKER_URL" | jq '{state, build, rows}' >> "$GITHUB_STEP_SUMMARY" || true
               exit 0
             fi
             sleep 10
           done
-          echo "::error::$url/api/health did not answer {\"ok\":true}"
+          echo "::error::$WORKER_URL/api/health did not report version $expected (last: $health)"
           exit 1

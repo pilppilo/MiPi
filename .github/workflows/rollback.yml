@@ -1,0 +1,81 @@
+name: rollback
+
+# Deploys an earlier release (a git tag) to staging or production. Refuses to cross a one-way release (one whose data
+# older builds can't read) unless forced; then restore a backup taken before that release with restore.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to roll back
+        type: choice
+        options: [staging, production]
+        default: staging
+      version:
+        description: Release to deploy (a tag, e.g. 0.1.0-alpha.3)
+        required: true
+      force:
+        description: Cross one-way releases anyway (restore a pre-upgrade backup next)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ inputs.target }}
+      VERSION: ${{ inputs.version }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Worker URL and deployed version
+        run: |
+          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r .result.subdomain)"
+          name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
+          url="https://$name.$subdomain.workers.dev"
+          echo "WORKER_URL=$url" >> "$GITHUB_ENV"
+          deployed="$(curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" "$url/api/health" | jq -r .version)"
+          echo "DEPLOYED=$deployed" >> "$GITHUB_ENV"
+          echo "Deployed on $TARGET: $deployed"
+
+      - name: Check the rollback (main's CHANGELOG knows every release)
+        run: |
+          node scripts/deploy.ts check-rollback --from "$DEPLOYED" --to "$VERSION" \
+            ${{ inputs.force && '--force' || '' }}
+
+      - name: Check out the release
+        run: git checkout "refs/tags/$VERSION"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: Build
+        run: |
+          if [ "$TARGET" = staging ]; then export CLOUDFLARE_ENV=staging; fi
+          pnpm build
+      - name: Deploy with secrets
+        env:
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+          MIPI_SPIKE_TOKEN: ${{ secrets.MIPI_SPIKE_TOKEN }}
+        run: |
+          secrets="$RUNNER_TEMP/worker-secrets.json"
+          trap 'rm -f "$secrets"' EXIT
+          umask 077
+          jq -n --arg key "$OPENCODE_API_KEY" --arg spike "$MIPI_SPIKE_TOKEN" --arg admin "$ADMIN_TOKEN" \
+            '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}' > "$secrets"
+          pnpm exec wrangler deploy --secrets-file "$secrets" --message "rollback to $VERSION" --tag "$VERSION"
+          echo "### Rolled $TARGET back from $DEPLOYED to $VERSION" >> "$GITHUB_STEP_SUMMARY"

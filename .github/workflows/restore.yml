@@ -1,0 +1,79 @@
+name: restore
+
+# Puts a backup taken by the deploy workflow back into staging or production (wiping what's there), or rolls the
+# agent's storage back to a point-in-time bookmark. The startup guard then decides whether the running build may
+# open the restored data. Restore order after a one-way release: rollback.yml first, then this.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Where to restore
+        type: choice
+        options: [staging, production]
+        default: staging
+      backup_run_id:
+        description: Run ID of the deploy run whose backup to restore (from its URL)
+        required: false
+      backup_target:
+        description: Which lane that backup came from
+        type: choice
+        options: [staging, production]
+        default: staging
+      confirm:
+        description: The backup's MiPi version (shown in that deploy run's log), to confirm
+        required: false
+      bookmark:
+        description: Instead of a backup, a point-in-time bookmark (from the agent's status)
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: deploy-${{ inputs.target }}
+  cancel-in-progress: false
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TARGET: ${{ inputs.target }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - name: Worker URL
+        run: |
+          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r .result.subdomain)"
+          name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
+          echo "WORKER_URL=https://$name.$subdomain.workers.dev" >> "$GITHUB_ENV"
+
+      - name: Restore a bookmark
+        if: inputs.bookmark != ''
+        env:
+          BOOKMARK: ${{ inputs.bookmark }}
+        run: node scripts/deploy.ts restore-bookmark --url "$WORKER_URL" --bookmark "$BOOKMARK"
+
+      - uses: actions/download-artifact@v4
+        if: inputs.bookmark == ''
+        with:
+          name: backup-${{ inputs.backup_target }}-${{ inputs.backup_run_id }}
+          run-id: ${{ inputs.backup_run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/backup
+      - name: Restore the backup
+        if: inputs.bookmark == ''
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          node scripts/deploy.ts restore --url "$WORKER_URL" --file "$RUNNER_TEMP/backup/backup.json" --confirm "$CONFIRM"
+
+      - name: Status after restore
+        run: node scripts/deploy.ts status --url "$WORKER_URL" | tee -a "$GITHUB_STEP_SUMMARY"

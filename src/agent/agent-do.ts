@@ -15,7 +15,30 @@ import {
 } from "./pi/durable.ts";
 import { openDurableObjectSqliteStorage } from "./pi/sqlite.ts";
 import { normalizeUsername } from "../lib/identity.ts";
-import { createHarnessOptions } from "./harness.ts";
+import { APP_TASKS, createHarnessOptions } from "./harness.ts";
+import { checkStoredData } from "./guard.ts";
+import {
+  type ExportCursor,
+  type ExportHeader,
+  type ExportPage,
+  type ExportRow,
+  exportHeader,
+  exportPage,
+  fingerprint,
+  type Meta,
+  readMeta,
+  readSchema,
+  restoreRows,
+  restoreSchema,
+  rowCounts,
+  writeMeta,
+} from "./maintenance.ts";
+import {
+  storedSchemaVersion,
+  SUPPORTED_SCHEMA_VERSION,
+  supportedTaskVersions,
+} from "./pi/storage.ts";
+import { MIPI_VERSION, PI_DURABLE_VERSION } from "../version.ts";
 import {
   InvalidClientCommand,
   MAX_CLIENT_FRAME_CHARACTERS,
@@ -151,8 +174,33 @@ const conversationSummary = (conversation: ConversationRecord): ConversationSumm
     : { owner: { conversationId: conversation.owner.conversationId } }),
 });
 
+/**
+ * What the agent is doing. Only `open` has a harness; every other state keeps doors and alarms paused.
+ * - `refused`: the startup guard found data from a newer build (or a restore in progress) and didn't open it.
+ * - `maintenance`: an export or restore is running; the harness is closed so nothing else writes.
+ */
+export type AgentState =
+  | { readonly kind: "open" }
+  | { readonly kind: "refused"; readonly reason: string }
+  | { readonly kind: "maintenance"; readonly mode: "export" | "restore" };
+
+export interface AdminStatus {
+  readonly state: AgentState;
+  readonly meta: Meta;
+  readonly build: {
+    readonly mipi: string;
+    readonly piDurable: string;
+    readonly supportedSchema: number;
+  };
+  readonly bookmark?: string;
+  readonly rows: Readonly<Record<string, number>>;
+}
+
 export class MipiAgent extends DurableObject<Env> {
   #harness!: Harness;
+  #state: AgentState = { kind: "refused", reason: "Starting" };
+  /** The data's fingerprint when the current export began; a different one at the end means something wrote. */
+  #exportFingerprint: string | undefined;
   #activity!: WatchHandle<TaskGraph>;
   readonly #views = new Map<WebSocket, WatchHandle<ConversationView>>();
   readonly #typingConnections = new Set<WebSocket>();
@@ -161,7 +209,219 @@ export class MipiAgent extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    void ctx.blockConcurrencyWhile(() => this.#initialize());
+    void ctx.blockConcurrencyWhile(() => this.#start());
+  }
+
+  /** Opens the agent unless maintenance is running or the startup guard refuses the stored data. */
+  async #start(): Promise<void> {
+    const sql = this.ctx.storage.sql;
+    const meta = readMeta(sql);
+    if (meta.maintenance === "export" || meta.maintenance === "restore") {
+      this.#state = { kind: "maintenance", mode: meta.maintenance };
+      reportError("Started during maintenance", new Error(`A ${meta.maintenance} was running`), {
+        build: MIPI_VERSION,
+      });
+      return;
+    }
+    const guard = checkStoredData(sql, APP_TASKS);
+    if (!guard.ok) {
+      this.#state = { kind: "refused", reason: guard.reason };
+      reportError("Startup guard refused the stored data", new Error(guard.reason), {
+        storedBy: guard.storedBy,
+        build: MIPI_VERSION,
+      });
+      // Nothing can run, so no heartbeat: a newer deploy or a restore reopens the object.
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.#initialize();
+    // Recorded only after Pi Durable opened the data successfully.
+    writeMeta(sql, {
+      app_version: MIPI_VERSION,
+      pi_durable_version: PI_DURABLE_VERSION,
+      schema_version: String(storedSchemaVersion(sql) ?? SUPPORTED_SCHEMA_VERSION),
+      task_versions: JSON.stringify(supportedTaskVersions(APP_TASKS)),
+    });
+    this.#state = { kind: "open" };
+  }
+
+  /** Closes the harness and every connection, so nothing writes while maintenance runs. */
+  async #shutdown(): Promise<void> {
+    if (this.#state.kind !== "open") return;
+    this.#state = { kind: "refused", reason: "Closing" };
+    for (const socket of this.#connections()) {
+      try {
+        socket.close(1012, "Maintenance");
+      } catch {
+        // Already closing.
+      }
+      await this.#stopView(socket);
+    }
+    this.#typingConnections.clear();
+    await this.#activity.stop();
+    await this.#harness.close(BACKGROUND_CONTEXT);
+    await this.#alarmWrites;
+  }
+
+  #refusal(): Response {
+    const state = this.#state;
+    return json(
+      state.kind === "refused"
+        ? { error: "Unavailable", reason: state.reason }
+        : {
+            error: "Maintenance in progress",
+            mode: state.kind === "maintenance" ? state.mode : undefined,
+          },
+      503,
+      { "Retry-After": "60" },
+    );
+  }
+
+  // ---- Admin (called by the Worker's /api/admin routes, which check ADMIN_TOKEN) ----
+
+  async adminStatus(): Promise<AdminStatus> {
+    let bookmark: string | undefined;
+    try {
+      bookmark = await this.ctx.storage.getCurrentBookmark();
+    } catch {
+      // Point-in-time recovery is not available here.
+    }
+    return {
+      state: this.#state,
+      meta: readMeta(this.ctx.storage.sql),
+      build: {
+        mipi: MIPI_VERSION,
+        piDurable: PI_DURABLE_VERSION,
+        supportedSchema: SUPPORTED_SCHEMA_VERSION,
+      },
+      ...(bookmark === undefined ? {} : { bookmark }),
+      rows: rowCounts(this.ctx.storage.sql),
+    };
+  }
+
+  /** Starts an export: closes the harness, pauses everything, and returns the header. Works on refused data too. */
+  async exportBegin(): Promise<ExportHeader> {
+    return this.#exclusive(async () => {
+      if (this.#state.kind === "maintenance") {
+        throw new Error(`A ${this.#state.mode} is already running`);
+      }
+      await this.#shutdown();
+      writeMeta(this.ctx.storage.sql, { maintenance: "export" });
+      this.#state = { kind: "maintenance", mode: "export" };
+      // No alarm while exporting: the run that began the export ends it.
+      await this.ctx.storage.deleteAlarm();
+      this.#exportFingerprint = fingerprint(this.ctx.storage.sql);
+      return exportHeader(this.ctx.storage.sql);
+    });
+  }
+
+  exportPage(cursor: ExportCursor | undefined): ExportPage {
+    this.#requireMaintenance("export");
+    return exportPage(this.ctx.storage.sql, readSchema(this.ctx.storage.sql), cursor);
+  }
+
+  /**
+   * Ends an export and reopens the agent. `consistent` is false when anything wrote during the export (the
+   * fingerprint changed), or when that can't be checked (the object restarted mid-export): the export must then be
+   * thrown away and taken again.
+   */
+  async exportEnd(): Promise<{ readonly consistent: boolean }> {
+    return this.#exclusive(async () => {
+      this.#requireMaintenance("export");
+      const consistent =
+        this.#exportFingerprint !== undefined &&
+        fingerprint(this.ctx.storage.sql) === this.#exportFingerprint;
+      this.#exportFingerprint = undefined;
+      writeMeta(this.ctx.storage.sql, { maintenance: undefined });
+      await this.#start();
+      return { consistent };
+    });
+  }
+
+  /**
+   * Starts a restore: wipes this object and recreates the export's schema. The `restoring` flag is written first and
+   * cleared last (by `restoreEnd`), so an object that restarts halfway stays closed instead of opening partial data.
+   * `confirm` must repeat the export's MiPi version.
+   */
+  async restoreBegin(header: ExportHeader, confirm: string): Promise<void> {
+    const expected = header.meta.app_version ?? "unknown";
+    if (confirm !== expected) {
+      throw new Error(`Confirm the restore by passing the export's version: ${expected}`);
+    }
+    await this.#exclusive(async () => {
+      if (this.#state.kind === "maintenance" && this.#state.mode === "export") {
+        throw new Error("An export is running");
+      }
+      await this.#shutdown();
+      const sql = this.ctx.storage.sql;
+      writeMeta(sql, { restoring: "1", maintenance: "restore" });
+      this.#state = { kind: "maintenance", mode: "restore" };
+      await this.ctx.storage.deleteAll();
+      writeMeta(sql, { ...header.meta, restoring: "1", maintenance: "restore" });
+      restoreSchema(sql, header);
+    });
+  }
+
+  restoreRows(rows: readonly ExportRow[]): void {
+    this.#requireMaintenance("restore");
+    const sql = this.ctx.storage.sql;
+    restoreRows(sql, readSchema(sql), rows);
+  }
+
+  /** Ends a restore once every row is in (checked against the export's counts), then runs the startup guard. */
+  async restoreEnd(expectedRows: Readonly<Record<string, number>>): Promise<AdminStatus> {
+    await this.#exclusive(async () => {
+      this.#requireMaintenance("restore");
+      const sql = this.ctx.storage.sql;
+      const actual = rowCounts(sql);
+      const tables = new Set([...Object.keys(actual), ...Object.keys(expectedRows)]);
+      const mismatched = [...tables].filter(
+        (table) => (actual[table] ?? 0) !== (expectedRows[table] ?? 0),
+      );
+      if (mismatched.length > 0) {
+        throw new Error(`Restored rows don't match the export: ${mismatched.join(", ")}`);
+      }
+      writeMeta(sql, { restoring: undefined, maintenance: undefined });
+      await this.#start();
+    });
+    return this.adminStatus();
+  }
+
+  /**
+   * Rolls this object's storage back to a point-in-time bookmark, then restarts it (Cloudflare applies the bookmark
+   * on the next start). The call itself ends with the object's reset.
+   */
+  async restoreBookmark(bookmark: string, confirm: string): Promise<never> {
+    if (confirm !== bookmark.slice(0, 8)) {
+      throw new Error("Confirm the bookmark restore by passing its first 8 characters");
+    }
+    await this.ctx.storage.onNextSessionRestoreBookmark(bookmark);
+    this.ctx.abort("Restoring a point-in-time bookmark");
+    throw new Error("Restarting to apply the bookmark");
+  }
+
+  /**
+   * Runs `work` with every other event held back. A throw inside `blockConcurrencyWhile` resets the whole object,
+   * so errors are carried out and thrown after it instead.
+   */
+  async #exclusive<T>(work: () => Promise<T>): Promise<T> {
+    const outcome = await this.ctx.blockConcurrencyWhile(
+      async (): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> => {
+        try {
+          return { ok: true, value: await work() };
+        } catch (error) {
+          return { ok: false, error };
+        }
+      },
+    );
+    if (!outcome.ok) throw outcome.error;
+    return outcome.value;
+  }
+
+  #requireMaintenance(mode: "export" | "restore"): void {
+    if (this.#state.kind !== "maintenance" || this.#state.mode !== mode) {
+      throw new Error(`No ${mode} is running`);
+    }
   }
 
   async #initialize(): Promise<void> {
@@ -232,6 +492,7 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    if (this.#state.kind !== "open") return this.#refusal();
     if (request.method !== "GET") {
       return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
     }
@@ -280,6 +541,14 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
+    if (this.#state.kind === "maintenance") {
+      // Paused, and no alarm writes while an export reads: the run that started maintenance ends it.
+      return;
+    }
+    if (this.#state.kind !== "open") {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
     // Armed before `resume()` can start work, as on open.
     await this.#arm({ ...this.#harness.wake(), active: true });
     this.#harness.resume();
@@ -289,6 +558,11 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async webSocketMessage(socket: WebSocket, message: WSMessage): Promise<void> {
+    if (this.#state.kind !== "open") {
+      // A socket that outlived a restart into maintenance or refusal: tell the client to come back later.
+      socket.close(1012, "Unavailable");
+      return;
+    }
     try {
       await this.#connectionOperations.run(socket, () => this.#processMessage(socket, message));
     } catch (error) {

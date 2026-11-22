@@ -17,6 +17,9 @@ import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
 import { conversationSearchExtension, searchHistoryTool } from "../tools/search.ts";
 import { scheduleTool } from "../tools/schedule.ts";
 
+/** MiPi's own durable task definitions, for the startup guard's version check. */
+export const APP_TASKS = [DeliverScheduledInstruction] as const;
+
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
   readonly modelId?: string;
