@@ -1,0 +1,34 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "mipi",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-09-23",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "AGENT",
+        "class_name": "MipiAgent",
+      },
+    ],
+  },
+  "exports": {
+    "MipiAgent": {
+      "type": "durable-object",
+      "storage": "sqlite",
+    },
+  },
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "vars": {
+    // OpenCode Go model id for new conversations.
+    "MIPI_MODEL": "deepseek-v4.1-flash",
+  },
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true,
+    },
+  },
+}
