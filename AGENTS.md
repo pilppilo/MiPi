@@ -32,7 +32,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 - Node 22 (`.node-version`) and pnpm 11 via Corepack (`corepack enable`). Run `pnpm install` once per checkout.
 - Scripts are Node (`node scripts/*.ts`), not shell, so they run on Windows too. Don't add bash-only steps to `package.json` scripts; use Node or `shx`.
 - Files use LF line endings (`.gitattributes`). On Windows, keep `core.autocrlf` off or rely on `.gitattributes`; the format check fails on CRLF.
-- Local secrets go in `.dev.vars` (copy `.dev.vars.example`); never commit it. Deployed secrets live in GitHub: per lane in the Environments `staging` and `production` (`OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, `ADMIN_TOKEN`, and `ADMIN_TOKEN_PREVIOUS` only while rotating), with repository secrets as the fallback and for the Cloudflare credentials.
+- Local secrets go in `.dev.vars` (copy `.dev.vars.example`); never commit it. Deployed secrets live in GitHub: per lane in the Environments `staging` and `production` (`OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, `ADMIN_TOKEN`, and `ADMIN_TOKEN_PREVIOUS` only while rotating), with repository secrets as the fallback and for the Cloudflare credentials. For Access-enabled lanes, set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, and `ACCESS_SERVICE_CLIENT_ID` as Environment variables and `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` as Environment secrets. Keep `MIPI_ACCESS_SKIP` local to localhost development. See the README for staging setup and acceptance checks.
 
 ## Commands
 
@@ -50,7 +50,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 
 - `src/agent/pi/`: the **only** code that imports `@earendil-works/*` (lint-enforced). New Pi imports go here as named re-exports, and `test/contract.test.ts` calls each one.
 - `src/agent/`: the agent: Durable Object (`agent-do.ts`), harness, stamps, startup guard, export and restore.
-- `src/worker/`: HTTP routes, auth (spike lock), admin API.
+- `src/worker/`: HTTP routes, Cloudflare Access and fallback authentication, admin API.
 - `src/tools/`: tools, registered only through profiles.
 - `src/lib/`: small helpers with no Pi imports.
 - `src/protocol.ts`: WebSocket command/event protocol and wire validation.
