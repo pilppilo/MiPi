@@ -24,6 +24,8 @@
   "vars": {
     // The one person this agent belongs to: names the single session (Durable Object) everything lives in.
     "MIPI_OWNER": "jerome",
+    // Which lane this Worker is: "production" here, "staging" in env.staging.
+    "MIPI_ENV": "production",
     // OpenCode Go model id for new conversations.
     "MIPI_MODEL": "deepseek-v4.1-flash",
   },
@@ -31,6 +33,26 @@
     "enabled": true,
     "traces": {
       "enabled": true,
+    },
+  },
+  "env": {
+    // Staging lane: its own Worker (mipi-staging), its own Durable Object storage, its own secrets. Every push to
+    // main lands here first; production deploys are by hand, after a backup.
+    "staging": {
+      "name": "mipi-staging",
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "AGENT",
+            "class_name": "MipiAgent",
+          },
+        ],
+      },
+      "vars": {
+        "MIPI_OWNER": "jerome",
+        "MIPI_ENV": "staging",
+        "MIPI_MODEL": "deepseek-v4.1-flash",
+      },
     },
   },
 }
