@@ -9,6 +9,8 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **choice**: MiPi deliberately does something differently from Pi Durable's default or sample. It stays unless upstream makes it pointless.
 - **watch**: upstream work MiPi is waiting on. There may be no MiPi code yet.
 
+**Fields**: Kind, Since, Upstream, MiPi, and Remove when (or Revisit when). Optional: **Upstream link**, one or more https links to the Pi Durable or pi-ai issue, PR, commit or release the entry waits on, separated by spaces. Add one as soon as it exists: a link is what a watcher can follow, and `pnpm ledger` shows "none yet" until then.
+
 **Rules**
 
 - Code that belongs to an entry carries a `pi-ledger L<n>` comment, so `grep -rn "pi-ledger L3"` finds all of it. `pnpm check` fails if a comment names a missing entry, or if a workaround, internals or choice entry has no comment.

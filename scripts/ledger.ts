@@ -12,6 +12,8 @@ export interface LedgerEntry {
   readonly title: string;
   readonly kind: string;
   readonly open: boolean;
+  /** The upstream issues, PRs, commits or releases the entry waits on (`- **Upstream link:**`), if any. */
+  readonly links: readonly string[];
   /** The entry's text, heading included. */
   readonly text: string;
 }
@@ -37,7 +39,16 @@ export function parseLedger(markdown: string): LedgerEntry[] {
     const heading = /^### (L\d+) · (.+)$/m.exec(part);
     if (heading === null) continue;
     const kind = /^- \*\*Kind:\*\* (\S+)/m.exec(part)?.[1] ?? "";
-    entries.push({ id: heading[1]!, title: heading[2]!.trim(), kind, open, text: part.trimEnd() });
+    const linkLine = /^- \*\*Upstream link:\*\* (.+)$/m.exec(part)?.[1] ?? "";
+    const links = linkLine.split(/[\s,]+/).filter((link) => link.length > 0);
+    entries.push({
+      id: heading[1]!,
+      title: heading[2]!.trim(),
+      kind,
+      open,
+      links,
+      text: part.trimEnd(),
+    });
   }
   return entries;
 }
@@ -65,6 +76,10 @@ export function ledgerProblems(
     seen.add(entry.id);
     if (!(KINDS as readonly string[]).includes(entry.kind)) {
       problems.push(`${entry.id} has kind "${entry.kind}"; use one of ${KINDS.join(", ")}`);
+    }
+    for (const link of entry.links) {
+      if (!/^https:\/\/\S+$/.test(link))
+        problems.push(`${entry.id} has an upstream link that is not an https URL: ${link}`);
     }
   }
   const byId = new Map(entries.map((entry) => [entry.id, entry]));
@@ -97,7 +112,10 @@ export function openEntriesReport(
       const places = markers
         .filter((marker) => marker.id === entry.id)
         .map((marker) => `${marker.file}:${marker.line}`);
-      return places.length > 0 ? `${entry.text}\n- **Code:** ${places.join(", ")}` : entry.text;
+      const lines = [entry.text];
+      if (entry.links.length === 0) lines.push("- **Upstream link:** none yet");
+      if (places.length > 0) lines.push(`- **Code:** ${places.join(", ")}`);
+      return lines.join("\n");
     })
     .join("\n\n");
 }
