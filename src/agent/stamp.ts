@@ -44,6 +44,7 @@ export function localTime(at: number, timeZone: string = agentTimeZone): string 
 }
 
 /** A user message as the model sees it: `[speaker · local time]` on the first line, then the text. */
+// pi-ledger L3: the time travels with each message, not in the system prompt.
 export function stampInput(speaker: string, content: string, at: number = Date.now()): string {
   return `[${speaker} · ${localTime(at)}]\n${content}`;
 }

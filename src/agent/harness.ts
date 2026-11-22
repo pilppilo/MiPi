@@ -38,6 +38,7 @@ export interface HarnessConfig {
  * provider supports (Anthropic-format: 1h `cache_control`; OpenAI-format: `prompt_cache_retention: 24h`), and is
  * ignored where it isn't (DeepSeek on Go caches identical prefixes on its own). Compaction requests use `none`.
  */
+// pi-ledger L6: "long" is a 5-minute TTL for Go's Anthropic-format models until pi-ai adds the flag.
 export const CACHE_RETENTION = "long" as const;
 
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
@@ -48,7 +49,7 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
     tasks: [DeliverScheduledInstruction],
     tools: [scheduleTool, searchHistoryTool],
     sections: [
-      // Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
+      // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
       // The time comes with each message instead (`stamp.ts`).
       section(
         "preamble",

@@ -13,6 +13,7 @@ import { CURRENT_SQLITE_SCHEMA_VERSION } from "@earendil-works/pi-durable/storag
 /** The storage schema version this build's Pi Durable writes and can open. */
 export const SUPPORTED_SCHEMA_VERSION: number = CURRENT_SQLITE_SCHEMA_VERSION;
 
+// pi-ledger L2: Pi Durable internals (table names, record fields).
 const SCHEMA_TABLE = "durable_schema";
 const TASKS_TABLE = "tasks";
 
