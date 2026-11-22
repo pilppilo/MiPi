@@ -1,5 +1,6 @@
 import { type ConversationId, defineDoc, defineTask } from "../agent/pi/durable.ts";
 import { formatScheduledInstruction } from "../protocol.ts";
+import { localTime } from "../agent/stamp.ts";
 
 export type ScheduleCadence = {
   readonly unit: "minute" | "hour" | "day" | "week" | "month";
@@ -241,7 +242,10 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
           const submission = await conversation.submit(
             {
               type: "input",
-              content: formatScheduledInstruction(task.input),
+              content: formatScheduledInstruction(
+                task.input,
+                localTime(Date.now(), task.input.recurrence?.timezone),
+              ),
               requestId: task.input.id,
               whenBusy: "followUp",
             },

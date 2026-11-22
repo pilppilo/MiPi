@@ -6,6 +6,7 @@ import {
   type HarnessOptions,
 } from "./pi/durable.ts";
 import { compactionSettings } from "./pi/compaction.ts";
+import { setAgentTimeZone, STAMP_INSTRUCTIONS } from "./stamp.ts";
 import {
   createGoModels,
   DEFAULT_MODEL_ID,
@@ -25,26 +26,36 @@ export interface HarnessConfig {
   readonly modelId?: string;
   /** Reads Worker bindings, for model API keys (`OPENCODE_API_KEY`). Default: none, so models are unauthenticated. */
   readonly readEnv?: ReadEnv;
+  /** The owner's IANA time zone for message stamps (`MIPI_TIMEZONE`). */
+  readonly timeZone?: string;
+  /** Tests only: other model access and default model. */
+  readonly models?: HarnessOptions["models"];
+  readonly model?: { readonly provider: string; readonly modelId: string };
 }
+
+/**
+ * The one cache policy, for every conversation and every door. `long` asks for the longest retention a model's
+ * provider supports (Anthropic-format: 1h `cache_control`; OpenAI-format: `prompt_cache_retention: 24h`), and is
+ * ignored where it isn't (DeepSeek on Go caches identical prefixes on its own). Compaction requests use `none`.
+ */
+export const CACHE_RETENTION = "long" as const;
 
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
 export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions {
+  setAgentTimeZone(config.timeZone);
   const chatExtension = defineExtension({
     name: "chat",
     tasks: [DeliverScheduledInstruction],
     tools: [scheduleTool, searchHistoryTool],
     sections: [
+      // Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
+      // The time comes with each message instead (`stamp.ts`).
       section(
         "preamble",
-        () =>
-          "You are MiPi, a concise personal assistant. User messages may begin with a display name in brackets; treat it as speaker attribution.",
-        { tag: false },
-      ),
-      section(
-        "clock",
-        // Minute precision: finer values would append a system-prompt delta on every request.
-        () => `Current time: ${new Date().toISOString().slice(0, 16)}Z.`,
-        { tag: false },
+        () => `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`,
+        {
+          tag: false,
+        },
       ),
     ],
   });
@@ -52,16 +63,23 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
   registry.install(chatExtension);
   registry.install(conversationSearchExtension);
   const defaultAgent = {
-    model: { provider: MODEL_PROVIDER, modelId: config.modelId || DEFAULT_MODEL_ID },
+    model: config.model ?? {
+      provider: MODEL_PROVIDER,
+      modelId: config.modelId || DEFAULT_MODEL_ID,
+    },
     // The default model has no `off` level; `low` is its lightest.
     thinkingLevel: "low" as const,
     tools: [scheduleTool, searchHistoryTool],
   };
 
   return {
-    models: createGoModels(config.readEnv ?? (() => undefined)),
+    models: config.models ?? createGoModels(config.readEnv ?? (() => undefined)),
     registry,
-    settings: { extensions: [chatExtension], compaction: compactionSettings(goModels()) },
+    settings: {
+      extensions: [chatExtension],
+      compaction: compactionSettings(goModels()),
+      stream: { cacheRetention: CACHE_RETENTION },
+    },
     conversationCreated: (tx, conversation) =>
       conversation.owner === undefined && conversation.parent === undefined
         ? configure(tx, conversation.id, defaultAgent)

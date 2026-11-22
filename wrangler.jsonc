@@ -28,6 +28,8 @@
     "MIPI_ENV": "production",
     // OpenCode Go model id for new conversations.
     "MIPI_MODEL": "deepseek-v4.1-flash",
+    // The owner's time zone: every message is stamped with its local time.
+    "MIPI_TIMEZONE": "America/Chicago",
   },
   "observability": {
     "enabled": true,
@@ -52,6 +54,7 @@
         "MIPI_OWNER": "jerome",
         "MIPI_ENV": "staging",
         "MIPI_MODEL": "deepseek-v4.1-flash",
+        "MIPI_TIMEZONE": "America/Chicago",
       },
     },
   },

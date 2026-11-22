@@ -35,12 +35,18 @@ const userEntryText = (entry: EntryRecord): string | undefined => {
 };
 
 /** User texts in a view: entries of the window, and inputs queued in `pi.inbox`. */
+/** `[speaker · local time]\ntext` → `[speaker]\ntext`: the stamp's time differs per run (stamp.ts has its own tests). */
+const withoutTime = (text: string): string =>
+  text.replace(/^\[([^\]\n]*?) · [^\]\n]*\]\n/, "[$1]\n");
+
 const submittedTexts = (view: ConversationView | undefined): readonly string[] => [
   ...(view?.entries ?? []).flatMap((entry) => {
     const text = userEntryText(entry);
-    return text === undefined ? [] : [text];
+    return text === undefined ? [] : [withoutTime(text)];
   }),
-  ...queuedInputs(view?.docs["pi.inbox"] as InboxState | undefined).map(({ text }) => text),
+  ...queuedInputs(view?.docs["pi.inbox"] as InboxState | undefined).map(({ text }) =>
+    withoutTime(text),
+  ),
 ];
 
 const sessionSocketUrl = (sessionId: string, username: string, clientId: string): string => {

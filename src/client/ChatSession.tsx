@@ -499,6 +499,7 @@ function ConversationDetails({ conversation }: { readonly conversation: Conversa
           <RuntimeDatum label="Model" value={model} />
           <RuntimeDatum label="Thinking" value={agent?.thinkingLevel ?? "off"} />
           <RuntimeDatum label="Tokens" value={totals.tokens.toLocaleString()} />
+          <RuntimeDatum label="Cached" value={formatCached(totals)} />
           <RuntimeDatum label="Cost" value={formatCost(totals.cost)} />
         </div>
         <div className="runtime-tools">
@@ -519,16 +520,37 @@ function RuntimeDatum({ label, value }: { readonly label: string; readonly value
   );
 }
 
-function usageTotals(usage: ConversationSnapshot["usage"]): { tokens: number; cost: number } {
+interface UsageTotals {
+  readonly tokens: number;
+  readonly cost: number;
+  /** Prompt tokens served from the provider's cache, and all prompt tokens (cached, written, and uncached). */
+  readonly cacheRead: number;
+  readonly prompt: number;
+}
+
+function usageTotals(usage: ConversationSnapshot["usage"]): UsageTotals {
   let tokens = 0;
   let cost = 0;
+  let cacheRead = 0;
+  let prompt = 0;
   for (const bucket of [usage?.models ?? {}, usage?.tools ?? {}]) {
     for (const value of Object.values(bucket)) {
       tokens += value.totalTokens;
       cost += value.cost.total;
+      cacheRead += value.cacheRead;
+      prompt += value.input + value.cacheRead + value.cacheWrite;
     }
   }
-  return { tokens, cost };
+  return { tokens, cost, cacheRead, prompt };
+}
+
+/** `1,536 (62%)`: how much of the prompt came from the provider's cache, the measure COD-166 keeps high. */
+export function formatCached({
+  cacheRead,
+  prompt,
+}: Pick<UsageTotals, "cacheRead" | "prompt">): string {
+  if (prompt === 0) return "0";
+  return `${cacheRead.toLocaleString()} (${Math.round((cacheRead / prompt) * 100)}%)`;
 }
 
 const costFormatter = new Intl.NumberFormat(undefined, {
