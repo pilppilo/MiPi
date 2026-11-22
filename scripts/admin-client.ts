@@ -16,18 +16,35 @@ export class AdminError extends Error {
 export type Fetch = (input: URL, init: RequestInit) => Promise<Response>;
 export type AdminCall = <T>(method: string, path: string, body?: unknown) => Promise<T>;
 
+/** A Cloudflare Access service token: its headers get a request through Access to the admin routes. */
+export interface ServiceToken {
+  readonly clientId: string;
+  readonly clientSecret: string;
+}
+
 /**
  * Calls the admin API with the first token, and on a 401 tries the next ones in order (`ADMIN_TOKEN`, then
  * `ADMIN_TOKEN_PREVIOUS` while a lane's token is being rotated: the running Worker still has the old one). The first
- * token that works is kept for later calls.
+ * token that works is kept for later calls. With Access on, the service token's headers go with every call: Access
+ * lets the request through and the Worker checks the JWT Access adds; a Worker from before Access checks the bearer.
  */
 export function adminClient(
   url: string,
   tokens: readonly string[],
   fetcher: Fetch = fetch,
+  service?: ServiceToken,
 ): AdminCall {
   const usable = tokens.filter((token) => token.length > 0);
-  if (usable.length === 0) throw new AdminError("ADMIN_TOKEN is not set");
+  if (usable.length === 0 && service === undefined) {
+    throw new AdminError("Neither ADMIN_TOKEN nor the Access service token is set");
+  }
+  const accessHeaders: Record<string, string> =
+    service === undefined
+      ? {}
+      : {
+          "CF-Access-Client-Id": service.clientId,
+          "CF-Access-Client-Secret": service.clientSecret,
+        };
   let current = 0;
   return async <T>(method: string, path: string, body?: unknown): Promise<T> => {
     for (;;) {
@@ -36,7 +53,10 @@ export function adminClient(
         response = await fetcher(new URL(path, url), {
           method,
           headers: {
-            Authorization: `Bearer ${usable[current]}`,
+            ...accessHeaders,
+            ...(usable[current] === undefined
+              ? {}
+              : { Authorization: `Bearer ${usable[current]}` }),
             "Content-Type": "application/json",
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -61,7 +81,7 @@ export function adminClient(
       if (!response.ok) {
         const hint =
           response.status === 401 || response.status === 403
-            ? " (check this lane's ADMIN_TOKEN; while rotating it, set ADMIN_TOKEN_PREVIOUS to the old one)"
+            ? " (check this lane's ADMIN_TOKEN, or its Access service token and ACCESS_SERVICE_CLIENT_ID; while rotating ADMIN_TOKEN, set ADMIN_TOKEN_PREVIOUS to the old one)"
             : "";
         throw new AdminError(
           `${method} ${path}: HTTP ${response.status} ${(parsed as { error?: string }).error ?? ""}${hint}`,

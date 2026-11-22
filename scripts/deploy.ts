@@ -4,6 +4,7 @@
  * a lane's token is being rotated).
  *
  *   node scripts/deploy.ts status          --url https://mipi.example.workers.dev
+ *   node scripts/deploy.ts version         --url …   (prints the deployed MiPi version)
  *   node scripts/deploy.ts backup          --url … --out backup.json
  *   node scripts/deploy.ts restore         --url … --file backup.json --confirm <export's MiPi version>
  *   node scripts/deploy.ts restore-bookmark --url … --bookmark <bookmark>
@@ -53,9 +54,20 @@ function required(name: keyof typeof flags): string {
   return value;
 }
 
-/** The admin API with this lane's `ADMIN_TOKEN`, falling back to `ADMIN_TOKEN_PREVIOUS` during a rotation. */
-const adminClient = (url: string) =>
-  createAdminClient(url, [process.env.ADMIN_TOKEN ?? "", process.env.ADMIN_TOKEN_PREVIOUS ?? ""]);
+/**
+ * The admin API with this lane's `ADMIN_TOKEN` (falling back to `ADMIN_TOKEN_PREVIOUS` during a rotation) and, once
+ * Cloudflare Access is on, its service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`).
+ */
+const adminClient = (url: string) => {
+  const clientId = process.env.CF_ACCESS_CLIENT_ID ?? "";
+  const clientSecret = process.env.CF_ACCESS_CLIENT_SECRET ?? "";
+  return createAdminClient(
+    url,
+    [process.env.ADMIN_TOKEN ?? "", process.env.ADMIN_TOKEN_PREVIOUS ?? ""],
+    fetch,
+    clientId.length > 0 && clientSecret.length > 0 ? { clientId, clientSecret } : undefined,
+  );
+};
 
 const countsOf = (rows: readonly ExportRow[]): Record<string, number> => {
   const counts: Record<string, number> = {};
@@ -144,6 +156,15 @@ async function restoreBookmark(): Promise<void> {
   console.log(`Bookmark restore requested: ${JSON.stringify(result)}`);
 }
 
+/** Prints the deployed build's MiPi version (the deploy's health check and the rollback's check use it). */
+async function version(): Promise<void> {
+  const result = await adminClient(required("url"))<{ build: { mipi: string } }>(
+    "GET",
+    "/api/admin/status",
+  );
+  console.log(result.build.mipi);
+}
+
 async function status(): Promise<void> {
   console.log(
     JSON.stringify(await adminClient(required("url"))("GET", "/api/admin/status"), null, 2),
@@ -176,6 +197,7 @@ function checkRollback(): void {
 
 const commands: Record<string, () => void | Promise<void>> = {
   status,
+  version,
   backup,
   restore,
   "restore-bookmark": restoreBookmark,

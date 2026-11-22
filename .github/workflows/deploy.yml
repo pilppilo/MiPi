@@ -38,6 +38,12 @@ jobs:
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
       # Only while rotating a lane's ADMIN_TOKEN: the old value, which the running Worker still has.
       ADMIN_TOKEN_PREVIOUS: ${{ secrets.ADMIN_TOKEN_PREVIOUS }}
+      # Cloudflare Access (M4): on once the lane's Environment has both variables. The service token gets the deploy
+      # scripts through Access to the admin routes.
+      ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
+      ACCESS_AUD: ${{ vars.ACCESS_AUD }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -60,6 +66,14 @@ jobs:
           if [ -n "$missing" ]; then
             echo "::error::Missing secrets:$missing (Settings → Environments → $TARGET, or repository secrets)"
             exit 1
+          fi
+          if [ -n "$ACCESS_TEAM_DOMAIN$ACCESS_AUD" ]; then
+            for name in ACCESS_TEAM_DOMAIN ACCESS_AUD CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET; do
+              if [ -z "${!name}" ]; then
+                echo "::error::Access is half set up: $name is missing (Environment $TARGET: variables ACCESS_TEAM_DOMAIN, ACCESS_AUD; secrets CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)"
+                exit 1
+              fi
+            done
           fi
           for name in MIPI_SPIKE_TOKEN ADMIN_TOKEN; do
             value="${!name}"
@@ -102,21 +116,29 @@ jobs:
           jq -n --arg key "$OPENCODE_API_KEY" --arg spike "$MIPI_SPIKE_TOKEN" --arg admin "$ADMIN_TOKEN" \
             '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}' > "$secrets"
           # Secrets ship with the version itself, so no deployed version ever runs without its key.
-          pnpm exec wrangler deploy --secrets-file "$secrets" \
+          # Access settings ride with the version as vars (they're not secret); unset, Access stays off.
+          access_vars=()
+          if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
+            access_vars=(--var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD" \
+              --var "ACCESS_SERVICE_CLIENT_ID:$CF_ACCESS_CLIENT_ID")
+          fi
+          pnpm exec wrangler deploy --secrets-file "$secrets" "${access_vars[@]}" \
             --message "$version (${GITHUB_SHA::7})" --tag "$version"
 
       - name: Health check
+        # The deployed version, read through the admin API (with Access on, the public health check shows no version).
         run: |
           expected="$(node -p 'require("./package.json").version')"
+          deployed=""
           for attempt in 1 2 3 4 5 6; do
-            health="$(curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" "$WORKER_URL/api/health" || true)"
-            if [ "$(printf '%s' "$health" | jq -r .version 2>/dev/null)" = "$expected" ]; then
-              echo "Healthy: $WORKER_URL $health"
+            deployed="$(node scripts/deploy.ts version --url "$WORKER_URL" 2>/dev/null || true)"
+            if [ "$deployed" = "$expected" ]; then
+              echo "Healthy: $WORKER_URL runs $deployed"
               echo "### Deployed MiPi $expected to $TARGET: $WORKER_URL" >> "$GITHUB_STEP_SUMMARY"
               node scripts/deploy.ts status --url "$WORKER_URL" | jq '{state, build, rows}' >> "$GITHUB_STEP_SUMMARY" || true
               exit 0
             fi
             sleep 10
           done
-          echo "::error::$WORKER_URL/api/health did not report version $expected (last: $health)"
+          echo "::error::$WORKER_URL did not report version $expected through the admin API (last: ${deployed:-no answer})"
           exit 1

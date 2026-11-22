@@ -61,7 +61,29 @@ describe("deploy backup preflight", () => {
     );
   });
 
-  it("refuses to run without a token", () => {
-    expect(() => adminClient(url, ["", ""])).toThrow("ADMIN_TOKEN is not set");
+  it("refuses to run without a token or a service token", () => {
+    expect(() => adminClient(url, ["", ""])).toThrow(
+      "Neither ADMIN_TOKEN nor the Access service token",
+    );
+  });
+
+  it("sends the Access service token's headers on every call, with or without ADMIN_TOKEN", async () => {
+    const seen: Array<Record<string, string | null>> = [];
+    const fetcher: Fetch = async (_input, init) => {
+      const headers = new Headers(init.headers);
+      seen.push({
+        id: headers.get("CF-Access-Client-Id"),
+        secret: headers.get("CF-Access-Client-Secret"),
+        authorization: headers.get("Authorization"),
+      });
+      return Response.json({ state: { kind: "open" } });
+    };
+    const service = { clientId: "id.access", clientSecret: "secret" };
+    await adminClient(url, [""], fetcher, service)("GET", "/api/admin/status");
+    await adminClient(url, ["legacy"], fetcher, service)("GET", "/api/admin/status");
+    expect(seen).toEqual([
+      { id: "id.access", secret: "secret", authorization: null },
+      { id: "id.access", secret: "secret", authorization: "Bearer legacy" },
+    ]);
   });
 });

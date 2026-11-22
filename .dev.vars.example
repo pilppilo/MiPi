@@ -1,5 +1,13 @@
 OPENCODE_API_KEY=
-# M1 lock until Cloudflare Access (M4): a long random string.
+# The M1 spike lock, used until Cloudflare Access is on: a long random string.
 MIPI_SPIKE_TOKEN=
-# Deploy scripts: status, export, restore (until an Access service token in M4).
+# Deploy scripts' token for admin routes, used until Cloudflare Access is on.
 ADMIN_TOKEN=
+# Cloudflare Access (M4). Set both to turn Access on: every web route then needs an Access JWT, and admin routes the
+# deploy service token. Deployed lanes get them from the GitHub Environment's variables; leave them empty locally.
+ACCESS_TEAM_DOMAIN=
+ACCESS_AUD=
+# The deploy service token's client id (the JWT's common_name), accepted on admin routes only.
+ACCESS_SERVICE_CLIENT_ID=
+# Local development only: 1 skips all auth on localhost. Any other host refuses every request while it is set.
+MIPI_ACCESS_SKIP=
