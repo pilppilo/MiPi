@@ -168,12 +168,16 @@ export async function authenticate(
   switch (identity.type) {
     case "user": {
       if (route === "admin") {
-        return { kind: "refused", status: 403, reason: "Admin routes need the deploy service token" };
+        return {
+          kind: "refused",
+          status: 403,
+          reason: "Admin routes need the deploy service token",
+        };
       }
-      const ownerEmail = setting(env, "ACCESS_OWNER_EMAIL");
-      return identity.email === ownerEmail
-        ? { kind: "owner" }
-        : { kind: "refused", status: 403, reason: "Access identity is not the owner" };
+      if (identity.email !== setting(env, "ACCESS_OWNER_EMAIL")) {
+        return { kind: "refused", status: 403, reason: "Access identity is not the owner" };
+      }
+      return { kind: "owner" };
     }
     case "service": {
       if (route === "web") {
