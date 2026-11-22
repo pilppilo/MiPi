@@ -6,6 +6,7 @@ import { SPIKE_TOKEN } from "./spike.ts";
 
 const TEAM = "https://mipi-test.cloudflareaccess.com";
 const AUD = "test-aud-tag";
+const OWNER_EMAIL = "jerome@example.com";
 const SERVICE_ID = "deploy-client.access";
 
 const encode = (value: unknown): string =>
@@ -57,7 +58,7 @@ const now = () => Math.floor(Date.now() / 1000);
 const userClaims = (extra: Record<string, unknown> = {}) => ({
   iss: TEAM,
   aud: [AUD],
-  email: "jerome@example.com",
+  email: OWNER_EMAIL,
   exp: now() + 600,
   nbf: now() - 10,
   ...extra,
@@ -100,7 +101,7 @@ describe("Access JWT verification", () => {
     await expect(verifyAccessJwt(await current.sign(userClaims()), config, certs)).resolves.toEqual(
       {
         ok: true,
-        identity: { type: "user", email: "jerome@example.com" },
+        identity: { type: "user", email: OWNER_EMAIL },
       },
     );
     await expect(
@@ -178,6 +179,7 @@ describe("routes with Access on", () => {
     MIPI_OWNER: owner,
     ACCESS_TEAM_DOMAIN: TEAM,
     ACCESS_AUD: AUD,
+    ACCESS_OWNER_EMAIL: OWNER_EMAIL,
     ACCESS_SERVICE_CLIENT_ID: SERVICE_ID,
   } as unknown as Env;
   const base = "https://mipi.example.workers.dev";
@@ -241,6 +243,31 @@ describe("routes with Access on", () => {
     const admin = await call("/api/admin/status", { jwt });
     expect(admin.status).toBe(403);
     await admin.body?.cancel();
+  });
+
+  it("refuses a valid non-owner JWT on web and WebSocket routes", async () => {
+    published = [current];
+    const jwt = await current.sign(userClaims({ email: "other@example.com" }));
+    const web = await call("/api/unlock", { jwt });
+    expect(web.status).toBe(403);
+    await web.body?.cancel();
+
+    const socket = await call(`/api/sessions/${owner}`, {
+      jwt,
+      headers: { Upgrade: "websocket", Origin: base },
+    });
+    expect(socket.status).toBe(403);
+    expect(socket.webSocket).toBeNull();
+    await socket.body?.cancel();
+  });
+
+  it("refuses web sign-in when the owner email is unset", async () => {
+    published = [current];
+    const jwt = await current.sign(userClaims());
+    const target = { ...accessEnv, ACCESS_OWNER_EMAIL: "" };
+    const response = await call("/api/unlock", { jwt }, target);
+    expect(response.status).toBe(403);
+    await response.body?.cancel();
   });
 
   it("accepts the deploy service token on admin routes only", async () => {

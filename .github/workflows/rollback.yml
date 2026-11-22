@@ -43,6 +43,7 @@ jobs:
       # scripts through Access to the admin routes.
       ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
       ACCESS_AUD: ${{ vars.ACCESS_AUD }}
+      ACCESS_OWNER_EMAIL: ${{ vars.ACCESS_OWNER_EMAIL }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
@@ -94,7 +95,11 @@ jobs:
           # Builds from before M4 ignore these vars; from M4 on they keep Access on, as on a normal deploy.
           access_vars=()
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
-            access_vars=(--var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD" \
+            if [ -z "$ACCESS_OWNER_EMAIL" ]; then
+              echo "::error::ACCESS_OWNER_EMAIL is missing for the Access-enabled $TARGET environment"
+              exit 1
+            fi
+            access_vars=(--var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD" --var "ACCESS_OWNER_EMAIL:$ACCESS_OWNER_EMAIL" \
               --var "ACCESS_SERVICE_CLIENT_ID:$CF_ACCESS_CLIENT_ID")
           fi
           pnpm exec wrangler deploy --secrets-file "$secrets" "${access_vars[@]}" \

@@ -42,6 +42,7 @@ jobs:
       # scripts through Access to the admin routes.
       ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
       ACCESS_AUD: ${{ vars.ACCESS_AUD }}
+      ACCESS_OWNER_EMAIL: ${{ vars.ACCESS_OWNER_EMAIL }}
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
@@ -68,9 +69,9 @@ jobs:
             exit 1
           fi
           if [ -n "$ACCESS_TEAM_DOMAIN$ACCESS_AUD" ]; then
-            for name in ACCESS_TEAM_DOMAIN ACCESS_AUD CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET; do
+            for name in ACCESS_TEAM_DOMAIN ACCESS_AUD ACCESS_OWNER_EMAIL CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET; do
               if [ -z "${!name}" ]; then
-                echo "::error::Access is half set up: $name is missing (Environment $TARGET: variables ACCESS_TEAM_DOMAIN, ACCESS_AUD; secrets CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)"
+                echo "::error::Access is half set up: $name is missing (Environment $TARGET: variables ACCESS_TEAM_DOMAIN, ACCESS_AUD, ACCESS_OWNER_EMAIL; secrets CF_ACCESS_CLIENT_ID, CF_ACCESS_CLIENT_SECRET)"
                 exit 1
               fi
             done
@@ -119,7 +120,7 @@ jobs:
           # Access settings ride with the version as vars (they're not secret); unset, Access stays off.
           access_vars=()
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
-            access_vars=(--var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD" \
+            access_vars=(--var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD" --var "ACCESS_OWNER_EMAIL:$ACCESS_OWNER_EMAIL" \
               --var "ACCESS_SERVICE_CLIENT_ID:$CF_ACCESS_CLIENT_ID")
           fi
           pnpm exec wrangler deploy --secrets-file "$secrets" "${access_vars[@]}" \

@@ -102,7 +102,7 @@ export async function handleUnlock(
 
 /**
  * Who a request is, for the kind of route it asks for. Cloudflare Access is on when `ACCESS_TEAM_DOMAIN` and
- * `ACCESS_AUD` are set: then every protected route needs a valid Access JWT, a person's for web routes and the
+ * `ACCESS_AUD` are set: then every protected route needs a valid Access JWT, the owner's for web routes and the
  * deploy service token's for admin routes, and the spike lock and `ADMIN_TOKEN` are no longer accepted. Until they
  * are set, the M1 spike lock (web) and `ADMIN_TOKEN` (admin) apply, so a deploy before Access is configured locks
  * nobody out.
@@ -166,10 +166,15 @@ export async function authenticate(
   if (!result.ok) return { kind: "refused", status: 401, reason: result.reason };
   const identity = result.identity;
   switch (identity.type) {
-    case "user":
-      return route === "web"
+    case "user": {
+      if (route === "admin") {
+        return { kind: "refused", status: 403, reason: "Admin routes need the deploy service token" };
+      }
+      const ownerEmail = setting(env, "ACCESS_OWNER_EMAIL");
+      return identity.email === ownerEmail
         ? { kind: "owner" }
-        : { kind: "refused", status: 403, reason: "Admin routes need the deploy service token" };
+        : { kind: "refused", status: 403, reason: "Access identity is not the owner" };
+    }
     case "service": {
       if (route === "web") {
         return { kind: "refused", status: 403, reason: "A service token can't use web routes" };

@@ -55,9 +55,9 @@ Secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secret
 
 Configure staging first in Cloudflare Zero Trust under **Access controls → Applications**. Add a **Self-hosted** application for the staging hostname with an Allow policy for the owner's sign-in identity. Use the hostname application for WebSocket support. Add a separate application for the exact `/api/health` path with a Bypass policy. When the Telegram and relay handlers are deployed, configure exact-path bypass applications for their endpoints and verify each handler's own authentication.
 
-Create a service token under **Access controls → Service credentials → Service Tokens**. Add a Service Auth policy selecting that token. In the matching GitHub Environment, set:
+Create a service token under **Access controls → Service credentials → Service Tokens**. On the staging hostname application, add a Service Auth policy selecting that token. Keep the exact-path health application on its Bypass policy. In the matching GitHub Environment, set:
 
-- Variables `ACCESS_TEAM_DOMAIN` (the team's Access domain), `ACCESS_AUD` (the application's AUD), and `ACCESS_SERVICE_CLIENT_ID` (the service token's client ID).
+- Variables `ACCESS_TEAM_DOMAIN` (the team's Access domain), `ACCESS_AUD` (the application's AUD), `ACCESS_OWNER_EMAIL` (the exact email in the owner's Access identity), and `ACCESS_SERVICE_CLIENT_ID` (the service token's client ID).
 - Secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` for backup, deploy, and rollback requests.
 
 Keep the existing admin token available for deployments before Access is enabled. Set `MIPI_ACCESS_SKIP` only for localhost development. Use a separate application and token for production.

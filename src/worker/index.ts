@@ -25,6 +25,7 @@ export default {
 
     // Public liveness check (bypassed by Access). Versions only for the deploy scripts, never publicly.
     if (url.pathname === "/api/health") {
+      // The Access Bypass policy sends no JWT. Deploys read the version through the admin API.
       return (await authenticate(request, env, "admin")).kind === "admin"
         ? json(
             {
