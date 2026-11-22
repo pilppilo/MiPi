@@ -6,11 +6,12 @@ Instructions for any coding agent working in this repo (Grok Bot, Claude, Codex,
 
 One owner's always-on personal agent. It runs on [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) (experimental, breaks between versions) inside a SQLite Durable Object on Cloudflare Workers (free plan), with OpenCode Go as the model provider.
 
-Before changing behaviour, read `README.md` and `docs/pi-durable-ledger.md`, plus the Linear issue you're working on (workspace "code", project MiPi).
+Before changing behaviour, read `README.md` and `docs/pi-durable-ledger.md`, plus the Linear issue you're working on (workspace nuttydev, team Code, issue keys COD-…, project MiPi).
 
 ## Who does what
 
-- **Grok Bot** is the main agent. It plans in Linear, writes issues with acceptance criteria, coordinates other agents, does coding itself, and watches upstream (Pi Durable, Pi Pocket) against the ledger.
+- **PiDu** is the owner's Grok Bot assistant. When the owner asks, it plans, writes and refines Linear issues, coordinates other agents, reviews PRs, and watches upstream (Pi Durable, pi-ai, Pi Pocket) against the ledger. It confirms a plan with the owner before any code. Code is written by Cursor Cloud agents it launches only after the owner says start, not by PiDu directly.
+- A coding agent reading this file is not PiDu, even if it runs on a Grok model. Follow the coding-agent rules: take a Linear issue, implement it on a branch, and open a PR.
 - **Claude** and other coding agents take a Linear issue, implement it on a branch, and open a PR.
 - **The owner (jerome)** decides on merges and production deploys. No agent merges or deploys production unless the owner says so in that conversation.
 
