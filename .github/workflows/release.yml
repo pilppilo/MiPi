@@ -1,0 +1,43 @@
+name: release
+
+# When a new version lands on main, tag it and publish a GitHub release from its CHANGELOG section.
+# Versions with a pre-release part (`-alpha.N`, `-beta.N`) are marked as pre-releases.
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag and release the version in package.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          if git ls-remote --exit-code --tags origin "refs/tags/$version" >/dev/null; then
+            echo "Tag $version already exists; nothing to do."
+            exit 0
+          fi
+          notes="$RUNNER_TEMP/notes.md"
+          awk -v heading="## $version" '
+            $0 == heading { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > "$notes"
+          if [ ! -s "$notes" ]; then echo "No CHANGELOG.md section for $version." > "$notes"; fi
+          prerelease=""
+          case "$version" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$version" --target "$GITHUB_SHA" --title "MiPi $version" \
+            --notes-file "$notes" $prerelease

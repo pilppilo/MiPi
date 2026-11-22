@@ -174,7 +174,13 @@ export class MipiAgent extends DurableObject<Env> {
     const harness = await Harness.open(
       storage,
       {
-        ...createHarnessOptions({ modelId: this.env.MIPI_MODEL }),
+        ...createHarnessOptions({
+          modelId: this.env.MIPI_MODEL,
+          readEnv: (name) => {
+            const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
+            return typeof value === "string" ? value : undefined;
+          },
+        }),
         // `kind` says what happened, e.g. `task_faulted` or `task_interrupted`, with the task and extension.
         onReport: ({ error, ...report }) =>
           reportError("Harness reported a failure", error, report),
@@ -252,6 +258,25 @@ export class MipiAgent extends DurableObject<Env> {
     }
 
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /**
+   * M1 spike: facts about this account's Durable Objects that decide the rollback plan. Point-in-time recovery
+   * bookmarks are the cheap rollback path; without them the SQL/JSON export is the only one (plan §3.5).
+   */
+  async spikeProbe(): Promise<{
+    readonly pitrBookmark: { readonly ok: boolean; readonly detail: string };
+  }> {
+    try {
+      const bookmark = await this.ctx.storage.getCurrentBookmark();
+      return {
+        pitrBookmark: { ok: true, detail: `got a bookmark (${bookmark.length} characters)` },
+      };
+    } catch (error) {
+      return {
+        pitrBookmark: { ok: false, detail: error instanceof Error ? error.message : String(error) },
+      };
+    }
   }
 
   override async alarm(): Promise<void> {

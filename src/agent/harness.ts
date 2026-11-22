@@ -6,7 +6,13 @@ import {
   type HarnessOptions,
 } from "./pi/durable.ts";
 import { compactionSettings } from "./pi/compaction.ts";
-import { DEFAULT_MODEL_ID, goModels, MODEL_PROVIDER, models } from "./pi/models.ts";
+import {
+  createGoModels,
+  DEFAULT_MODEL_ID,
+  goModels,
+  MODEL_PROVIDER,
+  type ReadEnv,
+} from "./pi/models.ts";
 import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
 import { conversationSearchExtension, searchHistoryTool } from "../tools/search.ts";
 import { scheduleTool } from "../tools/schedule.ts";
@@ -14,6 +20,8 @@ import { scheduleTool } from "../tools/schedule.ts";
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
   readonly modelId?: string;
+  /** Reads Worker bindings, for model API keys (`OPENCODE_API_KEY`). Default: none, so models are unauthenticated. */
+  readonly readEnv?: ReadEnv;
 }
 
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
@@ -48,7 +56,7 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
   };
 
   return {
-    models,
+    models: createGoModels(config.readEnv ?? (() => undefined)),
     registry,
     settings: { extensions: [chatExtension], compaction: compactionSettings(goModels()) },
     conversationCreated: (tx, conversation) =>

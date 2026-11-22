@@ -50,8 +50,8 @@ function LandingPage() {
   return (
     <main>
       <header>
-        <h1>pi-durable</h1>
-        <p>A minimal chat interface for durable conversations and forks.</p>
+        <h1>MiPi</h1>
+        <p>Your always-on personal agent.</p>
       </header>
       <section aria-labelledby="create-session-heading">
         <h2 id="create-session-heading">Start a session</h2>
@@ -99,7 +99,7 @@ function ExistingSession({ sessionId }: { readonly sessionId: string }) {
   return (
     <main>
       <header>
-        <h1>pi-durable</h1>
+        <h1>MiPi</h1>
         <p>You have been invited to a shared session.</p>
       </header>
       <section aria-labelledby="join-session-heading">

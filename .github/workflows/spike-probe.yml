@@ -1,0 +1,77 @@
+name: spike-probe
+
+# M1 (COD-147): answers the spike's questions from outside the Worker, since the build workspace can't reach
+# Cloudflare or OpenCode. Run it by hand after chatting on the deployed Worker. Prints shapes and numbers, never secrets.
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: How many hours of Worker analytics to read
+        default: "24"
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
+      MIPI_SPIKE_TOKEN: ${{ secrets.MIPI_SPIKE_TOKEN }}
+    steps:
+      - name: OpenCode Go endpoints (which usage URL answers, and its shape)
+        continue-on-error: true
+        run: |
+          for url in \
+            https://opencode.ai/inference/go/v1/models \
+            https://opencode.ai/inference/go/v1/usage \
+            https://opencode.ai/zen/go/v1/usage; do
+            body="$RUNNER_TEMP/body.json"
+            status="$(curl -sS -o "$body" -w '%{http_code}' -H "Authorization: Bearer $OPENCODE_API_KEY" "$url" || echo 000)"
+            echo "== $url -> HTTP $status"
+            if jq -e . "$body" >/dev/null 2>&1; then
+              # Structure only: every path in the JSON, plus any resetsAt values and the model count.
+              jq -r '[paths | map(tostring) | join(".")] | .[:60][]' "$body"
+              jq -r '.. | objects | select(has("resetsAt")) | "resetsAt: \(.resetsAt)"' "$body" || true
+              jq -r 'if (.data | type) == "array" then "models listed: \(.data | length)" else empty end' "$body" || true
+            else
+              head -c 300 "$body"; echo
+            fi
+          done
+
+      - name: Durable Object point-in-time recovery (through the deployed Worker)
+        continue-on-error: true
+        run: |
+          subdomain="$(curl -fsS -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" | jq -r .result.subdomain)"
+          curl -sS -H "Authorization: Bearer $MIPI_SPIKE_TOKEN" "https://mipi.$subdomain.workers.dev/api/spike/probe" | jq .
+
+      - name: Worker CPU, errors and subrequests (Cloudflare analytics)
+        continue-on-error: true
+        run: |
+          since="$(date -u -d "-${{ inputs.hours }} hours" +%Y-%m-%dT%H:%M:%SZ)"
+          until="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          query='query($account: String!, $since: Time!, $until: Time!) {
+            viewer { accounts(filter: { accountTag: $account }) {
+              workers: workersInvocationsAdaptive(limit: 50, filter: { scriptName: "mipi", datetime_geq: $since, datetime_leq: $until }) {
+                dimensions { status }
+                sum { requests errors subrequests }
+                quantiles { cpuTimeP50 cpuTimeP99 }
+              }
+              objects: durableObjectsInvocationsAdaptiveGroups(limit: 50, filter: { datetime_geq: $since, datetime_leq: $until }) {
+                dimensions { status }
+                sum { requests errors }
+              }
+              objectTime: durableObjectsPeriodicGroups(limit: 50, filter: { datetimeMinute_geq: $since, datetimeMinute_leq: $until }) {
+                sum { cpuTime activeTime subrequests inboundWebsocketMsgCount }
+              }
+            } }
+          }'
+          jq -n --arg q "$query" --arg a "$CLOUDFLARE_ACCOUNT_ID" --arg s "$since" --arg u "$until" \
+            '{query: $q, variables: {account: $a, since: $s, until: $u}}' \
+            | curl -sS -X POST https://api.cloudflare.com/client/v4/graphql \
+                -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" --data @- \
+            | jq .
