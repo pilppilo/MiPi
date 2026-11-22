@@ -44,6 +44,8 @@ describe("Pi seam contract", () => {
     expect(runtimeNames(durable)).toEqual([
       "AssistantEntry",
       "Harness",
+      "ProviderDoc",
+      "UsageDoc",
       "UserEntry",
       "configure",
       "createRegistry",
@@ -151,6 +153,14 @@ describe("Pi seam contract", () => {
           (await tx.doc(Marks, "a", null)).seen = true;
         }, ctx);
         expect(await harness.snapshot(Notes, ctx)).toEqual({ count: 1 });
+
+        // The built-in documents conversation titles read and add to: the provider session id and the usage ledger.
+        expect(typeof (await harness.snapshot(durable.ProviderDoc, root.id, ctx))?.sessionId).toBe(
+          "string",
+        );
+        expect(
+          Object.keys((await harness.snapshot(durable.UsageDoc, root.id, ctx))?.models ?? {}),
+        ).toEqual(["faux/faux-1"]);
 
         const entries = (await root.entries({}, 50, undefined, ctx)).items;
         expect(entries.some((entry) => durable.UserEntry.is(entry))).toBe(true);

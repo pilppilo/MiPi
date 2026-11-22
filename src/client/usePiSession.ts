@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { BACKGROUND_CONTEXT } from "../agent/pi/shared.ts";
 import { applyImmutable } from "../agent/pi/shared.ts";
 import {
@@ -18,6 +18,7 @@ import {
   type ClientCommand,
   type ConnectionStatus,
   type ConversationSummary,
+  type Options,
 } from "../protocol.ts";
 import { CommandOutbox, type RetriableCommand } from "./command-outbox.ts";
 import {
@@ -44,6 +45,13 @@ export interface PiSession {
   readonly activeConversation: ConversationSnapshot | undefined;
   readonly activity: TaskGraph | undefined;
   readonly error: string | undefined;
+  /** The models and profiles the pickers offer; undefined until the server sent them. */
+  readonly options: Options | undefined;
+  /** Switches a conversation's model or tool profile from its next request. */
+  configureConversation(
+    conversationId: number,
+    change: { readonly model?: string; readonly profile?: string },
+  ): void;
   openConversation(conversationId: number): void;
   createConversation(): void;
   forkConversation(conversationId: number, entryId: number): void;
@@ -55,12 +63,9 @@ export interface PiSession {
   fillGap(conversationId: number, gap: TranscriptGap): void;
 }
 
-export function usePiSession(
-  sessionId: string,
-  username: string,
-  initialConversationId?: number,
-): PiSession {
+export function usePiSession(sessionId: string, initialConversationId?: number): PiSession {
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
+  const [options, setOptions] = useState<Options>();
   const socketRef = useRef<PartySocket | null>(null);
   const outboxRef = useRef<CommandOutbox | null>(null);
   outboxRef.current ??= new CommandOutbox();
@@ -133,7 +138,6 @@ export function usePiSession(
       party: "sessions",
       prefix: "api",
       room: sessionId,
-      query: { username },
       maxEnqueuedMessages: 16,
       shouldReconnectOnClose: (event) => !terminal && !terminalProtocolClose(event.code),
     });
@@ -172,6 +176,11 @@ export function usePiSession(
         if (view !== undefined) showView(parsed.conversationId, applyImmutable(view, parsed.ops));
         return;
       }
+      if (parsed.type === "command.result" && parsed.command === "options.list") {
+        if (parsed.ok) setOptions(parsed.options);
+        else dispatch({ type: "error", message: parsed.error.message });
+        return;
+      }
       if (parsed.type === "command.result" && parsed.command === "conversation.entries") {
         const pending = pagesRef.current.get(parsed.requestId);
         pagesRef.current.delete(parsed.requestId);
@@ -193,6 +202,12 @@ export function usePiSession(
       dispatch({ type: "event", event: parsed });
       if (parsed.type === "session.snapshot" && !conversationOpened) {
         conversationOpened = true;
+        socket.send(
+          JSON.stringify({
+            type: "options.list",
+            requestId: crypto.randomUUID(),
+          } satisfies ClientCommand),
+        );
         const desiredConversationId = selectedConversationRef.current;
         const selectedStillExists = parsed.session.conversations.some(
           ({ id }) => id === desiredConversationId,
@@ -261,7 +276,7 @@ export function usePiSession(
       socket.close(1000, "Session view closed");
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [outbox, sessionId, username, showView]);
+  }, [outbox, sessionId, showView]);
 
   const send = useCallback((command: ClientCommand): boolean => {
     const socket = socketRef.current;
@@ -289,6 +304,18 @@ export function usePiSession(
       selectedConversationRef.current = conversationId;
       dispatch({ type: "select", conversationId });
       send({ type: "conversation.open", requestId: crypto.randomUUID(), conversationId });
+    },
+    [send],
+  );
+
+  const configureConversation = useCallback(
+    (conversationId: number, change: { readonly model?: string; readonly profile?: string }) => {
+      send({
+        type: "conversation.configure",
+        requestId: crypto.randomUUID(),
+        conversationId,
+        ...change,
+      });
     },
     [send],
   );
@@ -376,6 +403,8 @@ export function usePiSession(
     activeConversation,
     activity: state.activity,
     error: state.error,
+    options,
+    configureConversation,
     openConversation,
     createConversation,
     forkConversation,

@@ -73,7 +73,7 @@ describe("spike lock (M1, until Access)", () => {
     });
     expect(recheck.status).toBe(204);
 
-    const socket = await exports.default.fetch(url("/api/sessions/cookie-unlocked"), {
+    const socket = await exports.default.fetch(url("/api/sessions/jerome"), {
       headers: { Upgrade: "websocket", Cookie: `other=1; ${cookie}` },
     });
     expect(socket.status).toBe(101);

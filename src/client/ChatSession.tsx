@@ -11,6 +11,7 @@ import {
 import {
   MAX_PROMPT_CHARACTERS,
   type ConversationSummary,
+  type Options,
   ROOT_CONVERSATION_ID,
 } from "../protocol.ts";
 import type { ConversationSnapshot } from "./session-state.ts";
@@ -20,14 +21,14 @@ import { usePiSession } from "./usePiSession.ts";
 
 interface ChatSessionProps {
   readonly sessionId: string;
-  readonly username: string;
 }
 
-const conversationLabel = ({ id, parent, owner }: ConversationSummary): string => {
-  if (id === ROOT_CONVERSATION_ID) return `Main conversation (id: ${id})`;
+const conversationLabel = ({ id, parent, owner, title }: ConversationSummary): string => {
   if (owner !== undefined) return `Subagent (id: ${id}, owner: ${owner.conversationId})`;
+  if (title !== undefined) return parent === undefined ? title : `${title} (fork)`;
+  if (id === ROOT_CONVERSATION_ID) return "Main conversation";
   if (parent !== undefined) return `Fork (id: ${id}, from: ${parent.at})`;
-  return `Conversation (id: ${id})`;
+  return "New conversation";
 };
 
 const statusLabel = {
@@ -51,9 +52,10 @@ const conversationIdFromLocation = (): number | undefined => {
   return Number.isSafeInteger(id) && id > 0 ? id : undefined;
 };
 
-export function ChatSession({ sessionId, username }: ChatSessionProps) {
+export function ChatSession({ sessionId }: ChatSessionProps) {
   const [initialConversationId] = useState(conversationIdFromLocation);
-  const session = usePiSession(sessionId, username, initialConversationId);
+  const session = usePiSession(sessionId, initialConversationId);
+  const [showSystem, setShowSystem] = useState(false);
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
@@ -256,13 +258,11 @@ export function ChatSession({ sessionId, username }: ChatSessionProps) {
     <div className={`session-workspace${activityOpen ? " session-workspace--activity-open" : ""}`}>
       <aside className="session-sidebar">
         <header className="session-header">
-          <a className="product-link" href="/">
-            pi-durable
-          </a>
-          <h1>Session</h1>
-          <p className="participant-name">
-            Joining as <strong>{username}</strong>
-          </p>
+          <h1>
+            <a className="product-link" href="/">
+              MiPi
+            </a>
+          </h1>
           <p className="connection-status" role="status">
             {statusLabel[session.status]}
           </p>
@@ -321,8 +321,22 @@ export function ChatSession({ sessionId, username }: ChatSessionProps) {
             </button>
           </div>
           {activeConversation === undefined ? null : (
-            <ConversationDetails conversation={activeConversation} />
+            <ConversationDetails
+              conversation={activeConversation}
+              profile={activeSummary?.profile}
+              options={session.options}
+              disabled={!isConnected}
+              onConfigure={(change) => session.configureConversation(activeConversation.id, change)}
+            />
           )}
+          <label className="system-toggle">
+            <input
+              type="checkbox"
+              checked={showSystem}
+              onChange={(event) => setShowSystem(event.currentTarget.checked)}
+            />{" "}
+            Show system entries
+          </label>
         </header>
 
         <section
@@ -355,6 +369,7 @@ export function ChatSession({ sessionId, username }: ChatSessionProps) {
                 </button>
               ) : null}
               <TranscriptList
+                hideSystem={!showSystem}
                 entries={activeConversation.entries}
                 gaps={activeConversation.gaps}
                 tools={activeConversation.tools}
@@ -476,13 +491,26 @@ export function ChatSession({ sessionId, username }: ChatSessionProps) {
   );
 }
 
-function ConversationDetails({ conversation }: { readonly conversation: ConversationSnapshot }) {
+function ConversationDetails({
+  conversation,
+  profile,
+  options,
+  disabled,
+  onConfigure,
+}: {
+  readonly conversation: ConversationSnapshot;
+  readonly profile: string | undefined;
+  readonly options: Options | undefined;
+  readonly disabled: boolean;
+  readonly onConfigure: (change: { readonly model?: string; readonly profile?: string }) => void;
+}) {
   const agent = conversation.agent;
   const totals = usageTotals(conversation.usage);
   const model =
     agent?.model === undefined
       ? "Provider default"
       : `${agent.model.provider}/${agent.model.modelId}`;
+  const modelId = agent?.model?.modelId ?? options?.defaultModel;
   const tools =
     agent?.tools === undefined
       ? "Host default"
@@ -496,13 +524,60 @@ function ConversationDetails({ conversation }: { readonly conversation: Conversa
     <section className="runtime-information" aria-label="Runtime information">
       <dl>
         <div className="runtime-primary">
-          <RuntimeDatum label="Model" value={model} />
+          {options === undefined || options.models.length === 0 ? (
+            <RuntimeDatum
+              label="Model"
+              value={
+                options?.modelsError === undefined ? model : `${model} (${options.modelsError})`
+              }
+            />
+          ) : (
+            <div>
+              <dt>
+                <label htmlFor="model-picker">Model:</label>
+              </dt>
+              <dd>
+                <select
+                  id="model-picker"
+                  value={modelId}
+                  disabled={disabled}
+                  onChange={(event) => onConfigure({ model: event.currentTarget.value })}
+                >
+                  {options.models.some(({ id }) => id === modelId) ? null : (
+                    <option value={modelId}>{modelId}</option>
+                  )}
+                  {options.models.map((choice) => (
+                    <option key={choice.id} value={choice.id}>
+                      {choice.name}
+                    </option>
+                  ))}
+                </select>
+              </dd>
+            </div>
+          )}
           <RuntimeDatum label="Thinking" value={agent?.thinkingLevel ?? "off"} />
           <RuntimeDatum label="Tokens" value={totals.tokens.toLocaleString()} />
           <RuntimeDatum label="Cached" value={formatCached(totals)} />
           <RuntimeDatum label="Cost" value={formatCost(totals.cost)} />
         </div>
         <div className="runtime-tools">
+          <dt>
+            <label htmlFor="profile-picker">Profile:</label>
+          </dt>
+          <dd>
+            <select
+              id="profile-picker"
+              value={profile ?? "default"}
+              disabled={disabled || options === undefined}
+              onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
+            >
+              {(options?.profiles ?? [{ id: profile ?? "default", name: "" }]).map((choice) => (
+                <option key={choice.id} value={choice.id} title={choice.name}>
+                  {choice.id}
+                </option>
+              ))}
+            </select>
+          </dd>
           <dt>Tools:</dt>
           <dd>{tools}</dd>
         </div>

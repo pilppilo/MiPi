@@ -14,16 +14,20 @@ interface TranscriptListProps {
   readonly runActive: boolean;
   readonly onFork?: (entryId: number) => void;
   readonly onFillGap?: (gap: TranscriptGap) => void;
+  /** Leave out system entries (prompt sections, tool changes): they are the agent's setup, not the chat. */
+  readonly hideSystem?: boolean;
 }
 
 export function TranscriptList({
-  entries,
+  entries: allEntries,
   gaps = [],
   tools,
   runActive,
   onFork,
   onFillGap,
+  hideSystem = false,
 }: TranscriptListProps) {
+  const entries = hideSystem ? allEntries.filter((entry) => entry.role !== "system") : allEntries;
   const { resultsByRequest, groupedResultIds } = correlateToolResults(entries);
   const progress = new Map(tools.map((tool) => [tool.callId, tool]));
   const gapsAfter = new Map<number, TranscriptGap>(gaps.map((gap) => [gap.after, gap]));

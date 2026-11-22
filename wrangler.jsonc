@@ -30,6 +30,8 @@
     "MIPI_MODEL": "deepseek-v4.1-flash",
     // The owner's time zone: every message is stamped with its local time.
     "MIPI_TIMEZONE": "America/Chicago",
+    // Tool profile new web and Telegram conversations start on (default, empty, pidu).
+    "MIPI_PROFILE": "default",
   },
   "observability": {
     "enabled": true,
@@ -55,6 +57,7 @@
         "MIPI_ENV": "staging",
         "MIPI_MODEL": "deepseek-v4.1-flash",
         "MIPI_TIMEZONE": "America/Chicago",
+        "MIPI_PROFILE": "default",
       },
     },
   },

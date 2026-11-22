@@ -15,7 +15,9 @@ export {
   defineExtension,
   defineTask,
   Harness,
+  ProviderDoc,
   section,
+  UsageDoc,
   UserEntry,
 } from "@earendil-works/pi-durable";
 

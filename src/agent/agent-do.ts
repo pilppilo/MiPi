@@ -5,6 +5,7 @@ import {
   type ConversationId,
   type ConversationRecord,
   type ConversationView,
+  configure,
   type Cursor,
   defineDocFamily,
   type EntryId,
@@ -15,7 +16,20 @@ import {
 } from "./pi/durable.ts";
 import { openDurableObjectSqliteStorage } from "./pi/sqlite.ts";
 import { normalizeUsername } from "../lib/identity.ts";
+import { webRequest } from "../lib/requests.ts";
+import type { MutableModels } from "./pi/ai.ts";
 import { APP_TASKS, createHarnessOptions } from "./harness.ts";
+import {
+  boundConversation,
+  ConversationMeta,
+  profileOf,
+  setProfile,
+  startingProfile,
+} from "./conversations.ts";
+import { fetchLiveGoModelIds, ModelList } from "./model-list.ts";
+import { DEFAULT_MODEL_ID } from "./pi/models.ts";
+import { isProfileName, PROFILE_NAMES, PROFILES, profileOrDefault } from "./profiles.ts";
+import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import {
@@ -46,6 +60,7 @@ import {
   parseClientCommand,
   type ClientCommand,
   type ConversationSummary,
+  type Options,
   type ServerEvent,
 } from "../protocol.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
@@ -138,13 +153,8 @@ const setConnectionState = (socket: WebSocket, state: SessionConnectionState): v
   socket.serializeAttachment(state);
 };
 
-const usernameForConnection = (connectionId: string, request: Request): string => {
-  const requested = new URL(request.url).searchParams.get("username") ?? "";
-  const username = normalizeUsername(requested);
-  if (username.length > 0) return username;
-  const suffix = connectionId.replace(/[^a-z0-9]/giu, "").slice(0, 6) || "guest";
-  return `Guest-${suffix}`;
-};
+/** Every message is the owner's: the speaker comes from `MIPI_OWNER`, never from what a client sends. */
+const ownerName = (owner: string | undefined): string => normalizeUsername(owner ?? "") || "owner";
 
 const isReservedCloseCode = (code: number): boolean =>
   code === 1005 || code === 1006 || code === 1015;
@@ -158,8 +168,13 @@ const reciprocateClose = (socket: WebSocket, code: number, reason: string): void
   }
 };
 
-const conversationSummary = (conversation: ConversationRecord): ConversationSummary => ({
+const conversationSummary = (
+  conversation: ConversationRecord,
+  meta?: { readonly title?: string; readonly profile?: string },
+): ConversationSummary => ({
   id: conversation.id,
+  ...(meta?.title === undefined ? {} : { title: meta.title }),
+  ...(meta?.profile === undefined ? {} : { profile: meta.profile }),
   ...(conversation.parent === undefined
     ? {}
     : {
@@ -197,6 +212,8 @@ export interface AdminStatus {
 
 export class MipiAgent extends DurableObject<Env> {
   #harness!: Harness;
+  #models!: MutableModels;
+  #modelList!: ModelList;
   #state: AgentState = { kind: "refused", reason: "Starting" };
   /** The data's fingerprint when the current export began; a different one at the end means something wrote. */
   #exportFingerprint: string | undefined;
@@ -430,23 +447,28 @@ export class MipiAgent extends DurableObject<Env> {
     if (current === null || current > fallback) await this.ctx.storage.setAlarm(fallback);
 
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage);
+    const options = createHarnessOptions({
+      modelId: this.env.MIPI_MODEL,
+      timeZone: this.env.MIPI_TIMEZONE,
+      profile: profileOrDefault(this.env.MIPI_PROFILE),
+      readEnv: (name) => {
+        const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
+        return typeof value === "string" ? value : undefined;
+      },
+    });
+    this.#models = options.models as MutableModels;
+    this.#modelList = new ModelList(() => fetchLiveGoModelIds(this.env.OPENCODE_API_KEY));
     const harness = await Harness.open(
       storage,
       {
-        ...createHarnessOptions({
-          modelId: this.env.MIPI_MODEL,
-          timeZone: this.env.MIPI_TIMEZONE,
-          readEnv: (name) => {
-            const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
-            return typeof value === "string" ? value : undefined;
-          },
-        }),
+        ...options,
         // `kind` says what happened, e.g. `task_faulted` or `task_interrupted`, with the task and extension.
         onReport: ({ error, ...report }) =>
           reportError("Harness reported a failure", error, report),
         // Called after open and whenever the next wake changes. With `onWake`, the Harness keeps no timer for
         // sleeps: the alarm calls `resume()`. A failed alarm write resets the object; it arms again on restart.
-        onWake: (wake) => void this.#arm(wake).catch(() => this.ctx.abort("Alarm write failed")),
+        onWake: (wake) =>
+          void this.#scheduleNextAlarm(wake).catch(() => this.ctx.abort("Alarm write failed")),
       },
       BACKGROUND_CONTEXT,
     );
@@ -481,7 +503,7 @@ export class MipiAgent extends DurableObject<Env> {
       });
       await this.#restoreViews();
       // Armed before `resume()` runs anything, as for any call that can start work.
-      await this.#arm(harness.wake());
+      await this.#scheduleNextAlarm(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
       harness.resume();
     } catch (error) {
@@ -503,10 +525,8 @@ export class MipiAgent extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
-    const connectionId = new URL(request.url).searchParams.get("_pk") || crypto.randomUUID();
-
     this.ctx.acceptWebSocket(server);
-    setConnectionState(server, { username: usernameForConnection(connectionId, request) });
+    setConnectionState(server, { username: ownerName(this.env.MIPI_OWNER) });
     try {
       await this.#connect(server);
     } catch (error) {
@@ -550,11 +570,11 @@ export class MipiAgent extends DurableObject<Env> {
       return;
     }
     // Armed before `resume()` can start work, as on open.
-    await this.#arm({ ...this.#harness.wake(), active: true });
+    await this.#scheduleNextAlarm({ ...this.#harness.wake(), active: true });
     this.#harness.resume();
     // Alarms are at-least-once, and `onWake` repeats no unchanged wake: an early or spurious alarm would otherwise
     // leave the heartbeat armed with nothing to do. `wake()` already counts the work `resume()` made runnable.
-    await this.#arm(this.#harness.wake());
+    await this.#scheduleNextAlarm(this.#harness.wake());
   }
 
   override async webSocketMessage(socket: WebSocket, message: WSMessage): Promise<void> {
@@ -652,6 +672,17 @@ export class MipiAgent extends DurableObject<Env> {
 
   async #connect(server: WebSocket): Promise<void> {
     const root = await this.#harness.root(BACKGROUND_CONTEXT);
+    // The web door talks to the root conversation first; the binding also gives the root its starting profile once.
+    await this.#harness.commit(
+      (tx) =>
+        boundConversation(
+          tx,
+          "web",
+          startingProfile("web", profileOrDefault(this.env.MIPI_PROFILE)),
+          { existing: root.id },
+        ),
+      BACKGROUND_CONTEXT,
+    );
     await this.#sendSessionSnapshot(server);
     await this.#watchConversation(server, root.id);
   }
@@ -774,14 +805,31 @@ export class MipiAgent extends DurableObject<Env> {
         const conversation = await this.#requireConversation(
           command.conversationId as ConversationId,
         );
+        const requestId = webRequest(command.requestId);
+        // A retry of an input already admitted is answered with that input, and admits nothing.
+        const admitted = await this.#harness.commit(
+          (tx) => tx.submissionByRequest(conversation.id, requestId),
+          BACKGROUND_CONTEXT,
+        );
+        if (admitted !== undefined) {
+          this.#send(socket, {
+            type: "command.result",
+            command: command.type,
+            requestId: command.requestId,
+            ok: true,
+            conversationId: conversation.id,
+            submissionId: admitted.id,
+          });
+          return;
+        }
         // Arm before admitting work: `onWake` runs after the commit, so an instance that dies in between is
         // still woken. An early alarm is harmless; a missing one strands the turn.
-        await this.#arm({ ...this.#harness.wake(), active: true });
+        await this.#scheduleNextAlarm({ ...this.#harness.wake(), active: true });
         const submission = await conversation.submit(
           {
             type: "input",
-            content: stampInput(connectionState(socket)?.username ?? "Guest", command.content),
-            requestId: command.requestId,
+            content: stampInput(ownerName(this.env.MIPI_OWNER), command.content),
+            requestId,
             // Queue behind a running turn instead of rejecting; the inbox places it after the current answer.
             whenBusy: "followUp",
           },
@@ -794,6 +842,46 @@ export class MipiAgent extends DurableObject<Env> {
           ok: true,
           conversationId: conversation.id,
           submissionId: submission.id,
+        });
+        await this.#nameConversation(conversation.id, command.content);
+        return;
+      }
+      case "options.list": {
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          options: await this.#options(),
+        });
+        return;
+      }
+      case "conversation.configure": {
+        const conversation = await this.#requireConversation(
+          command.conversationId as ConversationId,
+        );
+        if (command.profile !== undefined && !isProfileName(command.profile)) {
+          throw new Error(
+            `${command.profile} is not a profile: pick one of ${PROFILE_NAMES.join(", ")}`,
+          );
+        }
+        // Checked before the commit: a model outside the live list ∩ catalog is refused.
+        const model =
+          command.model === undefined ? undefined : await this.#modelList.require(command.model);
+        const profile = command.profile;
+        await this.#harness.commit(async (tx) => {
+          if (model !== undefined) await configure(tx, conversation.id, { model });
+          if (profile !== undefined && isProfileName(profile)) {
+            await setProfile(tx, conversation.id, profile);
+          }
+        }, BACKGROUND_CONTEXT);
+        await this.#broadcastSessionSnapshot();
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId: conversation.id,
         });
         return;
       }
@@ -826,11 +914,59 @@ export class MipiAgent extends DurableObject<Env> {
       let cursor: Cursor | undefined;
       do {
         const page = await tx.scanConversations({}, CONVERSATION_PAGE_SIZE, cursor);
-        conversations.push(...page.items.map(conversationSummary));
+        for (const record of page.items) {
+          // Subagents' conversations carry no meta of their own.
+          if (record.owner !== undefined) {
+            conversations.push(conversationSummary(record));
+            continue;
+          }
+          const meta = await tx.doc(ConversationMeta, record.id);
+          conversations.push(
+            conversationSummary(record, {
+              ...(meta.title === undefined ? {} : { title: meta.title }),
+              profile: profileOf(meta),
+            }),
+          );
+        }
         cursor = page.next;
       } while (cursor !== undefined);
       return conversations;
     }, BACKGROUND_CONTEXT);
+  }
+
+  /** What the web pickers offer. A failed live model list leaves the model picker empty, with the reason. */
+  async #options(): Promise<Options> {
+    const profiles = PROFILE_NAMES.map((name) => ({ id: name, name: PROFILES[name].description }));
+    const defaultModel = this.env.MIPI_MODEL || DEFAULT_MODEL_ID;
+    try {
+      return { models: await this.#modelList.models(), profiles, defaultModel };
+    } catch (error) {
+      reportError("Reading the Go model list failed", error);
+      return {
+        models: [],
+        profiles,
+        defaultModel,
+        modelsError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Titles a conversation from its first message, then, for a long one, asks its model for a better title. The model
+   * call runs after the reply to the client and never fails the submit.
+   */
+  async #nameConversation(conversationId: ConversationId, text: string): Promise<void> {
+    const provisional = await this.#harness.commit(
+      (tx) => nameFromFirstMessage(tx, conversationId, text),
+      BACKGROUND_CONTEXT,
+    );
+    await this.#broadcastSessionSnapshot();
+    if (provisional === undefined) return;
+    void writeTitle(this.#harness, this.#models, conversationId, text, provisional, (error) =>
+      reportError("Writing a conversation title failed", error, { conversationId }),
+    ).then(async (changed) => {
+      if (changed && this.#state.kind === "open") await this.#broadcastSessionSnapshot();
+    });
   }
 
   async #watchConversation(
@@ -945,8 +1081,11 @@ export class MipiAgent extends DurableObject<Env> {
     }
   }
 
-  /** The one alarm: the earliest sleep, or a recovery heartbeat while work can run, whichever comes first. */
-  #arm(wake: Wake): Promise<void> {
+  /**
+   * The one alarm: the earliest sleep, or a recovery heartbeat while work can run, whichever comes first. Everything
+   * that needs the alarm goes through here (the Telegram outbox joins it in M6).
+   */
+  #scheduleNextAlarm(wake: Wake): Promise<void> {
     // Serialized, so an older wake cannot overwrite a newer, earlier deadline.
     const write = this.#alarmWrites.then(async () => {
       const heartbeat = wake.active ? Date.now() + HEARTBEAT_MS : undefined;
