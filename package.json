@@ -8,7 +8,7 @@
     "clean": "shx rm -rf .wrangler dist",
     "format": "oxfmt .",
     "format:check": "oxfmt --check .",
-    "check": "oxfmt --check . && oxlint --deny-warnings && node scripts/stamp-version.ts --check && wrangler types --env-file .dev.vars.example --include-runtime false --check && tsc && tsc -p tsconfig.client.json && tsc -p tsconfig.scripts.json && pnpm build && wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "check": "oxfmt --check . && oxlint --deny-warnings && node scripts/stamp-version.ts --check && node scripts/ledger-cli.ts --check && wrangler types --env-file .dev.vars.example --include-runtime false --check && tsc && tsc -p tsconfig.client.json && tsc -p tsconfig.scripts.json && pnpm build && wrangler deploy --dry-run --outdir .wrangler/dry-run",
     "deploy": "pnpm build && wrangler deploy",
     "dev": "vite",
     "preview": "vite preview",
@@ -16,6 +16,7 @@
     "changeset": "changeset",
     "lint": "oxlint --deny-warnings",
     "upgrade:pi": "node scripts/upgrade-pi.ts",
+    "ledger": "node scripts/ledger-cli.ts",
     "bump": "changeset version && node scripts/stamp-version.ts"
   },
   "dependencies": {

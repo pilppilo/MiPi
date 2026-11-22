@@ -20,6 +20,7 @@ export function goModels() {
  * `globalThis.process.env`, which a Worker only has with Node compatibility turned on; here keys come straight from the
  * Worker's own bindings instead, so `OPENCODE_API_KEY` resolves without `nodejs_compat`.
  */
+// pi-ledger L1: keys from Worker bindings, not process.env.
 export function createGoModels(readEnv: ReadEnv): MutableModels {
   const models = createModels({
     authContext: {

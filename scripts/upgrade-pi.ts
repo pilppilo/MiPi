@@ -48,8 +48,11 @@ console.log(
     ? `\n===== Pi Durable changes ${current} → ${target} =====\n\n${changes}\n`
     : `\nNo Pi Durable changelog entries between ${current} and ${target}.\n`,
 );
-console.log(`Next:
+console.log(`\n===== Pi Durable ledger: recheck each open entry against the changes above =====\n`);
+run("node", ["scripts/ledger-cli.ts"]);
+console.log(`\nNext:
   1. Fix src/agent/pi/ until \`pnpm check\` and \`pnpm test\` pass (test/contract.test.ts names what moved).
-  2. \`pnpm changeset\`: a **Pi Durable** note, and a **Migration** note. If storage or task versions changed,
+  2. Update docs/pi-durable-ledger.md: close entries this release fixed (and delete their code), add new ones.
+  3. \`pnpm changeset\`: a **Pi Durable** note (naming ledger entries added or closed), and a **Migration** note. If storage or task versions changed,
      add a "> [!WARNING]" line with **One-way:** so rollbacks past it are refused.
-  3. Merge: it deploys to staging. Use it there for a day, then run the deploy workflow for production.`);
+  4. Merge: it deploys to staging. Use it there for a day, then run the deploy workflow for production.`);

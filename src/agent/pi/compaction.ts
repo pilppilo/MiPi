@@ -19,6 +19,7 @@ export const RESERVE_LIMIT = 32_768;
  * conversation is exactly that kind of long-lived conversation. This keeps room for all the output the model can
  * write, up to `RESERVE_LIMIT` and a quarter of its context window, and never less than Pi Durable's default.
  */
+// pi-ledger L4: larger reserve than Pi Durable's default.
 export function summaryReserve(model: ReserveModel): number {
   const fallback = DEFAULT_COMPACTION_POLICY.reserveTokens;
   const output = model.maxTokens > 0 ? Math.ceil(model.maxTokens / 0.8) : RESERVE_LIMIT;
