@@ -9,6 +9,7 @@ import type { ToolRegistration } from "./pi/durable.ts";
 import { forgetTool, rememberTool } from "../tools/memory.ts";
 import { scheduleTool } from "../tools/schedule.ts";
 import { searchHistoryTool } from "../tools/search.ts";
+import { webFetchTool } from "../tools/web-fetch.ts";
 
 export const PROFILE_NAMES = ["default", "empty", "pidu"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
@@ -19,6 +20,7 @@ const TOOLS = {
   search_history: searchHistoryTool,
   remember: rememberTool,
   forget: forgetTool,
+  web_fetch: webFetchTool,
 } as const satisfies Record<string, ToolRegistration>;
 export type ToolId = keyof typeof TOOLS;
 
@@ -33,8 +35,8 @@ export interface Profile {
 export const PROFILES: Readonly<Record<ProfileName, Profile>> = {
   default: {
     name: "default",
-    description: "Everyday tools: scheduling, history search and memory",
-    tools: ["schedule", "search_history", "remember", "forget"],
+    description: "Everyday tools: scheduling, history search, memory and web pages",
+    tools: ["schedule", "search_history", "remember", "forget", "web_fetch"],
   },
   empty: {
     name: "empty",
@@ -45,7 +47,7 @@ export const PROFILES: Readonly<Record<ProfileName, Profile>> = {
     name: "pidu",
     // Relay input is authenticated owner input, so it starts with the default tools; separate so it can narrow.
     description: "The PiDu relay: the default tools for now",
-    tools: ["schedule", "search_history", "remember", "forget"],
+    tools: ["schedule", "search_history", "remember", "forget", "web_fetch"],
   },
 };
 

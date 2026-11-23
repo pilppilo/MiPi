@@ -24,7 +24,8 @@ export const WEBHOOK_SECRET_PATTERN = /^[A-Za-z0-9_-]{1,256}$/;
 export type TelegramAdmission = { readonly kind: "stored" } | { readonly kind: "unavailable" };
 
 export interface TelegramAgent {
-  telegramAdmit(update: TelegramInbound): Promise<TelegramAdmission>;
+  /** `host` is the hostname the webhook came to, which the agent keeps so `web_fetch` refuses it. */
+  telegramAdmit(update: TelegramInbound, host?: string): Promise<TelegramAdmission>;
 }
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
@@ -80,7 +81,7 @@ export async function handleTelegramWebhook(
 
   let admission: TelegramAdmission;
   try {
-    admission = await agent().telegramAdmit(update);
+    admission = await agent().telegramAdmit(update, new URL(request.url).hostname);
   } catch (error) {
     console.error(
       JSON.stringify({

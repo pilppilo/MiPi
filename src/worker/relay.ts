@@ -22,8 +22,9 @@ export const IDEMPOTENCY_HEADER = "Idempotency-Key";
 export const UNAVAILABLE_RETRY_SECONDS = 30;
 
 export interface RelayAgent {
-  relayAdmit(key: string, text: string): Promise<RelayResult>;
-  relayResult(key: string): Promise<RelayResult>;
+  /** `host` is the hostname the request came to, which the agent keeps so `web_fetch` refuses it. */
+  relayAdmit(key: string, text: string, host?: string): Promise<RelayResult>;
+  relayResult(key: string, host?: string): Promise<RelayResult>;
 }
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
@@ -144,7 +145,7 @@ export async function handleRelay(
     if (new TextEncoder().encode(text).byteLength > RELAY_MAX_TEXT_BYTES) {
       return relayResponse(key, { kind: "too-large", limitBytes: RELAY_MAX_TEXT_BYTES });
     }
-    return call(key, () => agent().relayAdmit(key, text));
+    return call(key, () => agent().relayAdmit(key, text, new URL(request.url).hostname));
   }
 
   // `/api/relay/<key>`: exactly one segment, checked before the agent is asked anything.
@@ -153,5 +154,5 @@ export async function handleRelay(
   if (request.method !== "GET") {
     return json({ error: "Method not allowed" }, 405, { Allow: "GET" });
   }
-  return call(key, () => agent().relayResult(key));
+  return call(key, () => agent().relayResult(key, new URL(request.url).hostname));
 }

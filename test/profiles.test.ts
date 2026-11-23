@@ -103,6 +103,7 @@ describe("tool profiles", () => {
         "remember",
         "schedule",
         "search_history",
+        "web_fetch",
       ]);
 
       await harness.commit((tx) => setProfile(tx, root.id, "empty"), ctx);
@@ -168,6 +169,7 @@ describe("profile tools at startup", () => {
         "remember",
         "schedule",
         "search_history",
+        "web_fetch",
       ]);
       expect(agent.model).toEqual({ provider: "faux", modelId: "faux-2" });
       expect((await (await harness.conversation(plain, ctx))!.agent(ctx)).tools).toEqual([]);
