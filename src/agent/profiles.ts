@@ -6,6 +6,7 @@
  * Never add Pi Durable's coding tools (read, write, edit, bash), codemode or tool search.
  */
 import type { ToolRegistration } from "./pi/durable.ts";
+import { forgetTool, rememberTool } from "../tools/memory.ts";
 import { scheduleTool } from "../tools/schedule.ts";
 import { searchHistoryTool } from "../tools/search.ts";
 
@@ -16,6 +17,8 @@ export type ProfileName = (typeof PROFILE_NAMES)[number];
 const TOOLS = {
   schedule: scheduleTool,
   search_history: searchHistoryTool,
+  remember: rememberTool,
+  forget: forgetTool,
 } as const satisfies Record<string, ToolRegistration>;
 export type ToolId = keyof typeof TOOLS;
 
@@ -30,8 +33,8 @@ export interface Profile {
 export const PROFILES: Readonly<Record<ProfileName, Profile>> = {
   default: {
     name: "default",
-    description: "Everyday tools: scheduling and history search",
-    tools: ["schedule", "search_history"],
+    description: "Everyday tools: scheduling, history search and memory",
+    tools: ["schedule", "search_history", "remember", "forget"],
   },
   empty: {
     name: "empty",
@@ -42,7 +45,7 @@ export const PROFILES: Readonly<Record<ProfileName, Profile>> = {
     name: "pidu",
     // Relay input is authenticated owner input, so it starts with the default tools; separate so it can narrow.
     description: "The PiDu relay: the default tools for now",
-    tools: ["schedule", "search_history"],
+    tools: ["schedule", "search_history", "remember", "forget"],
   },
 };
 

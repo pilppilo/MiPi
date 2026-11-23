@@ -98,7 +98,12 @@ describe("tool profiles", () => {
     try {
       const root = await harness.root(ctx);
       await (await root.submit({ type: "input", content: "one" }, ctx)).wait(ctx);
-      expect(offered(requests[0]!).tools).toEqual(["schedule", "search_history"]);
+      expect(offered(requests[0]!).tools).toEqual([
+        "forget",
+        "remember",
+        "schedule",
+        "search_history",
+      ]);
 
       await harness.commit((tx) => setProfile(tx, root.id, "empty"), ctx);
       await (await root.submit({ type: "input", content: "two" }, ctx)).wait(ctx);
@@ -158,7 +163,12 @@ describe("profile tools at startup", () => {
       }, ctx);
       expect(await syncProfileTools(harness)).toEqual([old]);
       const agent = await (await harness.conversation(old, ctx))!.agent(ctx);
-      expect(agent.tools.map(({ name }) => name).sort()).toEqual(["schedule", "search_history"]);
+      expect(agent.tools.map(({ name }) => name).sort()).toEqual([
+        "forget",
+        "remember",
+        "schedule",
+        "search_history",
+      ]);
       expect(agent.model).toEqual({ provider: "faux", modelId: "faux-2" });
       expect((await (await harness.conversation(plain, ctx))!.agent(ctx)).tools).toEqual([]);
       // Synced already, and the profiles haven't changed: the next start only reads one setting.
