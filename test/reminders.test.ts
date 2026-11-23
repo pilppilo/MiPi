@@ -85,6 +85,8 @@ async function openAgent(
     ctx,
   );
   const sent: Array<{ chatId: number; text: string }> = [];
+  /** What the door reported: `settle()` fails on any. */
+  const reports: string[] = [];
   let calls = 0;
   const channel = new TelegramChannelRuntime({
     harness,
@@ -99,7 +101,9 @@ async function openAgent(
     },
     armAlarm: async () => {},
     onWakeChange: () => {},
-    report: () => {},
+    report: (message, error) => {
+      reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
+    },
     now: () => clock.now,
   });
   // As the Durable Object does: a reminder records Telegram answers in the door's document.
@@ -125,6 +129,7 @@ async function openAgent(
         // Let a reminder's commit reach the door before looking again.
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
+      if (reports.length > 0) throw new Error(`Reported: ${reports.splice(0).join("; ")}`);
     },
     advance: async (ms) => {
       clock.now += ms;
@@ -369,6 +374,117 @@ describe("reminders", () => {
         await agent.close();
       }
     }));
+
+  it("answers two Telegram reminders that come due in the same wake", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, said("First one.", "Second one."));
+      try {
+        const root = await agent.harness.root(ctx);
+        const due = clock.now + 60_000;
+        await root.commit(async (tx) => {
+          for (const name of ["a", "b"]) {
+            await tx.createTask(
+              ScheduledReminder,
+              {
+                id: `reminder:${name}`,
+                conversationId: root.id,
+                instruction: `Reminder ${name}`,
+                zone: ZONE,
+                first: due,
+                destination: { kind: "telegram", chatId: CHAT },
+              },
+              { ownership: { kind: "conversation" }, background: true },
+            );
+          }
+        }, ctx);
+        // Only what the door's watchers do, as between alarms: no recover() here.
+        clock.now += 60_000;
+        agent.harness.resume();
+        for (let wait = 0; wait < 100 && agent.sent.length < 2; wait++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(agent.sent.map(({ text: sent }) => sent).sort()).toEqual([
+          "First one.",
+          "Second one.",
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("keeps a reminder made by a web turn on the web while a Telegram message waits behind it", () =>
+    inObject(async (storage) => {
+      const release = Promise.withResolvers<void>();
+      const heldSchedule: FauxResponseStep = async () => {
+        await release.promise;
+        return fauxAssistantMessage(
+          [fauxToolCall("schedule", { instruction: "From the web", delaySeconds: 60 })],
+          { stopReason: "toolUse" },
+        );
+      };
+      const agent = await openAgent(storage, [
+        heldSchedule,
+        ...said("Scheduled from the web.", "Answering Telegram."),
+      ]);
+      try {
+        // The chat's conversation exists; a web turn runs in it.
+        await agent.channel.admit({
+          kind: "command",
+          updateId: 1,
+          chatId: CHAT,
+          command: "version",
+          argument: "",
+        });
+        const conversationId = await boundId(agent.harness);
+        const conversation = await agent.harness.conversation(conversationId as never, ctx);
+        await conversation!.submit({ type: "input", content: "remind me from the web" }, ctx);
+        // A Telegram message arrives while it runs: queued behind it.
+        await agent.channel.admit(text(2, "and a question from Telegram"));
+        release.resolve();
+        await agent.settle();
+        const [reminder] = await reminders(agent.harness);
+        expect(reminder!.input.destination).toEqual({ kind: "web", conversationId });
+        expect(agent.sent.map(({ text: sent }) => sent)).toContain("Answering Telegram.");
+      } finally {
+        release.resolve();
+        await agent.close();
+      }
+    }));
+
+  it("doesn't let a reminder's own turn make another reminder", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, [
+        schedules({ instruction: "Again", delaySeconds: 60 }),
+        ...said("Couldn't schedule from here."),
+      ]);
+      try {
+        const root = await agent.harness.root(ctx);
+        await root.commit(
+          (tx) =>
+            tx.createTask(
+              ScheduledReminder,
+              {
+                id: "reminder:once",
+                conversationId: root.id,
+                instruction: "Schedule yourself again",
+                zone: ZONE,
+                first: clock.now,
+                destination: { kind: "web", conversationId: root.id },
+              },
+              { ownership: { kind: "conversation" }, background: true },
+            ),
+          ctx,
+        );
+        await agent.advance(1);
+        const results = (await root.context(ctx)).messages.filter(
+          (message) => message.role === "toolResult",
+        );
+        expect(results).toEqual([expect.objectContaining({ isError: true })]);
+        expect(await reminders(agent.harness)).toEqual([]);
+      } finally {
+        await agent.close();
+      }
+    }));
 });
 
 describe("reminder times", () => {
@@ -391,6 +507,20 @@ describe("reminder times", () => {
   it("steps a repeat from its own time to the first one after now", () => {
     expect(nextOccurrence({ minutes: 10 }, at, at, ZONE)).toBe(at + 10 * 60_000);
     expect(nextOccurrence({ minutes: 10 }, at, at + 35 * 60_000, ZONE)).toBe(at + 40 * 60_000);
+    // Thirty days down: the next time, in one step, still on the 10-minute grid from the recorded time.
+    const month = 30 * 24 * 60 * 60_000;
+    expect(nextOccurrence({ minutes: 10 }, at, at + month + 1, ZONE)).toBe(
+      at + month + 10 * 60_000,
+    );
+    // A windowed repeat after a long pause: the next slot after now, inside its window.
+    const windowed = nextOccurrence(
+      { minutes: 30, window: { from: "09:00", to: "17:00" } },
+      at,
+      at + month,
+      ZONE,
+    );
+    expect(windowed).toBeGreaterThan(at + month);
+    expect(windowed - (at + month)).toBeLessThanOrEqual(24 * 60 * 60_000);
     // A clock-time repeat stays on the clock: Monday 08:00 Chicago is 14:00Z in November.
     expect(new Date(nextOccurrence({ at: "08:00" }, at, at, ZONE)).toISOString()).toBe(
       "2026-11-24T14:00:00.000Z",

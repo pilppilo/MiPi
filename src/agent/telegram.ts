@@ -171,6 +171,7 @@ export class TelegramChannelRuntime {
   #wake: TelegramWake = { active: false };
   #closed = false;
   #refreshing = false;
+  #refreshAgain = false;
 
   constructor(options: TelegramChannelOptions) {
     this.#options = options;
@@ -194,17 +195,25 @@ export class TelegramChannelRuntime {
 
   /**
    * Picks up inputs another part of the agent recorded for this door (a reminder's occurrence, M6): watches each until
-   * it settles, and refreshes the wake. Harmless to call often; calls while one runs are folded into it.
+   * it settles, and refreshes the wake. Harmless to call often; a call while one runs makes it read once more.
    */
   refresh(): void {
-    if (this.#closed || this.#refreshing) return;
+    if (this.#closed) return;
+    if (this.#refreshing) {
+      // Read again once the running pass ends, so an input recorded during it isn't missed.
+      this.#refreshAgain = true;
+      return;
+    }
     this.#refreshing = true;
     void (async () => {
       try {
-        const submissions = await this.#commit(async (tx) =>
-          (await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
-        );
-        for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
+        do {
+          this.#refreshAgain = false;
+          const submissions = await this.#commit(async (tx) =>
+            (await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
+          );
+          for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
+        } while (this.#refreshAgain && !this.#closed);
       } catch (error) {
         if (!this.#closed) this.#options.report("Refreshing the Telegram door failed", error);
       } finally {

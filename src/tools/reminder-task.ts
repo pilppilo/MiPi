@@ -73,14 +73,18 @@ export function decideOccurrence(options: {
   return options.previousBusy ? "skip-busy" : "send";
 }
 
-/** The first repeat time after `now`, stepping from the recorded time so the series stays on its clock. */
+/**
+ * The first repeat time after `now`, in constant time, however long the agent was down. A plain interval keeps its
+ * phase from the recorded time; a clock time or a windowed interval is anchored to the wall clock, so the next one
+ * after `now` (or after the recorded time, when that is later) is the right one.
+ */
 export function nextOccurrence(every: Repeat, at: number, now: number, zone: string): number {
-  let next = nextRepeat(every, at, zone);
-  for (let steps = 0; next <= now; steps++) {
-    if (steps > 100_000) throw new Error("A repeat's next time could not be found");
-    next = nextRepeat(every, next, zone);
+  // `Repeat` is when.ts's shape, which has no tag: a plain interval has `minutes` and no window.
+  if ("minutes" in every && every.window === undefined) {
+    const step = every.minutes * 60_000;
+    return at + (Math.max(0, Math.floor((now - at) / step)) + 1) * step;
   }
-  return next;
+  return nextRepeat(every, Math.max(at, now), zone);
 }
 
 export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>({

@@ -50,7 +50,6 @@ export function formatScheduledInstruction(
   return `${text}${RECURRENCE_NOTE_PREFIX} It repeats every ${cadence} in ${scheduled.recurrence.timezone}. After carrying it out, call schedule with this instruction and sourceScheduleId ${JSON.stringify(scheduled.id)}. Omit delaySeconds, at, and recurrence because the next UTC deadline and recurrence policy are derived from the source.`;
 }
 
-/** The instruction text of a scheduled delivery input, or `undefined` for ordinary input. */
 /**
  * A reminder's input (M6): the instruction as the legacy format shows it, plus, for a repeat, a note that the reminder
  * schedules its own next time, so the model never schedules it again. The client shows only the instruction.
@@ -66,6 +65,7 @@ export function formatReminder(
     : `${text}${RECURRENCE_NOTE_PREFIX} It repeats ${repeats}, on its own: don't schedule it again.`;
 }
 
+/** The instruction text of a scheduled delivery input, or `undefined` for ordinary input. */
 export function parseScheduledInstruction(content: string): string | undefined {
   const head = SCHEDULED_INSTRUCTION_HEAD.exec(content);
   if (head === null) return undefined;

@@ -1,5 +1,10 @@
 import { int, obj, opt, str } from "../agent/pi/schema.ts";
-import { defineDoc, type ToolRegistration } from "../agent/pi/durable.ts";
+import {
+  type ConversationId,
+  defineDoc,
+  LiveDoc,
+  type ToolRegistration,
+} from "../agent/pi/durable.ts";
 import {
   DeliverScheduledInstruction,
   nextRecurrenceRunAt,
@@ -118,27 +123,30 @@ const reminderResult = (reminder: ReminderInput, now: number) => {
 };
 
 /**
- * Where a reminder made now answers: the Telegram chat whose message this run is answering, when there is one (its
- * input waits in the door's state until answered), otherwise the conversation itself, on the web.
+ * What the run calling `schedule` is answering, read in the tool's commit: the inputs it placed (`pi.live`), and for
+ * each whether it is a reminder's occurrence (`sched:`) and which Telegram chat it came from (the door's pending
+ * inputs). Inputs queued behind the run don't count: the run isn't answering them yet.
  */
-function destinationOf(
-  channel:
-    | {
-        readonly inputs: readonly {
-          readonly updateId?: number;
-          readonly chatId: number;
-          readonly conversationId: number;
-        }[];
-      }
-    | undefined,
-  conversationId: number,
-): ReminderDestination {
-  const telegram = channel?.inputs.find(
-    (input) => input.conversationId === conversationId && input.updateId !== undefined,
-  );
-  return telegram === undefined
-    ? { kind: "web", conversationId }
-    : { kind: "telegram", chatId: telegram.chatId };
+async function runInputs(
+  tx: ScanTx,
+  conversationId: ConversationId,
+): Promise<{ readonly reminderOnly: boolean; readonly telegramChat?: number }> {
+  const placed = (await tx.doc(LiveDoc, conversationId)).run?.inputs ?? [];
+  const pending = (await tx.doc(TelegramChannel)).inputs;
+  let reminders = 0;
+  let telegramChat: number | undefined;
+  for (const id of placed) {
+    const record = await tx.submission(id);
+    if (record?.requestId?.startsWith("sched:") === true) reminders += 1;
+    const telegram = pending.find(
+      (input) => input.submissionId === id && input.updateId !== undefined,
+    );
+    telegramChat ??= telegram?.chatId;
+  }
+  return {
+    reminderOnly: placed.length > 0 && reminders === placed.length,
+    ...(telegramChat === undefined ? {} : { telegramChat }),
+  };
 }
 
 const scheduleResult = (scheduled: ScheduledInstruction, now: number) => {
@@ -265,21 +273,30 @@ export const scheduleTool: ToolRegistration = {
           "schedule may run during a scheduled delivery only to create its recurring successor",
         );
       }
-      const requested: ReminderInput = {
-        id: `reminder:${api.taskId}`,
-        conversationId: api.conversationId,
-        instruction: args.instruction,
-        zone,
-        first: timing.first,
-        ...(timing.every === undefined ? {} : { every: timing.every }),
-        destination: destinationOf(
-          await api.snapshot(TelegramChannel, context),
-          api.conversationId,
-        ),
-      };
       const reminder = await api.commit(async (tx) => {
         const intent = await tx.doc(ScheduleIntent, api.taskId);
         if (intent.reminder !== undefined) return intent.reminder;
+        // A reminder's own turn makes no reminders: a repeat already schedules itself, and a reminder that makes
+        // reminders could multiply. A turn that also answers someone's message may.
+        const run = await runInputs(tx, api.conversationId);
+        if (run.reminderOnly) {
+          throw new Error(
+            "schedule can't run while carrying out a reminder: a repeating reminder already schedules itself",
+          );
+        }
+        const destination: ReminderDestination =
+          run.telegramChat === undefined
+            ? { kind: "web", conversationId: api.conversationId }
+            : { kind: "telegram", chatId: run.telegramChat };
+        const requested: ReminderInput = {
+          id: `reminder:${api.taskId}`,
+          conversationId: api.conversationId,
+          instruction: args.instruction,
+          zone,
+          first: timing.first,
+          ...(timing.every === undefined ? {} : { every: timing.every }),
+          destination,
+        };
         if ((await activeReminders(tx)) >= MAX_ACTIVE_REMINDERS) {
           throw new Error(
             `There are already ${MAX_ACTIVE_REMINDERS} schedules waiting, the most there may be. One has to run or be cancelled first.`,
@@ -301,19 +318,23 @@ export const scheduleTool: ToolRegistration = {
 
 type ScanTx = Parameters<Parameters<Parameters<ToolRegistration["execute"]>[1]["commit"]>[0]>[0];
 
-/** Schedules still waiting or running: reminders, and legacy deliveries still in storage. */
+/** Schedules not yet finished: reminders, and legacy deliveries still in storage. Stops counting at the cap. */
 async function activeReminders(tx: ScanTx): Promise<number> {
   let count = 0;
   for (const kind of [
     ScheduledReminder.definition.name,
     DeliverScheduledInstruction.definition.name,
   ]) {
-    let cursor: Parameters<typeof tx.scanTasks>[2];
-    do {
-      const page = await tx.scanTasks({ kind }, 100, cursor);
-      count += page.items.filter(({ state }) => state.status !== "terminal").length;
-      cursor = page.next;
-    } while (cursor !== undefined);
+    // Every status but `terminal`, so finished schedules are never paged through.
+    for (const status of ["pending", "running", "waiting", "sleeping"] as const) {
+      let cursor: Parameters<typeof tx.scanTasks>[2];
+      do {
+        const page = await tx.scanTasks({ kind, status }, MAX_ACTIVE_REMINDERS, cursor);
+        count += page.items.length;
+        if (count >= MAX_ACTIVE_REMINDERS) return count;
+        cursor = page.next;
+      } while (cursor !== undefined);
+    }
   }
   return count;
 }

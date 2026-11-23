@@ -16,6 +16,7 @@ COD-153 (M6, part 1 of 3): reminders that reach the chat they came from.
   - A repeat skips a time while its previous delivery is still queued or running, and counts the skip.
   - A repeat skips a time that comes more than 15 minutes late, and moves to its next time.
   - A one-time reminder always goes out, however late.
+  - A reminder's own turn can't make another reminder (a repeat already schedules itself). A turn that also answers a message can.
 
 **Changed**
 
@@ -29,4 +30,4 @@ COD-153 (M6, part 1 of 3): reminders that reach the chat they came from.
 **Migration**
 
 - None needed: stored schedules keep running.
-- After a rollback to an earlier build, reminders made by this build won't run: that build doesn't know the `app.reminder` task. Its startup guard doesn't refuse them, so the rest of the agent keeps working.
+- After a rollback to an earlier build, reminders made by this build don't run: that build doesn't know the `app.reminder` task. Pi Durable marks such a task blocked (`missing_task`) and reports it, without crashing, and the rest of the agent keeps working. The reminders run again once you roll forward.
