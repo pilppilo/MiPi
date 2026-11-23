@@ -7,13 +7,16 @@ COD-184 (M8 slice 3, part of COD-154): the background memory pass. It replaces "
 **Added**
 
 - Once a conversation has been idle for 30 minutes, the alarm runs one pass on it. The pass reads what was said since the conversation's mark, plus the lessons already saved, and asks the conversation's own model for at most 3 new lessons. They're saved by `remember`'s rules, with source `background`. It's silent.
-- The pass reads raw entries, newest first, up to 40,000 characters. Compaction never changes raw entries. Scheduled deliveries, tool calls and tool results are left out.
+- The pass reads raw entries, newest first, up to 40,000 characters. Compaction never changes raw entries. Scheduled deliveries, `NO_SEND` answers, tool calls and tool results are left out.
 - A pass never calls the model in these cases:
   - The profile has no `remember`.
   - Memory is full.
   - There's no new message from a person.
   - Scheduled runs are paused (`MIPI_DAILY_RUN_CAP` 0).
   - Today's 20 passes are used.
+- While memory is full or the runs are paused, the pass sets no alarm at all. Forgetting a lesson or resuming the runs brings it back.
+- One pass runs at a time, and one per conversation, so a second alarm during a request can't ask about the same range twice.
+- A conversation with no timed message yet sets no wake.
 - A busy conversation is put off 30 minutes.
 - A range with a `web_fetch` call or result anywhere is passed over without a request, and its mark moves past it.
 - A failed or unreadable reply keeps the mark and waits 5, then 30 minutes. After 2 retries the range is given up, so an outage can't use up the day.
