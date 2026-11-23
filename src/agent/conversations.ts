@@ -2,8 +2,23 @@
  * MiPi's own per-conversation state, and which conversation each channel talks to. Every door goes through here, so
  * the profile, model and title of a conversation never depend on the door a message came through.
  */
-import { configure, type ConversationId, defineDoc, defineDocFamily } from "./pi/durable.ts";
-import { DEFAULT_PROFILE, isProfileName, type ProfileName, toolsFor } from "./profiles.ts";
+import { BACKGROUND_CONTEXT } from "./pi/context.ts";
+import {
+  configure,
+  type ConversationId,
+  type Cursor,
+  defineDoc,
+  defineDocFamily,
+  type Harness,
+} from "./pi/durable.ts";
+import { AgentSettings } from "./settings.ts";
+import {
+  DEFAULT_PROFILE,
+  isProfileName,
+  PROFILE_NAMES,
+  type ProfileName,
+  toolsFor,
+} from "./profiles.ts";
 
 type Tx = Parameters<typeof configure>[0];
 
@@ -72,9 +87,10 @@ export async function boundConversation(
     if (bound !== undefined) return bound.id;
   }
   if (options.existing !== undefined) {
-    // An existing conversation keeps its agent; one older than profiles only gets the name recorded.
+    // An existing conversation keeps its agent, model included. One older than profiles gets the profile, tools and
+    // all: recording only the name left it showing a profile whose tools it didn't offer.
     const meta = await tx.doc(ConversationMeta, options.existing);
-    meta.profile ??= profile;
+    if (meta.profile === undefined) await setProfile(tx, options.existing, profile);
     binding.conversationId = options.existing;
     return options.existing;
   }
@@ -82,4 +98,62 @@ export async function boundConversation(
   await setProfile(tx, id, profile);
   binding.conversationId = id;
   return id;
+}
+
+/**
+ * Gives every conversation the tools its profile names, where they differ: a conversation older than profiles got its
+ * profile's name but kept the tools it was created with, so it could show `default` and offer no `schedule`. Every
+ * ownerless conversation counts, forks included; a subagent's conversation belongs to the tool that made it. Writes
+ * nothing when all match. Returns the conversations it changed.
+ */
+export async function syncProfileTools(harness: Harness): Promise<ConversationId[]> {
+  const context = BACKGROUND_CONTEXT;
+  // Once every conversation has its tools, new ones get them when they're made: the pass is needed again only when a
+  // profile's tools change. Steady-state starts stop here, after one read.
+  const digest = profileToolsDigest();
+  const synced = await harness.commit(
+    async (tx) => (await tx.doc(AgentSettings)).profileTools === digest,
+    context,
+  );
+  if (synced) return [];
+  const conversations = await harness.commit(async (tx) => {
+    const found: Array<{ id: ConversationId; profile: ProfileName }> = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await tx.scanConversations({}, 100, cursor);
+      for (const record of page.items) {
+        if (record.owner !== undefined) continue;
+        found.push({
+          id: record.id,
+          profile: profileOf(await tx.doc(ConversationMeta, record.id)),
+        });
+      }
+      cursor = page.next;
+    } while (cursor !== undefined);
+    return found;
+  }, context);
+  const changed: ConversationId[] = [];
+  for (const { id, profile } of conversations) {
+    const conversation = await harness.conversation(id, context);
+    if (conversation === undefined) continue;
+    const offered = (await conversation.agent(context)).tools.map(({ name }) => name).sort();
+    const expected = toolsFor(profile)
+      .map(({ name }) => name)
+      .sort();
+    if (offered.join("\n") === expected.join("\n")) continue;
+    // Only the tools and the profile's name: the model and everything else stay as they are.
+    await harness.commit((tx) => setProfile(tx, id, profile), context);
+    changed.push(id);
+  }
+  await harness.commit(async (tx) => {
+    (await tx.doc(AgentSettings)).profileTools = digest;
+  }, context);
+  return changed;
+}
+
+/** Every profile's tool names, in one string: a different one means some conversation may need new tools. */
+export function profileToolsDigest(): string {
+  return JSON.stringify(
+    PROFILE_NAMES.map((name) => [name, toolsFor(name).map((tool) => tool.name)]),
+  );
 }

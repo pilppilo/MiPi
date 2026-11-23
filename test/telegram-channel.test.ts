@@ -33,14 +33,22 @@ import {
   type TelegramChannelState,
   addReceipt,
 } from "../src/agent/telegram.ts";
-import { type SendResult, TelegramOutbox } from "../src/agent/telegram-outbox.ts";
+import {
+  type SendResult,
+  type TelegramMessage,
+  TelegramOutbox,
+} from "../src/agent/telegram-outbox.ts";
 import type { TelegramInbound } from "../src/lib/telegram-update.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const CHAT = 4242;
 
 type Sent = { readonly chatId: number; readonly text: string };
-type SendBehaviour = (chatId: number, text: string, call: number) => Promise<SendResult>;
+type SendBehaviour = (
+  chatId: number,
+  message: TelegramMessage,
+  call: number,
+) => Promise<SendResult>;
 
 const delivered: SendBehaviour = async (_chatId, _text, call) => ({
   kind: "sent",
@@ -105,10 +113,10 @@ async function openAgent(
     profile: "default",
     version: "0.0.0-test",
     modelList: new ModelList(options.modelIds ?? (async () => ["deepseek-v4.1-flash"])),
-    send: async (chatId, text) => {
+    send: async (chatId, message) => {
       calls += 1;
-      const result = await behaviour(chatId, text, calls);
-      if (result.kind === "sent") sent.push({ chatId, text });
+      const result = await behaviour(chatId, message, calls);
+      if (result.kind === "sent") sent.push({ chatId, text: message.text });
       return result;
     },
     armAlarm: async () => {},
@@ -466,7 +474,7 @@ describe("Telegram replies", () => {
       }
     }));
 
-  it("records a send cut off mid-request as delivery-unknown and skips the rest of that reply", () =>
+  it("tries a send cut off by a restart once more, and the whole reply arrives", () =>
     inObject(async (storage) => {
       const long = `${"a".repeat(4000)}\n\n${"b".repeat(100)}`;
       let agent = await openAgent(storage, {
@@ -481,6 +489,39 @@ describe("Telegram replies", () => {
         await agent.channel.reconcile();
         void agent.channel.drain();
         await new Promise((resolve) => setTimeout(resolve, 20));
+        agent = await agent.restart();
+        await agent.settle();
+        const [reply] = (await outbox(agent.harness)).replies;
+        expect(reply!.chunks.map(({ status }) => status)).toEqual(["sent", "sent"]);
+        expect(reply!.chunks[0]).toMatchObject({ ambiguousRetries: 1 });
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
+          "a".repeat(4000),
+          "b".repeat(100),
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("ends a send whose retry is cut off too, skips the rest of that reply, and the chat moves on", () =>
+    inObject(async (storage) => {
+      const long = `${"a".repeat(4000)}\n\n${"b".repeat(100)}`;
+      let agent = await openAgent(storage, {
+        responses: answers(long),
+        send: () => new Promise(() => {}),
+      });
+      try {
+        await agent.channel.admit(text(1, "Two parts"));
+        await endWindow(agent);
+        await agent.harness.waitForIdle(ctx);
+        await agent.channel.reconcile();
+        void agent.channel.drain();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Restarted, and its one retry is cut off as well.
+        agent = await agent.restart({ send: () => new Promise(() => {}) });
+        clock.now += 60_000;
+        void agent.channel.drain();
+        await new Promise((resolve) => setTimeout(resolve, 20));
         agent = await agent.restart({ responses: answers("Next one") });
         await agent.settle();
         const [cut] = (await outbox(agent.harness)).replies;
@@ -488,11 +529,41 @@ describe("Telegram replies", () => {
           "delivery-unknown",
           "skipped-after-failure",
         ]);
-        // The chat isn't blocked: the next reply goes out.
         await agent.channel.admit(text(2, "Still there?"));
         await agent.settle();
         expect(agent.sent).toEqual([{ chatId: CHAT, text: "Next one" }]);
       } finally {
+        await agent.close();
+      }
+    }));
+
+  it("never sends one chunk twice from two drains at once", () =>
+    inObject(async (storage) => {
+      const release = Promise.withResolvers<void>();
+      let calls = 0;
+      const agent = await openAgent(storage, {
+        responses: answers("Once"),
+        send: async () => {
+          calls += 1;
+          await release.promise;
+          return { kind: "sent", messageId: calls };
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "Hi"));
+        await endWindow(agent);
+        await agent.harness.waitForIdle(ctx);
+        await agent.channel.reconcile();
+        const first = agent.channel.drain();
+        const second = agent.channel.drain();
+        // An overlapping alarm, too, while the first request is out.
+        const third = agent.channel.recover();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        release.resolve();
+        await Promise.all([first, second, third]);
+        expect(calls).toBe(1);
+      } finally {
+        release.resolve();
         await agent.close();
       }
     }));
@@ -551,6 +622,53 @@ const held =
     await release;
     return fauxAssistantMessage([fauxText(reply)]);
   };
+
+describe("Telegram formatting", () => {
+  it("sends the model's markdown as HTML, and the plain source once when Telegram can't read it", () =>
+    inObject(async (storage) => {
+      const messages: TelegramMessage[] = [];
+      const agent = await openAgent(storage, {
+        responses: answers("**Sneeze.**"),
+        send: async (_chatId, message, call) => {
+          messages.push(message);
+          return message.html === undefined
+            ? { kind: "sent", messageId: call }
+            : { kind: "markup", reason: "400: Bad Request: can't parse entities" };
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "Remind me"));
+        await agent.settle();
+        expect(messages).toEqual([
+          { text: "**Sneeze.**", html: "<b>Sneeze.</b>" },
+          { text: "**Sneeze.**" },
+        ]);
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "**Sneeze.**" }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("splits a message Telegram finds too long and sends the halves in order", () =>
+    inObject(async (storage) => {
+      const long = Array.from({ length: 40 }, (_, index) => `word${index}`).join(" ");
+      const agent = await openAgent(storage, {
+        responses: answers(long),
+        send: async (_chatId, message, call) =>
+          message.text.length > 100
+            ? { kind: "too-long", reason: "400: Bad Request: message is too long" }
+            : { kind: "sent", messageId: call },
+      });
+      try {
+        await agent.channel.admit(text(1, "Talk"));
+        await agent.settle();
+        expect(agent.sent.length).toBeGreaterThan(1);
+        expect(agent.sent.map(({ text: sent }) => sent).join(" ")).toBe(long);
+      } finally {
+        await agent.close();
+      }
+    }));
+});
 
 describe("Telegram bursts (COD-174)", () => {
   it("answers three quick idle messages with one turn, and later input can't stretch the window", () =>

@@ -4,7 +4,11 @@
  */
 import { defineDoc } from "./pi/durable.ts";
 
-export const AgentSettings = defineDoc<{ timeZone?: string }>({
+export const AgentSettings = defineDoc<{
+  timeZone?: string;
+  /** The profiles' tool lists when every conversation was last given its profile's tools (`syncProfileTools`). */
+  profileTools?: string;
+}>({
   kind: "app.settings",
   version: 1,
   scope: "session",

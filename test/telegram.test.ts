@@ -3,9 +3,12 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import {
   botApiSender,
+  AMBIGUOUS_RETRY_MS,
   enqueueReply,
   FINISHED_REPLIES_KEPT,
   MAX_ATTEMPTS,
+  MAX_RETRY_AFTER_MS,
+  MAX_SPLIT_DEPTH,
   nextOutboxWake,
   type OutboxState,
   PER_CHAT_GAP_MS,
@@ -162,7 +165,7 @@ describe("outbox", () => {
     expect(pickSend(state, 0, running)).toBeUndefined();
     // "c" is sending, so its outcome is due now; chat 1 waits for its gap.
     expect(nextOutboxWake(state, 0)).toBe(0);
-    recordSend(state, { replyId: "c", index: 0, chatId: 2, text: "C" }, sent(2), 0);
+    recordSend(state, { replyId: "c", key: "c#0", chatId: 2, text: "C" }, sent(2), 0);
     expect(nextOutboxWake(state, 0)).toBe(PER_CHAT_GAP_MS);
     expect(pickSend(state, PER_CHAT_GAP_MS, none)).toMatchObject({ replyId: "b" });
   });
@@ -187,11 +190,15 @@ describe("outbox", () => {
     expect(nextOutboxWake(state, now)).toBeUndefined();
   });
 
-  it("skips the rest of a reply after a failed or unknown chunk, and the chat moves on", () => {
-    for (const outcome of [
-      { kind: "failed", reason: "400" },
-      { kind: "unknown", reason: "Timed out" },
-    ] as const) {
+  it("skips the rest of a reply after a failed chunk, or one unclear twice, and the chat moves on", () => {
+    const outcomes = [
+      [{ kind: "failed", reason: "400" }],
+      [
+        { kind: "unknown", reason: "Timed out" },
+        { kind: "unknown", reason: "Timed out again" },
+      ],
+    ] as const;
+    for (const results of outcomes) {
       const state = empty();
       enqueueReply(
         state,
@@ -200,29 +207,158 @@ describe("outbox", () => {
       );
       enqueueReply(state, { id: "next", chatId: 1, text: "Next" }, 0);
       const none = new Set<string>();
-      const send = pickSend(state, 0, none)!;
-      recordSend(state, send, outcome, 0);
+      let now = 0;
+      for (const result of results) {
+        const send = pickSend(state, now, none)!;
+        expect(send.replyId).toBe("long");
+        recordSend(state, send, result, now);
+        now = nextOutboxWake(state, now) ?? now;
+      }
       expect(state.replies[0]!.chunks.map(({ status }) => status)).toEqual([
-        outcome.kind === "failed" ? "failed" : "delivery-unknown",
+        results.length === 1 ? "failed" : "delivery-unknown",
         "skipped-after-failure",
       ]);
-      expect(pickSend(state, PER_CHAT_GAP_MS, none)).toMatchObject({ replyId: "next" });
+      expect(pickSend(state, now + PER_CHAT_GAP_MS, none)).toMatchObject({ replyId: "next" });
     }
   });
 
-  it("records a send left sending by a lost instance as delivery-unknown, never sending it again", () => {
+  it("tries an unclear send once more, counted before the retry runs", () => {
+    const state = empty();
+    enqueueReply(state, { id: "a", chatId: 1, text: "A" }, 0);
+    const none = new Set<string>();
+    recordSend(state, pickSend(state, 0, none)!, { kind: "unknown", reason: "Timed out" }, 0);
+    expect(state.replies[0]!.chunks[0]).toMatchObject({
+      status: "pending",
+      ambiguousRetries: 1,
+      notBefore: AMBIGUOUS_RETRY_MS,
+    });
+    expect(pickSend(state, AMBIGUOUS_RETRY_MS - 1, none)).toBeUndefined();
+    const retry = pickSend(state, AMBIGUOUS_RETRY_MS, none)!;
+    recordSend(state, retry, sent(5), AMBIGUOUS_RETRY_MS);
+    expect(state.replies[0]!.chunks[0]).toMatchObject({ status: "sent", messageId: 5 });
+  });
+
+  it("gives a send cut off by a restart its one retry; a retry cut off too is final", () => {
     const state = empty();
     enqueueReply(state, { id: "a", chatId: 1, text: "A" }, 0);
     const running = pickSend(state, 0, new Set())!;
     // While its request runs, it stays sending.
     expect(pickSend(state, 0, new Set(["a#0"]))).toBeUndefined();
     expect(state.replies[0]!.chunks[0]!.status).toBe("sending");
-    // After a restart nothing is running.
+    // After a restart nothing is running: one retry.
+    expect(pickSend(state, 0, new Set())).toBeUndefined();
+    expect(state.replies[0]!.chunks[0]).toMatchObject({ status: "pending", ambiguousRetries: 1 });
+    // A late answer for the old request changes nothing.
+    recordSend(state, running, sent(1), 0);
+    expect(state.replies[0]!.chunks[0]!.status).toBe("pending");
+    // The retry is cut off as well: no third try.
+    pickSend(state, AMBIGUOUS_RETRY_MS, new Set());
+    pickSend(state, AMBIGUOUS_RETRY_MS, new Set());
+    expect(state.replies[0]!.chunks[0]!.status).toBe("delivery-unknown");
+  });
+
+  it("never retries a chunk an M5 build left, unclear stays final there", () => {
+    const state: OutboxState = {
+      replies: [
+        {
+          id: "old",
+          chatId: 1,
+          createdAt: 0,
+          chunks: [
+            { text: "one", status: "delivery-unknown", attempts: 1 },
+            { text: "two", status: "sending", attempts: 1 },
+          ],
+        },
+        {
+          id: "older",
+          chatId: 2,
+          createdAt: 0,
+          chunks: [{ text: "sending when M5 stopped", status: "sending", attempts: 1 }],
+        },
+      ],
+      pacedUntil: {},
+    };
     expect(pickSend(state, 0, new Set())).toBeUndefined();
     expect(state.replies[0]!.chunks[0]!.status).toBe("delivery-unknown");
-    // A late answer for it changes nothing.
-    recordSend(state, running, sent(1), 0);
-    expect(state.replies[0]!.chunks[0]!.status).toBe("delivery-unknown");
+    expect(state.replies[1]!.chunks[0]!.status).toBe("delivery-unknown");
+  });
+
+  it("sends HTML, and falls back to the plain source once when Telegram can't read it", () => {
+    const state = empty();
+    enqueueReply(state, { id: "a", chatId: 1, text: "**Sneeze.**" }, 0);
+    const none = new Set<string>();
+    const html = pickSend(state, 0, none)!;
+    expect(html).toMatchObject({ text: "**Sneeze.**", html: "<b>Sneeze.</b>" });
+    recordSend(state, html, { kind: "markup", reason: "400: can't parse entities" }, 0);
+    // Committed as plain before the resend, and not paced.
+    expect(state.replies[0]!.chunks[0]).toMatchObject({ status: "pending", mode: "plain" });
+    const plain = pickSend(state, 0, none)!;
+    expect(plain.html).toBeUndefined();
+    expect(plain.text).toBe("**Sneeze.**");
+    // Refused again as plain: final.
+    recordSend(state, plain, { kind: "markup", reason: "400: can't parse entities" }, 0);
+    expect(state.replies[0]!.chunks[0]!.status).toBe("failed");
+  });
+
+  it("splits only a chunk Telegram found too long, in place, and stops after three halvings", () => {
+    const state = empty();
+    const text = `${"a".repeat(3000)}\n\n${"b".repeat(3000)}`;
+    enqueueReply(state, { id: "r", chatId: 1, text }, 0);
+    enqueueReply(state, { id: "after", chatId: 1, text: "After" }, 0);
+    const none = new Set<string>();
+    let now = 0;
+    const first = pickSend(state, now, none)!;
+    recordSend(state, first, sent(1), now);
+    now += PER_CHAT_GAP_MS;
+    const second = pickSend(state, now, none)!;
+    recordSend(state, second, { kind: "too-long", reason: "400: message is too long" }, now);
+    const chunks = state.replies[0]!.chunks;
+    expect(chunks[0]).toMatchObject({ status: "sent", id: "r#0" });
+    expect(chunks.slice(1).map(({ id, splitDepth }) => ({ id, splitDepth }))).toEqual([
+      { id: "r#1:0", splitDepth: 1 },
+      { id: "r#1:1", splitDepth: 1 },
+    ]);
+    expect(
+      chunks
+        .slice(1)
+        .map(({ text: part }) => part)
+        .join(""),
+    ).toBe("b".repeat(3000));
+    // Keeps refusing: halved down to depth 3, then final.
+    for (let round = 0; round < 10; round++) {
+      const send = pickSend(state, now, none);
+      if (send === undefined || send.replyId !== "r") break;
+      recordSend(state, send, { kind: "too-long", reason: "400: Message is too long" }, now);
+    }
+    expect(state.replies[0]!.chunks.some(({ status }) => status === "failed")).toBe(true);
+    expect(Math.max(...state.replies[0]!.chunks.map(({ splitDepth }) => splitDepth ?? 0))).toBe(
+      MAX_SPLIT_DEPTH,
+    );
+    expect(pickSend(state, now + PER_CHAT_GAP_MS, none)).toMatchObject({ replyId: "after" });
+  });
+
+  it("keeps the halves of an M5 chunk plain", () => {
+    const text = `${"a".repeat(3000)}\n\n${"b".repeat(3000)}`;
+    const state: OutboxState = {
+      replies: [
+        { id: "old", chatId: 1, createdAt: 0, chunks: [{ text, status: "pending", attempts: 0 }] },
+      ],
+      pacedUntil: {},
+    };
+    const send = pickSend(state, 0, new Set())!;
+    expect(send.html).toBeUndefined();
+    recordSend(state, send, { kind: "too-long", reason: "400: message is too long" }, 0);
+    const halves = state.replies[0]!.chunks;
+    expect(halves).toHaveLength(2);
+    expect(halves.map(({ mode }) => mode)).toEqual(["plain", "plain"]);
+    expect(pickSend(state, 0, new Set())!.html).toBeUndefined();
+  });
+
+  it("fails a too-long chunk that can't be halved instead of sending an empty half", () => {
+    const state = empty();
+    enqueueReply(state, { id: "r", chatId: 1, text: "x" }, 0);
+    recordSend(state, pickSend(state, 0, new Set())!, { kind: "too-long", reason: "400" }, 0);
+    expect(state.replies[0]!.chunks).toMatchObject([{ status: "failed" }]);
   });
 
   it("keeps a bounded number of finished replies", () => {
@@ -251,18 +387,31 @@ describe("botApiSender", () => {
       "123:abc",
       fakeFetch(() => Response.json({ ok: true, result: { message_id: 77 } }), calls),
     );
-    expect(await send(42, "Hi")).toEqual({ kind: "sent", messageId: 77 });
+    expect(await send(42, { text: "Hi" })).toEqual({ kind: "sent", messageId: 77 });
+    expect(await send(42, { text: "**Hi**", html: "<b>Hi</b>" })).toEqual({
+      kind: "sent",
+      messageId: 77,
+    });
     expect(calls).toEqual([
       {
         url: "https://api.telegram.org/bot123:abc/sendMessage",
         body: { chat_id: 42, text: "Hi", link_preview_options: { is_disabled: true } },
+      },
+      {
+        url: "https://api.telegram.org/bot123:abc/sendMessage",
+        body: {
+          chat_id: 42,
+          text: "<b>Hi</b>",
+          parse_mode: "HTML",
+          link_preview_options: { is_disabled: true },
+        },
       },
     ]);
     const noId = botApiSender(
       "t",
       fakeFetch(() => Response.json({ ok: true, result: {} })),
     );
-    expect((await noId(1, "x")).kind).toBe("unknown");
+    expect((await noId(1, { text: "x" })).kind).toBe("unknown");
   });
 
   it("classifies 429, 5xx, refusals and lost requests", async () => {
@@ -270,7 +419,7 @@ describe("botApiSender", () => {
       botApiSender(
         "t",
         fakeFetch(() => Response.json(body, { status })),
-      )(1, "x");
+      )(1, { text: "x" });
     expect(
       await answer(429, { ok: false, description: "Too Many", parameters: { retry_after: 3 } }),
     ).toEqual({ kind: "retry", afterMs: 3_000, reason: "429: Too Many" });
@@ -279,11 +428,23 @@ describe("botApiSender", () => {
       await answer(403, { ok: false, description: "Forbidden: bot was blocked by the user" }),
     ).toEqual({ kind: "failed", reason: "403: Forbidden: bot was blocked by the user" });
     expect((await answer(401, { ok: false })).kind).toBe("failed");
+    expect(
+      (await answer(400, { ok: false, description: "Bad Request: can't parse entities: x" })).kind,
+    ).toBe("markup");
+    expect(
+      (await answer(400, { ok: false, description: "Bad Request: MESSAGE IS TOO LONG" })).kind,
+    ).toBe("too-long");
+    expect(
+      (await answer(400, { ok: false, description: "Bad Request: chat not found" })).kind,
+    ).toBe("failed");
+    expect(
+      await answer(429, { ok: false, description: "Slow", parameters: { retry_after: 999_999 } }),
+    ).toMatchObject({ kind: "retry", afterMs: MAX_RETRY_AFTER_MS });
     const lost = botApiSender("t", async () => {
       throw new TypeError("network");
     });
-    expect(await lost(1, "x")).toEqual({ kind: "unknown", reason: "No answer" });
-    expect(await botApiSender(undefined)(1, "x")).toMatchObject({ kind: "failed" });
+    expect(await lost(1, { text: "x" })).toEqual({ kind: "unknown", reason: "No answer" });
+    expect(await botApiSender(undefined)(1, { text: "x" })).toMatchObject({ kind: "failed" });
   });
 });
 
