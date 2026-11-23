@@ -14,7 +14,6 @@ import {
   type Conversation,
   type ConversationId,
   ConversationIdle,
-  defineDoc,
   type EntryRecord,
   type Harness,
   InboxDoc,
@@ -36,6 +35,7 @@ import {
   TelegramOutbox,
   type TelegramSend,
 } from "./telegram-outbox.ts";
+import { TELEGRAM_DOC_KIND, TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import { telegramBatchRequest, telegramRequest } from "../lib/requests.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
@@ -57,44 +57,22 @@ export const BATCH_MAX_MESSAGES = 50;
 /** …or this many UTF-16 code units of text, the unit the outbox counts in too. */
 export const BATCH_MAX_UNITS = 32_000;
 
-/** Messages of one idle chat waiting for their window to end. */
-export type StagedWindow = {
-  chatId: number;
-  /** The chat's conversation when the window opened; the batch goes there even if `/new` rebinds the chat. */
-  conversationId: number;
-  firstUpdateId: number;
-  /** First message's admission plus `BATCH_WINDOW_MS`. Later messages never move it. */
-  deadline: number;
-  messages: Array<{ updateId: number; text: string; at: number }>;
-};
+export { type StagedWindow, TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
 
-export type TelegramChannelState = {
-  /** Admitted `update_id`s, oldest first. */
-  receipts: Array<{ updateId: number; at: number }>;
-  /** Inputs submitted and not settled yet, with the chat their reply goes to. */
-  inputs: Array<{
-    updateId: number;
-    chatId: number;
-    conversationId: number;
-    submissionId: number;
-  }>;
-  /** Commands admitted that still need an outside lookup (`/model <id>` reads the live model list). */
-  commands: Array<{ updateId: number; chatId: number; conversationId: number; model: string }>;
-  /**
-   * Windows of idle chats still collecting messages (COD-174). Optional, so the document needs no new version: a
-   * build from before it ignores the field (and the messages waiting in it, on a rollback).
-   */
-  staged?: StagedWindow[];
-};
-
-export const TelegramChannel = defineDoc<TelegramChannelState>({
-  kind: "app.telegram",
-  version: 1,
-  scope: "session",
-  initial: () => ({ receipts: [], inputs: [], commands: [] }),
-  checkpointWhen: (value) =>
-    value.inputs.length === 0 && value.commands.length === 0 && (value.staged ?? []).length === 0,
-});
+/**
+ * Whether a commit changed the door's document: then another part of the agent (a reminder) may have recorded an input
+ * for the door to answer, and `refresh()` picks it up.
+ */
+export function isTelegramChange(publication: {
+  readonly changes: readonly {
+    readonly type: string;
+    readonly record?: { readonly kind: string };
+  }[];
+}): boolean {
+  return publication.changes.some(
+    (change) => change.type === "document" && change.record?.kind === TELEGRAM_DOC_KIND,
+  );
+}
 
 /** The chat key a Telegram chat's binding lives under (`conversations.ts`). */
 export const telegramBinding = (chatId: number): string => `tg:${chatId}`;
@@ -134,7 +112,7 @@ function hasReceipt(state: TelegramChannelState, updateId: number): boolean {
 export function addReceipt(state: TelegramChannelState, updateId: number, now: number): void {
   state.receipts.push({ updateId, at: now });
   const pending = new Set([
-    ...state.inputs.map((input) => input.updateId),
+    ...state.inputs.flatMap((input) => (input.updateId === undefined ? [] : [input.updateId])),
     ...state.commands.map((command) => command.updateId),
     ...(state.staged ?? []).flatMap((window) => window.messages.map(({ updateId }) => updateId)),
   ]);
@@ -192,6 +170,8 @@ export class TelegramChannelRuntime {
   readonly #watched = new Set<number>();
   #wake: TelegramWake = { active: false };
   #closed = false;
+  #refreshing = false;
+  #refreshAgain = false;
 
   constructor(options: TelegramChannelOptions) {
     this.#options = options;
@@ -211,6 +191,35 @@ export class TelegramChannelRuntime {
     );
     for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
     await this.recover();
+  }
+
+  /**
+   * Picks up inputs another part of the agent recorded for this door (a reminder's occurrence, M6): watches each until
+   * it settles, and refreshes the wake. Harmless to call often; a call while one runs makes it read once more.
+   */
+  refresh(): void {
+    if (this.#closed) return;
+    if (this.#refreshing) {
+      // Read again once the running pass ends, so an input recorded during it isn't missed.
+      this.#refreshAgain = true;
+      return;
+    }
+    this.#refreshing = true;
+    void (async () => {
+      try {
+        do {
+          this.#refreshAgain = false;
+          const submissions = await this.#commit(async (tx) =>
+            (await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
+          );
+          for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
+        } while (this.#refreshAgain && !this.#closed);
+      } catch (error) {
+        if (!this.#closed) this.#options.report("Refreshing the Telegram door failed", error);
+      } finally {
+        this.#refreshing = false;
+      }
+    })();
   }
 
   /** Stops background work; what is pending stays stored for the next instance. */

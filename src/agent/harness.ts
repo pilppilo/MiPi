@@ -16,11 +16,12 @@ import {
 } from "./pi/models.ts";
 import { ConversationMeta } from "./conversations.ts";
 import { DEFAULT_PROFILE, type ProfileName, profileTools, toolsFor } from "./profiles.ts";
+import { ScheduledReminder } from "../tools/reminder-task.ts";
 import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
 import { conversationSearchExtension } from "../tools/search.ts";
 
 /** MiPi's own durable task definitions, for the startup guard's version check. */
-export const APP_TASKS = [DeliverScheduledInstruction] as const;
+export const APP_TASKS = [DeliverScheduledInstruction, ScheduledReminder] as const;
 
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
@@ -46,7 +47,8 @@ export const CACHE_RETENTION = "long" as const;
 export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions {
   const chatExtension = defineExtension({
     name: "chat",
-    tasks: [DeliverScheduledInstruction],
+    // The legacy delivery task stays for schedules stored before reminders (M6).
+    tasks: [DeliverScheduledInstruction, ScheduledReminder],
     // Registration only: what a conversation is offered comes from its profile (`toolsFor`).
     tools: profileTools(),
     sections: [

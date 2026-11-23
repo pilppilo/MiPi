@@ -27,3 +27,9 @@ export function telegramBatchRequest(firstUpdateId: number): string {
     throw new Error("Invalid Telegram update id");
   return `tg:batch:${firstUpdateId}`;
 }
+
+/** One occurrence of a reminder (M6): the first is 0. The same id on a retry admits nothing twice. */
+export function reminderRequest(reminderId: string, occurrence: number): string {
+  if (!Number.isSafeInteger(occurrence) || occurrence < 0) throw new Error("Invalid occurrence");
+  return `sched:${clientKey(reminderId)}:${occurrence}`;
+}
