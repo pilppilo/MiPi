@@ -15,7 +15,10 @@ COD-153 (M6, part 2 of 3): Telegram messages look right and get through.
 - If Telegram can't read a chunk's HTML ("can't parse entities"), that chunk is sent once more as plain text (the markdown source). The switch is saved first, so a restart can't send the broken HTML again.
 - If Telegram finds a chunk too long, only that chunk is split in two, in place. A chunk is split at most three times.
 - A send with an unclear outcome is tried once more: a timeout, a lost answer, an answer without a message id, or a chunk left `sending` by a restart. The retry is counted before it runs. If the retry is unclear too, the chunk is `delivery-unknown` and the rest of that reply is skipped. Telegram can't look a message up in a chat, so a rare duplicate is the lesser harm than a lost reminder.
-- On start, every conversation gets the tools its profile names where they differ. Conversations older than profiles kept the tools they were created with, so one could show `default` and still offer no `schedule`. The pass leaves models alone and writes nothing when everything already matches.
+- On start, every conversation gets the tools its profile names where they differ. Conversations older than profiles kept the tools they were created with, so one could show `default` and still offer no `schedule`.
+  - The pass leaves models alone.
+  - It runs once, then again only when a profile's tools change (a digest in the agent's settings), so a normal start costs one read.
+  - The web door's binding now gives a conversation older than profiles its profile's tools as well as the name.
 
 **Changed**
 

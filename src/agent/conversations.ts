@@ -11,7 +11,14 @@ import {
   defineDocFamily,
   type Harness,
 } from "./pi/durable.ts";
-import { DEFAULT_PROFILE, isProfileName, type ProfileName, toolsFor } from "./profiles.ts";
+import { AgentSettings } from "./settings.ts";
+import {
+  DEFAULT_PROFILE,
+  isProfileName,
+  PROFILE_NAMES,
+  type ProfileName,
+  toolsFor,
+} from "./profiles.ts";
 
 type Tx = Parameters<typeof configure>[0];
 
@@ -80,9 +87,10 @@ export async function boundConversation(
     if (bound !== undefined) return bound.id;
   }
   if (options.existing !== undefined) {
-    // An existing conversation keeps its agent; one older than profiles only gets the name recorded.
+    // An existing conversation keeps its agent, model included. One older than profiles gets the profile, tools and
+    // all: recording only the name left it showing a profile whose tools it didn't offer.
     const meta = await tx.doc(ConversationMeta, options.existing);
-    meta.profile ??= profile;
+    if (meta.profile === undefined) await setProfile(tx, options.existing, profile);
     binding.conversationId = options.existing;
     return options.existing;
   }
@@ -100,6 +108,14 @@ export async function boundConversation(
  */
 export async function syncProfileTools(harness: Harness): Promise<ConversationId[]> {
   const context = BACKGROUND_CONTEXT;
+  // Once every conversation has its tools, new ones get them when they're made: the pass is needed again only when a
+  // profile's tools change. Steady-state starts stop here, after one read.
+  const digest = profileToolsDigest();
+  const synced = await harness.commit(
+    async (tx) => (await tx.doc(AgentSettings)).profileTools === digest,
+    context,
+  );
+  if (synced) return [];
   const conversations = await harness.commit(async (tx) => {
     const found: Array<{ id: ConversationId; profile: ProfileName }> = [];
     let cursor: Cursor | undefined;
@@ -129,5 +145,15 @@ export async function syncProfileTools(harness: Harness): Promise<ConversationId
     await harness.commit((tx) => setProfile(tx, id, profile), context);
     changed.push(id);
   }
+  await harness.commit(async (tx) => {
+    (await tx.doc(AgentSettings)).profileTools = digest;
+  }, context);
   return changed;
+}
+
+/** Every profile's tool names, in one string: a different one means some conversation may need new tools. */
+export function profileToolsDigest(): string {
+  return JSON.stringify(
+    PROFILE_NAMES.map((name) => [name, toolsFor(name).map((tool) => tool.name)]),
+  );
 }

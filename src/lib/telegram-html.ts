@@ -14,7 +14,10 @@ import { splitForTelegram, TELEGRAM_TEXT_LIMIT } from "./telegram-text.ts";
 export const FENCE_RESERVE = 32;
 /** A code block's language is shown only when it is this simple, so it can never break the attribute. */
 const LANGUAGE = /^[A-Za-z0-9_+-]{1,20}$/;
-const FENCE = /^\s*```(.*)$/;
+/** An opening fence: its info string has no backtick (CommonMark), so "```foo```" on one line is not a fence. */
+const OPEN_FENCE = /^\s*```([^`]*)$/;
+/** A closing fence has nothing after it; a fence with an info string inside a block is content. */
+const CLOSE_FENCE = /^\s*```\s*$/;
 
 export const escapeHtml = (text: string): string =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
@@ -26,6 +29,8 @@ const languageOf = (info: string): string | undefined => {
   const word = info.trim().split(/\s+/)[0] ?? "";
   return LANGUAGE.test(word) ? word : undefined;
 };
+
+const LINK = /^\[([^\]\n]+)\]\((https?:\/\/[^\s()<>"]+)\)/;
 
 const MARKERS = [
   { marker: "**", tag: "b" },
@@ -55,9 +60,12 @@ function canClose(text: string, at: number, marker: string): boolean {
   return !underscored(marker) || !isWord(after);
 }
 
-function closing(text: string, from: number, marker: string): number {
-  for (let at = from + 1; at <= text.length - marker.length; at++) {
-    // Code spans are opaque: a marker inside one closes nothing.
+/**
+ * Where the span opened just before `start` closes, or -1. The span holds at least one character, so `****` stays
+ * literal. Code spans and links are opaque: a marker inside one closes nothing.
+ */
+function closing(text: string, start: number, marker: string): number {
+  for (let at = start + 1; at <= text.length - marker.length; at++) {
     if (text[at] === "`") {
       const end = text.indexOf("`", at + 1);
       if (end !== -1) {
@@ -65,12 +73,20 @@ function closing(text: string, from: number, marker: string): number {
         continue;
       }
     }
-    if (text.startsWith(marker, at) && canClose(text, at, marker)) return at;
+    if (text[at] === "[") {
+      const link = LINK.exec(text.slice(at));
+      if (link !== null) {
+        at += link[0].length - 1;
+        continue;
+      }
+    }
+    if (!text.startsWith(marker, at) || !canClose(text, at, marker)) continue;
+    // `***`: the double marker closes at its last two, leaving the first to close an inner single one.
+    if (marker.length === 2 && text[at + 2] === marker[0]) continue;
+    return at;
   }
   return -1;
 }
-
-const LINK = /^\[([^\]\n]+)\]\((https?:\/\/[^\s()<>"]+)\)/;
 
 /** One line's inline markdown as HTML. */
 export function renderInline(text: string): string {
@@ -96,7 +112,7 @@ export function renderInline(text: string): string {
     }
     const span = MARKERS.find(({ marker }) => text.startsWith(marker, at));
     if (span !== undefined && canOpen(text, at, span.marker)) {
-      const end = closing(text, at + span.marker.length - 1, span.marker);
+      const end = closing(text, at + span.marker.length, span.marker);
       if (end !== -1) {
         const inner = text.slice(at + span.marker.length, end);
         html += `<${span.tag}>${renderInline(inner)}</${span.tag}>`;
@@ -121,9 +137,9 @@ export function renderTelegramHtml(markdown: string): string {
   };
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index]!;
-    const fence = FENCE.exec(line);
+    const fence = OPEN_FENCE.exec(line);
     if (fence !== null) {
-      const end = lines.findIndex((candidate, at) => at > index && FENCE.test(candidate));
+      const end = lines.findIndex((candidate, at) => at > index && CLOSE_FENCE.test(candidate));
       if (end !== -1) {
         flushQuote();
         const code = escapeHtml(lines.slice(index + 1, end).join("\n"));
@@ -164,16 +180,37 @@ export function splitMarkdownForTelegram(
 ): string[] {
   const pieces = splitForTelegram(text, Math.max(2, limit - FENCE_RESERVE));
   const chunks: string[] = [];
+  /** The language of a block still open at the end of the last piece; `""` for one without. */
   let open: string | undefined;
   for (const piece of pieces) {
-    let chunk = open === undefined ? piece : `\`\`\`${open}\n${piece}`;
-    for (const line of piece.split("\n")) {
-      const fence = FENCE.exec(line);
-      if (fence === null) continue;
-      open = open === undefined ? (languageOf(fence[1] ?? "") ?? "") : undefined;
+    let lines = piece.split("\n");
+    const head: string[] = [];
+    if (open !== undefined) {
+      // The block's closing fence starts this piece: it ends here, with nothing to reopen.
+      if (CLOSE_FENCE.test(lines[0] ?? "")) {
+        lines = lines.slice(1);
+        open = undefined;
+      } else {
+        head.push(`\`\`\`${open}`);
+      }
     }
-    if (open !== undefined) chunk += "\n```";
-    chunks.push(chunk);
+    let openedAt: number | undefined;
+    lines.forEach((line, index) => {
+      if (open === undefined) {
+        const fence = OPEN_FENCE.exec(line);
+        if (fence !== null) {
+          open = languageOf(fence[1] ?? "") ?? "";
+          openedAt = index;
+        }
+      } else if (CLOSE_FENCE.test(line)) {
+        open = undefined;
+      }
+    });
+    // A block that opens on this piece's last line has no body here: it opens in the next piece instead.
+    if (open !== undefined && openedAt === lines.length - 1) lines = lines.slice(0, -1);
+    else if (open !== undefined) lines.push("```");
+    const chunk = [...head, ...lines].join("\n");
+    if (chunk.trim().length > 0) chunks.push(chunk);
   }
   return chunks;
 }

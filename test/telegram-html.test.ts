@@ -89,4 +89,46 @@ describe("splitMarkdownForTelegram", () => {
     }
     expect(FENCE_RESERVE).toBeGreaterThanOrEqual("```".length * 2 + 20 + 2);
   });
+
+  it("ends a block whose closing fence starts the next piece, with no empty block or stray fence", () => {
+    const code = "x".repeat(4056);
+    const chunks = splitMarkdownForTelegram(`\`\`\`ts\n${code}\n\`\`\`\nDone.`);
+    expect(chunks).toEqual([`\`\`\`ts\n${code}\n\`\`\``, "Done."]);
+    expect(renderTelegramHtml(chunks[1]!)).toBe("Done.");
+    expect(splitMarkdownForTelegram(`\`\`\`ts\n${code}\n\`\`\``)).toEqual([
+      `\`\`\`ts\n${code}\n\`\`\``,
+    ]);
+  });
+
+  it("opens a block in the next piece when its fence is the last line of this one", () => {
+    const before = "a".repeat(4050);
+    const body = "c".repeat(100);
+    const chunks = splitMarkdownForTelegram(`${before}\n\`\`\`ts\n${body}\n\`\`\``);
+    expect(chunks).toEqual([before, `\`\`\`ts\n${body}\n\`\`\``]);
+    expect(renderTelegramHtml(chunks[1]!)).toBe(
+      `<pre><code class="language-ts">${body}</code></pre>`,
+    );
+  });
+});
+
+describe("the review's cases", () => {
+  it("doesn't take backticks on one line for a fence, or a fence with an info string for a closing one", () => {
+    expect(renderTelegramHtml("```foo``` and more\nnext")).not.toContain("<pre>");
+    expect(renderTelegramHtml("```md\n```js\nx\n```")).toBe(
+      '<pre><code class="language-md">```js\nx</code></pre>',
+    );
+  });
+
+  it("keeps empty spans literal", () => {
+    expect(renderInline("password: ****")).toBe("password: ****");
+    expect(renderInline("____ and ~~~~")).toBe("____ and ~~~~");
+  });
+
+  it("reads triple markers and markers around links", () => {
+    expect(renderInline("***bold italic***")).toBe("<b><i>bold italic</i></b>");
+    expect(renderInline("**bold *italic***")).toBe("<b>bold <i>italic</i></b>");
+    expect(renderInline("*see [docs](https://example.com/a*b) now*")).toBe(
+      '<i>see <a href="https://example.com/a*b">docs</a> now</i>',
+    );
+  });
 });

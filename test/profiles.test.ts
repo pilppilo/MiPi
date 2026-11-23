@@ -14,6 +14,7 @@ import {
   syncProfileTools,
 } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/harness.ts";
+import { AgentSettings } from "../src/agent/settings.ts";
 import { PROFILE_NAMES, PROFILES, type ProfileName } from "../src/agent/profiles.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -160,6 +161,16 @@ describe("profile tools at startup", () => {
       expect(agent.tools.map(({ name }) => name).sort()).toEqual(["schedule", "search_history"]);
       expect(agent.model).toEqual({ provider: "faux", modelId: "faux-2" });
       expect((await (await harness.conversation(plain, ctx))!.agent(ctx)).tools).toEqual([]);
+      // Synced already, and the profiles haven't changed: the next start only reads one setting.
+      await harness.commit(async (tx) => {
+        await configure(tx, old, { tools: [] });
+      }, ctx);
+      expect(await syncProfileTools(harness)).toEqual([]);
+      // A change to the profiles' tools (here, a forgotten digest) runs the pass again.
+      await harness.commit(async (tx) => {
+        delete (await tx.doc(AgentSettings)).profileTools;
+      }, ctx);
+      expect(await syncProfileTools(harness)).toEqual([old]);
       expect(await syncProfileTools(harness)).toEqual([]);
     } finally {
       await harness.close(ctx);

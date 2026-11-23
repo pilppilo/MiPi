@@ -33,14 +33,22 @@ import {
   type TelegramChannelState,
   addReceipt,
 } from "../src/agent/telegram.ts";
-import { type SendResult, TelegramOutbox } from "../src/agent/telegram-outbox.ts";
+import {
+  type SendResult,
+  type TelegramMessage,
+  TelegramOutbox,
+} from "../src/agent/telegram-outbox.ts";
 import type { TelegramInbound } from "../src/lib/telegram-update.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const CHAT = 4242;
 
 type Sent = { readonly chatId: number; readonly text: string };
-type SendBehaviour = (chatId: number, text: string, call: number) => Promise<SendResult>;
+type SendBehaviour = (
+  chatId: number,
+  message: TelegramMessage,
+  call: number,
+) => Promise<SendResult>;
 
 const delivered: SendBehaviour = async (_chatId, _text, call) => ({
   kind: "sent",
@@ -107,7 +115,7 @@ async function openAgent(
     modelList: new ModelList(options.modelIds ?? (async () => ["deepseek-v4.1-flash"])),
     send: async (chatId, message) => {
       calls += 1;
-      const result = await behaviour(chatId, message.text, calls);
+      const result = await behaviour(chatId, message, calls);
       if (result.kind === "sent") sent.push({ chatId, text: message.text });
       return result;
     },
@@ -614,6 +622,53 @@ const held =
     await release;
     return fauxAssistantMessage([fauxText(reply)]);
   };
+
+describe("Telegram formatting", () => {
+  it("sends the model's markdown as HTML, and the plain source once when Telegram can't read it", () =>
+    inObject(async (storage) => {
+      const messages: TelegramMessage[] = [];
+      const agent = await openAgent(storage, {
+        responses: answers("**Sneeze.**"),
+        send: async (_chatId, message, call) => {
+          messages.push(message);
+          return message.html === undefined
+            ? { kind: "sent", messageId: call }
+            : { kind: "markup", reason: "400: Bad Request: can't parse entities" };
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "Remind me"));
+        await agent.settle();
+        expect(messages).toEqual([
+          { text: "**Sneeze.**", html: "<b>Sneeze.</b>" },
+          { text: "**Sneeze.**" },
+        ]);
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "**Sneeze.**" }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("splits a message Telegram finds too long and sends the halves in order", () =>
+    inObject(async (storage) => {
+      const long = Array.from({ length: 40 }, (_, index) => `word${index}`).join(" ");
+      const agent = await openAgent(storage, {
+        responses: answers(long),
+        send: async (_chatId, message, call) =>
+          message.text.length > 100
+            ? { kind: "too-long", reason: "400: Bad Request: message is too long" }
+            : { kind: "sent", messageId: call },
+      });
+      try {
+        await agent.channel.admit(text(1, "Talk"));
+        await agent.settle();
+        expect(agent.sent.length).toBeGreaterThan(1);
+        expect(agent.sent.map(({ text: sent }) => sent).join(" ")).toBe(long);
+      } finally {
+        await agent.close();
+      }
+    }));
+});
 
 describe("Telegram bursts (COD-174)", () => {
   it("answers three quick idle messages with one turn, and later input can't stretch the window", () =>

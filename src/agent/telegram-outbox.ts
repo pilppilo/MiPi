@@ -394,7 +394,10 @@ const describe = (body: unknown, status: number): string => {
     : `HTTP ${status}`;
 };
 
-/** `sendMessage` through the Bot API, as plain text, classified into a `SendResult`. */
+/**
+ * `sendMessage` through the Bot API, classified into a `SendResult`: as HTML (`parse_mode: "HTML"`) when the message
+ * has `html`, otherwise as plain text.
+ */
 export function botApiSender(token: string | undefined, fetcher: Fetch = fetch): TelegramSend {
   return async (chatId, message) => {
     if (token === undefined || token.trim().length === 0) {
