@@ -54,6 +54,10 @@ MiPi is built to be run by one person for themselves. Setting it up takes a Clou
 
 Working on the code is covered in [Development](docs/development.md). Coding agents follow [`AGENTS.md`](AGENTS.md). MiPi is built on [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable), which is experimental, and every place MiPi works around it is recorded in the [Pi Durable ledger](docs/pi-durable-ledger.md). The history of changes is in [`CHANGELOG.md`](CHANGELOG.md).
 
+## Licence
+
+MiPi is released under the [MIT License](LICENSE).
+
 ## Credits
 
 Seeded from [`earendil-works/pi-durable-cloudflare`](https://github.com/earendil-works/pi-durable-cloudflare) @ `b68bf92` (MIT, `LICENSES/pi-durable-cloudflare.txt`). Some code is adapted from [`TannerMidd/pi-pocket`](https://github.com/TannerMidd/pi-pocket) @ `2f060f2` (MIT, `LICENSES/pi-pocket.txt`); those files say so in their first line.
