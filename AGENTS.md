@@ -6,7 +6,7 @@ Instructions for any coding agent working in this repo (Grok Bot, Claude, Codex,
 
 One owner's always-on personal agent. It runs on [Pi Durable](https://www.npmjs.com/package/@earendil-works/pi-durable) (experimental, breaks between versions) inside a SQLite Durable Object on Cloudflare Workers (free plan), with OpenCode Go as the model provider.
 
-Before changing behaviour, read `README.md` and `docs/pi-durable-ledger.md`, plus the Linear issue you're working on (workspace nuttydev, team Code, issue keys COD-…, project MiPi).
+Before changing behaviour, read `README.md`, `docs/development.md` and `docs/pi-durable-ledger.md`, plus the Linear issue you're working on (workspace nuttydev, team Code, issue keys COD-…, project MiPi).
 
 ## Who does what
 
@@ -32,7 +32,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 - Node 22 (`.node-version`) and pnpm 11 via Corepack (`corepack enable`). Run `pnpm install` once per checkout.
 - Scripts are Node (`node scripts/*.ts`), not shell, so they run on Windows too. Don't add bash-only steps to `package.json` scripts; use Node or `shx`.
 - Files use LF line endings (`.gitattributes`). On Windows, keep `core.autocrlf` off or rely on `.gitattributes`; the format check fails on CRLF.
-- Local secrets go in `.dev.vars` (copy `.dev.vars.example`); never commit it. Deployed secrets live in GitHub: per lane in the Environments `staging` and `production` (`OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, `ADMIN_TOKEN`, and `ADMIN_TOKEN_PREVIOUS` only while rotating; optional `RELAY_TOKEN`, with `RELAY_TOKEN_PREVIOUS` only while rotating), with repository secrets as the fallback and for the Cloudflare credentials. For Access-enabled lanes, set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_OWNER_EMAIL`, and `ACCESS_SERVICE_CLIENT_ID` as Environment variables and `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` as Environment secrets. Keep `MIPI_ACCESS_SKIP` local to localhost development. See the README for staging setup and acceptance checks.
+- Local secrets go in `.dev.vars` (copy `.dev.vars.example`); never commit it. Deployed secrets live in GitHub: per lane in the Environments `staging` and `production` (`OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN`, `ADMIN_TOKEN`, and `ADMIN_TOKEN_PREVIOUS` only while rotating; optional `RELAY_TOKEN`, with `RELAY_TOKEN_PREVIOUS` only while rotating), with repository secrets as the fallback and for the Cloudflare credentials. For Access-enabled lanes, set `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`, `ACCESS_OWNER_EMAIL`, and `ACCESS_SERVICE_CLIENT_ID` as Environment variables and `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` as Environment secrets. Keep `MIPI_ACCESS_SKIP` local to localhost development. See `docs/deployment.md`, `docs/cloudflare-access.md`, `docs/telegram.md` and `docs/relay.md` for lane setup and acceptance checks.
 
 ## Commands
 
