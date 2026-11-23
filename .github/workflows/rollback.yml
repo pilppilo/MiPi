@@ -39,6 +39,13 @@ jobs:
       ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
       # Only while rotating a lane's ADMIN_TOKEN: the old value, which the running Worker still has.
       ADMIN_TOKEN_PREVIOUS: ${{ secrets.ADMIN_TOKEN_PREVIOUS }}
+      # Cloudflare Access (M4): on once the lane's Environment has both variables. The service token gets the deploy
+      # scripts through Access to the admin routes.
+      ACCESS_TEAM_DOMAIN: ${{ vars.ACCESS_TEAM_DOMAIN }}
+      ACCESS_AUD: ${{ vars.ACCESS_AUD }}
+      ACCESS_OWNER_EMAIL: ${{ vars.ACCESS_OWNER_EMAIL }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,18 +61,11 @@ jobs:
           name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
           url="https://$name.$subdomain.workers.dev"
           echo "WORKER_URL=$url" >> "$GITHUB_ENV"
-          # /api/health answers 200 to any token, with the version only for the right one. `|| true` keeps a failed
-          # request (5xx, no answer) from ending the step under `set -e` before the next token is tried.
-          deployed=""
-          for token in "$ADMIN_TOKEN" "$ADMIN_TOKEN_PREVIOUS"; do
-            [ -n "$token" ] || continue
-            deployed="$(curl -fsS -H "Authorization: Bearer $token" "$url/api/health" | jq -r '.version // empty' || true)"
-            [ -n "$deployed" ] && break
-          done
-          if [ -z "$deployed" ]; then
-            echo "::error::$url/api/health showed no version: check this lane's ADMIN_TOKEN (or ADMIN_TOKEN_PREVIOUS)"
+          # The deployed version, through the admin API (ADMIN_TOKEN, ADMIN_TOKEN_PREVIOUS, or the Access service token).
+          deployed="$(node scripts/deploy.ts version --url "$url")" || {
+            echo "::error::$url didn't report its version through the admin API: check this lane's ADMIN_TOKEN or Access service token"
             exit 1
-          fi
+          }
           echo "DEPLOYED=$deployed" >> "$GITHUB_ENV"
           echo "Deployed on $TARGET: $deployed"
 
@@ -92,5 +92,16 @@ jobs:
           umask 077
           jq -n --arg key "$OPENCODE_API_KEY" --arg spike "$MIPI_SPIKE_TOKEN" --arg admin "$ADMIN_TOKEN" \
             '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}' > "$secrets"
-          pnpm exec wrangler deploy --secrets-file "$secrets" --message "rollback to $VERSION" --tag "$VERSION"
+          # Builds from before M4 ignore these vars; from M4 on they keep Access on, as on a normal deploy.
+          access_vars=()
+          if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
+            if [ -z "$ACCESS_OWNER_EMAIL" ]; then
+              echo "::error::ACCESS_OWNER_EMAIL is missing for the Access-enabled $TARGET environment"
+              exit 1
+            fi
+            access_vars=(--var "ACCESS_TEAM_DOMAIN:$ACCESS_TEAM_DOMAIN" --var "ACCESS_AUD:$ACCESS_AUD" --var "ACCESS_OWNER_EMAIL:$ACCESS_OWNER_EMAIL" \
+              --var "ACCESS_SERVICE_CLIENT_ID:$CF_ACCESS_CLIENT_ID")
+          fi
+          pnpm exec wrangler deploy --secrets-file "$secrets" "${access_vars[@]}" \
+            --message "rollback to $VERSION" --tag "$VERSION"
           echo "### Rolled $TARGET back from $DEPLOYED to $VERSION" >> "$GITHUB_STEP_SUMMARY"

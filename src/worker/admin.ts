@@ -1,7 +1,7 @@
 /**
  * Admin routes for deploy scripts: status, export, restore, and point-in-time rollback of the owner's agent.
- * Every route needs `Authorization: Bearer <ADMIN_TOKEN>` (constant-time compare; refused when unset). From M4, an
- * Access service token replaces this.
+ * The Worker lets only the deploy scripts through (`authenticate(…, "admin")` in `index.ts`): the Access service
+ * token once Access is on, `Authorization: Bearer <ADMIN_TOKEN>` before.
  *
  *   GET  /api/admin/status
  *   POST /api/admin/export/begin                      → export header (pauses the agent)
@@ -12,19 +12,10 @@
  *   POST /api/admin/restore/end     { rows: counts }  → status (reopens the agent if the guard allows)
  *   POST /api/admin/restore-bookmark { bookmark, confirm }
  */
-import { constantTimeEqual } from "./auth.ts";
 import type { ExportCursor, ExportHeader, ExportRow } from "../agent/maintenance.ts";
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
   Response.json(body, { status, headers });
-
-/** Whether the request carries the admin token. False when none is configured (fail closed). */
-export async function isAdmin(request: Request, expected: string | undefined): Promise<boolean> {
-  if (expected === undefined || expected.trim().length === 0) return false;
-  const authorization = request.headers.get("Authorization");
-  if (!authorization?.startsWith("Bearer ")) return false;
-  return constantTimeEqual(authorization.slice("Bearer ".length).trim(), expected);
-}
 
 async function body<T>(request: Request): Promise<T> {
   try {
@@ -46,7 +37,6 @@ function parseCursor(value: string | null): ExportCursor | undefined {
 }
 
 export async function handleAdmin(request: Request, env: Env, path: string): Promise<Response> {
-  if (!(await isAdmin(request, env.ADMIN_TOKEN))) return json({ error: "Unauthorized" }, 401);
   const agent = env.AGENT.getByName(env.MIPI_OWNER);
   const route = `${request.method} ${path}`;
   try {
