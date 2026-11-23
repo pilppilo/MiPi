@@ -20,6 +20,7 @@ import {
   type ExportRow,
 } from "../src/agent/maintenance.ts";
 import { SUPPORTED_SCHEMA_VERSION } from "../src/agent/pi/storage.ts";
+import { createHarnessOptions } from "../src/agent/harness.ts";
 import worker from "../src/worker/index.ts";
 import { MIPI_VERSION } from "../src/version.ts";
 import { withSpikeToken } from "./spike.ts";
@@ -143,6 +144,39 @@ describe("admin routes", () => {
 });
 
 describe("export and restore", () => {
+  it("begins an export on a cold start, as a deploy's backup does", async () => {
+    // MiPi's own composition, so its conversations carry MiPi's documents: reading one while the agent opened (the
+    // memory pass's first look, M8) held up an export beginning then, until the object was reset.
+    const owner = "export-cold-start";
+    const { call, stub } = forOwner(owner);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      const faux = fauxProvider();
+      faux.setResponses([fauxAssistantMessage([fauxText("Hi.")])]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const harness = await Harness.open(
+        await openDurableObjectSqliteStorage(state.storage),
+        createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+        BACKGROUND_CONTEXT,
+      );
+      try {
+        const conversation = await harness.createConversation(
+          { ownership: { kind: "ownerless" } },
+          BACKGROUND_CONTEXT,
+        );
+        await (
+          await conversation.submit({ type: "input", content: "hello" }, BACKGROUND_CONTEXT)
+        ).wait(BACKGROUND_CONTEXT);
+      } finally {
+        await harness.close(BACKGROUND_CONTEXT);
+      }
+    });
+    await evictDurableObject(stub);
+    // The first request to the cold object begins the export, with nothing before it to finish opening.
+    expect((await exportAll(call)).consistent).toBe(true);
+  }, 20_000);
+
   it("round-trips the agent's data and reopens it", async () => {
     const owner = "round-trip";
     const { call, ownerEnv } = forOwner(owner);

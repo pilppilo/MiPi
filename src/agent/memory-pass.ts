@@ -424,8 +424,11 @@ export class MemoryPassRuntime {
 
   /**
    * The earliest pass due, or undefined when none can call the model: memory full, or the scheduled runs paused.
-   * Reads only, never writes: snapshots never create a document, and the scans go in one read-only commit (a write here
-   * raced every other commit, and in tests a second harness on the same storage).
+   * Reads only: the session documents through snapshots, which never create one, and the entries in one commit (a
+   * write here raced every other commit, and in tests a second harness on the same storage). It reads no conversation
+   * document: on a cold start, a read of one (`ConversationMeta`) waited on the input gate that an export beginning
+   * then held, while the export waited in `harness.close()` for that read's commit, and the object was reset. A deploy
+   * backs up first, so that is the deploy's backup failing.
    */
   async #earliest(): Promise<number | undefined> {
     const { harness } = this.#options;
@@ -440,6 +443,8 @@ export class MemoryPassRuntime {
         const page = await tx.scanConversations({}, 100, cursor);
         for (const record of page.items) {
           if (record.owner !== undefined) continue;
+          // No conversation documents here (the profile included): see above. A conversation without `remember`
+          // may get a wake; its pass then moves the mark without asking the model.
           const activity = await newestActivity(tx, record.id);
           if (activity !== undefined) found.push({ id: record.id, ...activity });
         }
@@ -450,11 +455,7 @@ export class MemoryPassRuntime {
     let earliest: number | undefined;
     for (const { id, entry, at: activeAt } of activities) {
       const at = dueAt({ entry, at: activeAt }, markOf(state, id));
-      if (at === undefined || (earliest !== undefined && at >= earliest)) continue;
-      // Only conversations whose profile offers `remember`: the others are passed over when their pass runs.
-      const meta = await harness.snapshot(ConversationMeta, id, context);
-      if (!PROFILES[profileOf(meta)].tools.includes(REMEMBER_TOOL_NAME)) continue;
-      earliest = at;
+      if (at !== undefined && (earliest === undefined || at < earliest)) earliest = at;
     }
     return earliest;
   }
