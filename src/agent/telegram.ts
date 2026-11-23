@@ -30,7 +30,6 @@ import {
   type PickedSend,
   pickSend,
   recordSend,
-  sendKey,
   settleStale,
   TelegramOutbox,
   type TelegramSend,
@@ -766,17 +765,22 @@ export class TelegramChannelRuntime {
         await this.#send(send);
       }
       // Records any chunk a lost instance left `sending`, and refreshes the wake.
-      await this.#commit(async (tx) => settleStale(await tx.doc(TelegramOutbox), this.#inFlight));
+      await this.#commit(async (tx) =>
+        settleStale(await tx.doc(TelegramOutbox), this.#inFlight, this.#now()),
+      );
     });
   }
 
   async #send(send: PickedSend): Promise<void> {
-    const key = sendKey(send);
+    const { key } = send;
     this.#inFlight.add(key);
     try {
       let result;
       try {
-        result = await this.#options.send(send.chatId, send.text);
+        result = await this.#options.send(send.chatId, {
+          text: send.text,
+          ...(send.html === undefined ? {} : { html: send.html }),
+        });
       } catch (error) {
         result = {
           kind: "unknown" as const,
@@ -786,7 +790,7 @@ export class TelegramChannelRuntime {
       if (result.kind !== "sent") {
         this.#options.report("A Telegram send did not go through", new Error(result.reason), {
           reply: send.replyId,
-          chunk: send.index,
+          chunk: key,
           outcome: result.kind,
         });
       }

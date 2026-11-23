@@ -2,7 +2,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
-import { Harness } from "@earendil-works/pi-durable";
+import { configure, Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import {
@@ -11,6 +11,7 @@ import {
   profileOf,
   setProfile,
   startingProfile,
+  syncProfileTools,
 } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/harness.ts";
 import { PROFILE_NAMES, PROFILES, type ProfileName } from "../src/agent/profiles.ts";
@@ -124,6 +125,42 @@ describe("tool profiles", () => {
       expect(await harness.commit((tx) => boundConversation(tx, "relay:pidu", relay), ctx)).toBe(
         fresh,
       );
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+});
+
+describe("profile tools at startup", () => {
+  it("gives a conversation older than profiles its profile's tools, keeps its model, and then writes nothing", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const harness = await Harness.open(
+      new MemoryStorage(),
+      createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+      ctx,
+    );
+    try {
+      // As an older build left it: named `default`, created with no tools, and a model of its own.
+      const old = await harness.commit(async (tx) => {
+        const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
+        await configure(tx, id, { tools: [], model: { provider: "faux", modelId: "faux-2" } });
+        (await tx.doc(ConversationMeta, id)).profile = "default";
+        return id;
+      }, ctx);
+      // A plain chat stays plain: `empty` offers nothing, and nothing changes there.
+      const plain = await harness.commit(async (tx) => {
+        const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
+        await setProfile(tx, id, "empty");
+        return id;
+      }, ctx);
+      expect(await syncProfileTools(harness)).toEqual([old]);
+      const agent = await (await harness.conversation(old, ctx))!.agent(ctx);
+      expect(agent.tools.map(({ name }) => name).sort()).toEqual(["schedule", "search_history"]);
+      expect(agent.model).toEqual({ provider: "faux", modelId: "faux-2" });
+      expect((await (await harness.conversation(plain, ctx))!.agent(ctx)).tools).toEqual([]);
+      expect(await syncProfileTools(harness)).toEqual([]);
     } finally {
       await harness.close(ctx);
     }

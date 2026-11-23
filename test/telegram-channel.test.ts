@@ -105,10 +105,10 @@ async function openAgent(
     profile: "default",
     version: "0.0.0-test",
     modelList: new ModelList(options.modelIds ?? (async () => ["deepseek-v4.1-flash"])),
-    send: async (chatId, text) => {
+    send: async (chatId, message) => {
       calls += 1;
-      const result = await behaviour(chatId, text, calls);
-      if (result.kind === "sent") sent.push({ chatId, text });
+      const result = await behaviour(chatId, message.text, calls);
+      if (result.kind === "sent") sent.push({ chatId, text: message.text });
       return result;
     },
     armAlarm: async () => {},
@@ -466,7 +466,7 @@ describe("Telegram replies", () => {
       }
     }));
 
-  it("records a send cut off mid-request as delivery-unknown and skips the rest of that reply", () =>
+  it("tries a send cut off by a restart once more, and the whole reply arrives", () =>
     inObject(async (storage) => {
       const long = `${"a".repeat(4000)}\n\n${"b".repeat(100)}`;
       let agent = await openAgent(storage, {
@@ -481,6 +481,39 @@ describe("Telegram replies", () => {
         await agent.channel.reconcile();
         void agent.channel.drain();
         await new Promise((resolve) => setTimeout(resolve, 20));
+        agent = await agent.restart();
+        await agent.settle();
+        const [reply] = (await outbox(agent.harness)).replies;
+        expect(reply!.chunks.map(({ status }) => status)).toEqual(["sent", "sent"]);
+        expect(reply!.chunks[0]).toMatchObject({ ambiguousRetries: 1 });
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
+          "a".repeat(4000),
+          "b".repeat(100),
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("ends a send whose retry is cut off too, skips the rest of that reply, and the chat moves on", () =>
+    inObject(async (storage) => {
+      const long = `${"a".repeat(4000)}\n\n${"b".repeat(100)}`;
+      let agent = await openAgent(storage, {
+        responses: answers(long),
+        send: () => new Promise(() => {}),
+      });
+      try {
+        await agent.channel.admit(text(1, "Two parts"));
+        await endWindow(agent);
+        await agent.harness.waitForIdle(ctx);
+        await agent.channel.reconcile();
+        void agent.channel.drain();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        // Restarted, and its one retry is cut off as well.
+        agent = await agent.restart({ send: () => new Promise(() => {}) });
+        clock.now += 60_000;
+        void agent.channel.drain();
+        await new Promise((resolve) => setTimeout(resolve, 20));
         agent = await agent.restart({ responses: answers("Next one") });
         await agent.settle();
         const [cut] = (await outbox(agent.harness)).replies;
@@ -488,11 +521,41 @@ describe("Telegram replies", () => {
           "delivery-unknown",
           "skipped-after-failure",
         ]);
-        // The chat isn't blocked: the next reply goes out.
         await agent.channel.admit(text(2, "Still there?"));
         await agent.settle();
         expect(agent.sent).toEqual([{ chatId: CHAT, text: "Next one" }]);
       } finally {
+        await agent.close();
+      }
+    }));
+
+  it("never sends one chunk twice from two drains at once", () =>
+    inObject(async (storage) => {
+      const release = Promise.withResolvers<void>();
+      let calls = 0;
+      const agent = await openAgent(storage, {
+        responses: answers("Once"),
+        send: async () => {
+          calls += 1;
+          await release.promise;
+          return { kind: "sent", messageId: calls };
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "Hi"));
+        await endWindow(agent);
+        await agent.harness.waitForIdle(ctx);
+        await agent.channel.reconcile();
+        const first = agent.channel.drain();
+        const second = agent.channel.drain();
+        // An overlapping alarm, too, while the first request is out.
+        const third = agent.channel.recover();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        release.resolve();
+        await Promise.all([first, second, third]);
+        expect(calls).toBe(1);
+      } finally {
+        release.resolve();
         await agent.close();
       }
     }));

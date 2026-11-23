@@ -11,7 +11,6 @@ import {
   type EntryId,
   Harness,
   type TaskGraph,
-  type Wake,
   type WatchHandle,
 } from "./pi/durable.ts";
 import { openDurableObjectSqliteStorage } from "./pi/sqlite.ts";
@@ -25,6 +24,7 @@ import {
   profileOf,
   setProfile,
   startingProfile,
+  syncProfileTools,
 } from "./conversations.ts";
 import { fetchLiveGoModelIds, ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
@@ -69,6 +69,7 @@ import {
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
+import { AlarmScheduler, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
 import { botApiSender } from "./telegram-outbox.ts";
 
@@ -89,8 +90,6 @@ const reportError = (
   );
 };
 
-/** While work can run, the alarm stays this far ahead, so an evicted instance is woken to resume it. */
-const HEARTBEAT_MS = 60_000;
 const CONVERSATION_PAGE_SIZE = 100;
 
 type ConversationCommandReceipt =
@@ -228,7 +227,8 @@ export class MipiAgent extends DurableObject<Env> {
   readonly #views = new Map<WebSocket, WatchHandle<ConversationView>>();
   readonly #typingConnections = new Set<WebSocket>();
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
-  #alarmWrites: Promise<void> = Promise.resolve();
+  /** The one alarm, for Pi Durable's sleeps, the Telegram door and the heartbeat (`alarm.ts`). */
+  readonly #alarm = new AlarmScheduler(this.ctx.storage, () => this.#telegram?.wake());
   /** The Telegram door's admissions, replies and outbox; present while the harness is open. */
   #telegram: TelegramChannelRuntime | undefined;
 
@@ -295,7 +295,7 @@ export class MipiAgent extends DurableObject<Env> {
     this.#telegram = undefined;
     await this.#activity.stop();
     await this.#harness.close(BACKGROUND_CONTEXT);
-    await this.#alarmWrites;
+    await this.#alarm.settled();
   }
 
   #refusal(): Response {
@@ -518,7 +518,7 @@ export class MipiAgent extends DurableObject<Env> {
         // Called after open and whenever the next wake changes. With `onWake`, the Harness keeps no timer for
         // sleeps: the alarm calls `resume()`. A failed alarm write resets the object; it arms again on restart.
         onWake: (wake) =>
-          void this.#scheduleNextAlarm(wake).catch(() => this.ctx.abort("Alarm write failed")),
+          void this.#alarm.schedule(wake).catch(() => this.ctx.abort("Alarm write failed")),
       },
       BACKGROUND_CONTEXT,
     );
@@ -559,6 +559,16 @@ export class MipiAgent extends DurableObject<Env> {
         },
         end: () => {},
       });
+      // Before anything runs: every conversation offers its profile's tools (older ones may lack them).
+      const synced = await syncProfileTools(harness);
+      if (synced.length > 0) {
+        console.log(
+          JSON.stringify({
+            message: "Gave conversations their profile's tools",
+            conversations: synced,
+          }),
+        );
+      }
       await this.#restoreViews();
       const telegram = new TelegramChannelRuntime({
         harness,
@@ -568,17 +578,17 @@ export class MipiAgent extends DurableObject<Env> {
         version: MIPI_VERSION,
         modelList: this.#modelList,
         send: botApiSender(this.#setting("TELEGRAM_BOT_TOKEN")),
-        armAlarm: () => this.#scheduleNextAlarm({ ...harness.wake(), active: true }),
+        armAlarm: () => this.#alarm.schedule({ ...harness.wake(), active: true }),
         onWakeChange: () =>
-          void this.#scheduleNextAlarm(harness.wake()).catch(() =>
-            this.ctx.abort("Alarm write failed"),
-          ),
+          void this.#alarm
+            .schedule(harness.wake())
+            .catch(() => this.ctx.abort("Alarm write failed")),
         onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
         report: reportError,
       });
       this.#telegram = telegram;
       // Armed before `resume()` runs anything, as for any call that can start work.
-      await this.#scheduleNextAlarm(harness.wake());
+      await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
       harness.resume();
       // Replies and sends a lost instance left; not awaited, so opening never waits on Telegram.
@@ -672,14 +682,24 @@ export class MipiAgent extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       return;
     }
+    const harness = this.#harness;
     // Armed before `resume()` can start work, as on open.
-    await this.#scheduleNextAlarm({ ...this.#harness.wake(), active: true });
-    this.#harness.resume();
-    // Telegram replies, deferred commands and sends that are due; each part reports its own failure.
-    await this.#telegram?.recover();
-    // Alarms are at-least-once, and `onWake` repeats no unchanged wake: an early or spurious alarm would otherwise
-    // leave the heartbeat armed with nothing to do. `wake()` already counts the work `resume()` made runnable.
-    await this.#scheduleNextAlarm(this.#harness.wake());
+    await this.#alarm.schedule({ ...harness.wake(), active: true });
+    await runAlarmConsumers(
+      [
+        // Continue work a lost instance left, and make due sleeps runnable.
+        ["Pi Durable resume", () => harness.resume()],
+        // Telegram windows, replies, deferred commands and sends that are due.
+        ["Telegram door", () => this.#telegram?.recover()],
+      ],
+      reportError,
+      // Alarms are at-least-once, and `onWake` repeats no unchanged wake: an early or spurious alarm would otherwise
+      // leave the heartbeat armed with nothing to do. `wake()` already counts the work `resume()` made runnable. Not
+      // while maintenance runs: the export or restore that started it owns the alarm until it ends.
+      async () => {
+        if (this.#state.kind === "open") await this.#alarm.schedule(harness.wake());
+      },
+    );
   }
 
   override async webSocketMessage(socket: WebSocket, message: WSMessage): Promise<void> {
@@ -929,7 +949,7 @@ export class MipiAgent extends DurableObject<Env> {
         }
         // Arm before admitting work: `onWake` runs after the commit, so an instance that dies in between is
         // still woken. An early alarm is harmless; a missing one strands the turn.
-        await this.#scheduleNextAlarm({ ...this.#harness.wake(), active: true });
+        await this.#alarm.schedule({ ...this.#harness.wake(), active: true });
         const submission = await conversation.submit(
           {
             type: "input",
@@ -1188,28 +1208,5 @@ export class MipiAgent extends DurableObject<Env> {
       ].sort((left, right) => left.localeCompare(right));
       this.#send(receiver, { type: "presence.typing", conversationId, usernames });
     }
-  }
-
-  /**
-   * The one alarm: the earliest of Pi Durable's next sleep, the Telegram outbox's next send, and a recovery heartbeat
-   * while work can run (a turn, or a Telegram input or command waiting on one). Everything that needs the alarm goes
-   * through here.
-   */
-  #scheduleNextAlarm(wake: Wake): Promise<void> {
-    // Serialized, so an older wake cannot overwrite a newer, earlier deadline.
-    const write = this.#alarmWrites.then(async () => {
-      // Read when the write runs, so it is the newest.
-      const telegram = this.#telegram?.wake() ?? { active: false };
-      const heartbeat = wake.active || telegram.active ? Date.now() + HEARTBEAT_MS : undefined;
-      // `wake.at` is on the Harness clock, which is the default `Date.now`, as is the outbox's.
-      const candidates = [heartbeat, wake.at, telegram.at].filter(
-        (value): value is number => value !== undefined,
-      );
-      const at = candidates.length === 0 ? undefined : Math.min(...candidates);
-      if (at === undefined) await this.ctx.storage.deleteAlarm();
-      else await this.ctx.storage.setAlarm(at);
-    });
-    this.#alarmWrites = write.catch(() => undefined);
-    return write;
   }
 }

@@ -95,8 +95,8 @@ async function openAgent(
     profile: "default",
     version: "0.0.0-test",
     modelList: new ModelList(async () => []),
-    send: async (chatId, text) => {
-      sent.push({ chatId, text });
+    send: async (chatId, message) => {
+      sent.push({ chatId, text: message.text });
       return { kind: "sent", messageId: ++calls };
     },
     armAlarm: async () => {},

@@ -2,7 +2,15 @@
  * MiPi's own per-conversation state, and which conversation each channel talks to. Every door goes through here, so
  * the profile, model and title of a conversation never depend on the door a message came through.
  */
-import { configure, type ConversationId, defineDoc, defineDocFamily } from "./pi/durable.ts";
+import { BACKGROUND_CONTEXT } from "./pi/context.ts";
+import {
+  configure,
+  type ConversationId,
+  type Cursor,
+  defineDoc,
+  defineDocFamily,
+  type Harness,
+} from "./pi/durable.ts";
 import { DEFAULT_PROFILE, isProfileName, type ProfileName, toolsFor } from "./profiles.ts";
 
 type Tx = Parameters<typeof configure>[0];
@@ -82,4 +90,44 @@ export async function boundConversation(
   await setProfile(tx, id, profile);
   binding.conversationId = id;
   return id;
+}
+
+/**
+ * Gives every conversation the tools its profile names, where they differ: a conversation older than profiles got its
+ * profile's name but kept the tools it was created with, so it could show `default` and offer no `schedule`. Every
+ * ownerless conversation counts, forks included; a subagent's conversation belongs to the tool that made it. Writes
+ * nothing when all match. Returns the conversations it changed.
+ */
+export async function syncProfileTools(harness: Harness): Promise<ConversationId[]> {
+  const context = BACKGROUND_CONTEXT;
+  const conversations = await harness.commit(async (tx) => {
+    const found: Array<{ id: ConversationId; profile: ProfileName }> = [];
+    let cursor: Cursor | undefined;
+    do {
+      const page = await tx.scanConversations({}, 100, cursor);
+      for (const record of page.items) {
+        if (record.owner !== undefined) continue;
+        found.push({
+          id: record.id,
+          profile: profileOf(await tx.doc(ConversationMeta, record.id)),
+        });
+      }
+      cursor = page.next;
+    } while (cursor !== undefined);
+    return found;
+  }, context);
+  const changed: ConversationId[] = [];
+  for (const { id, profile } of conversations) {
+    const conversation = await harness.conversation(id, context);
+    if (conversation === undefined) continue;
+    const offered = (await conversation.agent(context)).tools.map(({ name }) => name).sort();
+    const expected = toolsFor(profile)
+      .map(({ name }) => name)
+      .sort();
+    if (offered.join("\n") === expected.join("\n")) continue;
+    // Only the tools and the profile's name: the model and everything else stay as they are.
+    await harness.commit((tx) => setProfile(tx, id, profile), context);
+    changed.push(id);
+  }
+  return changed;
 }
