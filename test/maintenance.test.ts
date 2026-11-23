@@ -1,7 +1,12 @@
 import { evictDurableObject, runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxText,
+  fauxToolCall,
+} from "@earendil-works/pi-ai/providers/faux";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Harness, createRegistry } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
@@ -20,6 +25,7 @@ import {
   type ExportRow,
 } from "../src/agent/maintenance.ts";
 import { SUPPORTED_SCHEMA_VERSION } from "../src/agent/pi/storage.ts";
+import { createHarnessOptions } from "../src/agent/harness.ts";
 import worker from "../src/worker/index.ts";
 import { MIPI_VERSION } from "../src/version.ts";
 import { withSpikeToken } from "./spike.ts";
@@ -143,6 +149,85 @@ describe("admin routes", () => {
 });
 
 describe("export and restore", () => {
+  it("begins an export on a cold start, as a deploy's backup does", async () => {
+    // MiPi's own composition, so its conversations carry MiPi's documents: reading one while the agent opened (the
+    // memory pass's first look, M8) held up an export beginning then, until the object was reset.
+    const owner = "export-cold-start";
+    const { call, stub } = forOwner(owner);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      const faux = fauxProvider();
+      faux.setResponses([fauxAssistantMessage([fauxText("Hi.")])]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const harness = await Harness.open(
+        await openDurableObjectSqliteStorage(state.storage),
+        createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+        BACKGROUND_CONTEXT,
+      );
+      try {
+        const conversation = await harness.createConversation(
+          { ownership: { kind: "ownerless" } },
+          BACKGROUND_CONTEXT,
+        );
+        await (
+          await conversation.submit({ type: "input", content: "hello" }, BACKGROUND_CONTEXT)
+        ).wait(BACKGROUND_CONTEXT);
+      } finally {
+        await harness.close(BACKGROUND_CONTEXT);
+      }
+    });
+    await evictDurableObject(stub);
+    // The first request to the cold object begins the export, with nothing before it to finish opening.
+    expect((await exportAll(call)).consistent).toBe(true);
+  }, 20_000);
+
+  it("begins an export on a cold start while a reminder comes due", async () => {
+    // A repeat whose time passed while the object slept runs as the agent opens. The export closes the agent before
+    // it takes the object: closed inside `blockConcurrencyWhile`, `harness.close()` waited for that run, which waited on
+    // the input gate the export held, until the object was reset.
+    const owner = "export-cold-reminder";
+    const { call, stub } = forOwner(owner);
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      const faux = fauxProvider();
+      faux.setResponses([
+        fauxAssistantMessage(
+          [fauxToolCall("schedule", { instruction: "Stretch", when: "every weekday 8:00" })],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage([fauxText("Every weekday at 8.")]),
+      ]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const harness = await Harness.open(
+        await openDurableObjectSqliteStorage(state.storage),
+        {
+          ...createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+          // Long ago, so the reminder's next time has passed by the time the object opens again.
+          now: () => Date.UTC(2026, 0, 5, 23, 0),
+        },
+        BACKGROUND_CONTEXT,
+      );
+      try {
+        const conversation = await harness.createConversation(
+          { ownership: { kind: "ownerless" } },
+          BACKGROUND_CONTEXT,
+        );
+        await (
+          await conversation.submit(
+            { type: "input", content: "Remind me to stretch every weekday at 8" },
+            BACKGROUND_CONTEXT,
+          )
+        ).wait(BACKGROUND_CONTEXT);
+      } finally {
+        await harness.close(BACKGROUND_CONTEXT);
+      }
+    });
+    await evictDurableObject(stub);
+    expect((await exportAll(call)).consistent).toBe(true);
+  }, 20_000);
+
   it("round-trips the agent's data and reopens it", async () => {
     const owner = "round-trip";
     const { call, ownerEnv } = forOwner(owner);

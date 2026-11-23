@@ -45,6 +45,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 | `pnpm changeset`            | Every PR. Use `--empty` when nothing that runs changes.                                                          |
 | `pnpm ledger`               | Open Pi Durable ledger entries and where they live in the code.                                                  |
 | `pnpm upgrade:pi <version>` | The only way to move Pi Durable to another version.                                                              |
+| `pnpm fixture:capture`      | After `pnpm bump` for a release that changes stored data: writes its fixture database (`test/fixtures/db/`).     |
 
 ## Layout
 
@@ -70,7 +71,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 - Validate only at trust boundaries (`src/worker/`, `src/protocol.ts`, tool schemas, external responses, and stored data read back: socket attachments, `app_meta`, documents an older build wrote). Don't add redundant `typeof`/`instanceof`/`Array.isArray` checks on values TypeScript already guarantees.
 - Never remove or downgrade code to silence type errors from an outdated dependency: upgrade the dependency instead, in its own PR. For `@earendil-works/*` that is a separate `pnpm upgrade:pi` PR with its ledger review, never part of a feature PR.
 - Don't remove code that looks intentional (especially `pi-ledger` workarounds, startup guards, or Durable Object safety wrappers); leave it in place and flag it in the PR description and Linear issue for the owner to decide.
-- Don't add ad-hoc backward-compatibility shims unless asked. During `alpha`, handle breaking persisted-data changes through the startup guard and a `**One-way:**` changeset warning (from `0.1.0-beta.1` onward, data must survive upgrades and pass fixture-DB tests).
+- Don't add ad-hoc backward-compatibility shims unless asked. During `alpha`, handle breaking persisted-data changes through the startup guard and a `**One-way:**` changeset warning (from `0.1.0-beta.1` onward, data must survive upgrades and pass fixture-DB tests: `test/fixtures.test.ts` restores every fixture in `test/fixtures/db/` on each `pnpm test`, and a release that changes stored data adds its own with `pnpm fixture:capture`).
 
 ## Pi Durable rules
 

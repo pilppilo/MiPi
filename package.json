@@ -1,6 +1,6 @@
 {
   "name": "mipi",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-beta.1",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,7 +17,8 @@
     "lint": "oxlint --deny-warnings",
     "upgrade:pi": "node scripts/upgrade-pi.ts",
     "ledger": "node scripts/ledger-cli.ts",
-    "bump": "changeset version && node scripts/stamp-version.ts"
+    "bump": "changeset version && node scripts/stamp-version.ts",
+    "fixture:capture": "node scripts/fixture-capture.ts"
   },
   "dependencies": {
     "@earendil-works/chord": "1.6.0",

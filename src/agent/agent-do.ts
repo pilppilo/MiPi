@@ -225,6 +225,8 @@ export class MipiAgent extends DurableObject<Env> {
   #models!: MutableModels;
   #modelList!: ModelList;
   #state: AgentState = { kind: "refused", reason: "Starting" };
+  /** The close in progress before maintenance (`#closeForMaintenance`). */
+  #closing: Promise<void> | undefined;
   /** The data's fingerprint when the current export began; a different one at the end means something wrote. */
   #exportFingerprint: string | undefined;
   #activity!: WatchHandle<TaskGraph>;
@@ -286,6 +288,21 @@ export class MipiAgent extends DurableObject<Env> {
       task_versions: JSON.stringify(supportedTaskVersions(APP_TASKS)),
     });
     this.#state = { kind: "open" };
+  }
+
+  /**
+   * Closes the agent before maintenance takes the object, outside `blockConcurrencyWhile`. `harness.close()` waits for
+   * the work in flight (a reminder that came due as the agent opened, a door's commit), and that work can wait on
+   * events the object's input gate holds back while `blockConcurrencyWhile` runs: closed inside it, the two waited on
+   * each other until the object was reset, and an export beginning on a cold start (a deploy's backup) never began.
+   * The agent stops taking work first (`#shutdown` leaves `open` before it awaits anything), so nothing new starts.
+   */
+  async #closeForMaintenance(): Promise<void> {
+    // Two maintenance calls at once share one close: the second must not take the object while the first still closes.
+    this.#closing ??= this.#shutdown().finally(() => {
+      this.#closing = undefined;
+    });
+    await this.#closing;
   }
 
   /** Closes the harness and every connection, so nothing writes while maintenance runs. */
@@ -350,7 +367,7 @@ export class MipiAgent extends DurableObject<Env> {
 
   /** Starts an export: closes the harness, pauses everything, and returns the header. Works on refused data too. */
   async exportBegin(): Promise<ExportHeader> {
-    return this.#exclusive(async () => {
+    const refuseBusy = () => {
       // An abandoned export doesn't block a new one; a running restore does.
       if (
         this.#state.kind === "maintenance" &&
@@ -358,9 +375,13 @@ export class MipiAgent extends DurableObject<Env> {
       ) {
         throw new Error(`A ${this.#state.mode} is already running`);
       }
-      // Before anything closes: data the export can't copy is refused while the agent keeps running.
-      assertExportable(this.ctx.storage.sql);
-      await this.#shutdown();
+    };
+    refuseBusy();
+    // Before anything closes: data the export can't copy is refused while the agent keeps running.
+    assertExportable(this.ctx.storage.sql);
+    await this.#closeForMaintenance();
+    return this.#exclusive(async () => {
+      refuseBusy();
       writeMeta(this.ctx.storage.sql, {
         maintenance: "export",
         maintenance_started_at: String(Date.now()),
@@ -409,11 +430,14 @@ export class MipiAgent extends DurableObject<Env> {
     if (confirm !== expected) {
       throw new Error(`Confirm the restore by passing the export's version: ${expected}`);
     }
+    if (this.#state.kind === "maintenance" && this.#state.mode === "export") {
+      throw new Error("An export is running");
+    }
+    await this.#closeForMaintenance();
     await this.#exclusive(async () => {
       if (this.#state.kind === "maintenance" && this.#state.mode === "export") {
         throw new Error("An export is running");
       }
-      await this.#shutdown();
       const sql = this.ctx.storage.sql;
       writeMeta(sql, {
         restoring: "1",
@@ -638,7 +662,6 @@ export class MipiAgent extends DurableObject<Env> {
             .catch(() => this.ctx.abort("Alarm write failed")),
         report: reportError,
       });
-      this.#memoryPass.refresh();
       this.#relay = new RelayRuntime({
         harness,
         timeZone: this.env.MIPI_TIMEZONE,
@@ -647,6 +670,9 @@ export class MipiAgent extends DurableObject<Env> {
         onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
         report: reportError,
       });
+      // The memory pass's first look, before the alarm is set: its wake is in the first write, and nothing of it is in
+      // flight once opening is over.
+      await this.#memoryPass.start();
       // Armed before `resume()` runs anything, as for any call that can start work.
       await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.

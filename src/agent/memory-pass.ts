@@ -387,6 +387,14 @@ export class MemoryPassRuntime {
     }, context);
   }
 
+  /**
+   * The first look, awaited while the agent opens: the wake is known before the alarm is first set, and nothing of the
+   * pass is in flight once opening is over, so an export beginning then (a deploy's backup) never waits on it.
+   */
+  start(): Promise<void> {
+    return this.#refreshNow();
+  }
+
   /** Recomputes the wake in the background: after commits that add entries or change memory or the run cap. */
   refresh(): void {
     void this.#refreshNow();
@@ -424,8 +432,10 @@ export class MemoryPassRuntime {
 
   /**
    * The earliest pass due, or undefined when none can call the model: memory full, or the scheduled runs paused.
-   * Reads only, never writes: snapshots never create a document, and the scans go in one read-only commit (a write here
-   * raced every other commit, and in tests a second harness on the same storage).
+   * Reads only: the session documents through snapshots, which never create one, and the entries in one commit (a
+   * write here raced every other commit, and in tests a second harness on the same storage). It reads no conversation
+   * document, so a look stays a short scan. (A look in flight once held up an export that closed the agent inside
+   * `blockConcurrencyWhile`; maintenance now closes it outside, `agent-do.ts` `#closeForMaintenance`.)
    */
   async #earliest(): Promise<number | undefined> {
     const { harness } = this.#options;
@@ -433,6 +443,8 @@ export class MemoryPassRuntime {
     if ((memory?.lessons.length ?? 0) >= MAX_LESSONS) return undefined;
     if ((await harness.snapshot(Proactive, context))?.limit === 0) return undefined;
     const state = (await harness.snapshot(MemoryPassDoc, context)) ?? { marks: {} };
+    // Closed meanwhile (an export or restore began): no commit into a closing harness.
+    if (this.#closed) return undefined;
     const activities = await harness.commit(async (tx) => {
       const found: Array<{ id: ConversationId; entry: number; at: number }> = [];
       let cursor: Cursor | undefined;
@@ -440,6 +452,8 @@ export class MemoryPassRuntime {
         const page = await tx.scanConversations({}, 100, cursor);
         for (const record of page.items) {
           if (record.owner !== undefined) continue;
+          // No conversation documents here (the profile included): see above. A conversation without `remember`
+          // may get a wake; its pass then moves the mark without asking the model.
           const activity = await newestActivity(tx, record.id);
           if (activity !== undefined) found.push({ id: record.id, ...activity });
         }
@@ -450,11 +464,7 @@ export class MemoryPassRuntime {
     let earliest: number | undefined;
     for (const { id, entry, at: activeAt } of activities) {
       const at = dueAt({ entry, at: activeAt }, markOf(state, id));
-      if (at === undefined || (earliest !== undefined && at >= earliest)) continue;
-      // Only conversations whose profile offers `remember`: the others are passed over when their pass runs.
-      const meta = await harness.snapshot(ConversationMeta, id, context);
-      if (!PROFILES[profileOf(meta)].tools.includes(REMEMBER_TOOL_NAME)) continue;
-      earliest = at;
+      if (at !== undefined && (earliest === undefined || at < earliest)) earliest = at;
     }
     return earliest;
   }
@@ -536,6 +546,7 @@ export class MemoryPassRuntime {
         },
         { maxTokens: 2048, cacheRetention: "none", sessionId },
       );
+      if (this.#closed) return;
       await harness.commit((tx) => recordUsage(tx, conversationId, model, reply.usage), context);
       const text = reply.content
         .flatMap((part) => (part.type === "text" ? [part.text] : []))
@@ -545,6 +556,7 @@ export class MemoryPassRuntime {
         throw new Error(`The reply was not the lessons asked for (${reply.stopReason})`);
       }
     } catch (error) {
+      if (this.#closed) return;
       this.#options.report("A memory pass failed", error, { conversationId });
       await harness.commit(async (tx) => {
         const state = await tx.doc(MemoryPassDoc);
@@ -567,6 +579,8 @@ export class MemoryPassRuntime {
       return;
     }
     const saved = lessons;
+    // Closed during the request: the mark stays, and the next instance asks again (today's slot is taken already).
+    if (this.#closed) return;
     await harness.commit(async (tx) => {
       // Moved meanwhile (another instance ran this range): its lessons are saved already.
       if (!(await advance(tx, conversationId, plan.from, plan.to))) return;
