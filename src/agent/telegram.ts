@@ -26,6 +26,7 @@ import { stampInput } from "./stamp.ts";
 import {
   enqueueReply,
   nextOutboxWake,
+  OUTBOX_DOC_KIND,
   type PickedSend,
   pickSend,
   recordSend,
@@ -76,7 +77,10 @@ export function isTelegramChange(publication: {
   return publication.changes.some(
     (change) =>
       change.type === "document" &&
-      (change.record?.kind === TELEGRAM_DOC_KIND || change.record?.kind === PROACTIVE_DOC_KIND),
+      (change.record?.kind === TELEGRAM_DOC_KIND ||
+        change.record?.kind === PROACTIVE_DOC_KIND ||
+        // A reminder may only queue a message (a capped one sent without the model, M6).
+        change.record?.kind === OUTBOX_DOC_KIND),
   );
 }
 
@@ -208,6 +212,10 @@ export class TelegramChannelRuntime {
           const submissions = await this.#commit((tx) => this.#waiting(tx));
           for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
         } while (this.#refreshAgain && !this.#closed);
+        // A message queued elsewhere goes out now rather than at the next alarm. Not while one is in flight: that
+        // send's own commit refreshes again when it ends.
+        const { at } = this.#wake;
+        if (at !== undefined && at <= this.#now() && this.#inFlight.size === 0) this.#kickDrain();
       } catch (error) {
         if (!this.#closed) this.#options.report("Refreshing the Telegram door failed", error);
       } finally {

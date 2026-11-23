@@ -14,6 +14,7 @@ import { type ConversationId, defineTask } from "../agent/pi/durable.ts";
 import { localTime } from "../agent/stamp.ts";
 import {
   afterNextChicagoMidnight,
+  hasRound,
   noticeCap,
   Proactive,
   type ReminderDestination,
@@ -142,11 +143,8 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             ? await tx.submissionByRequest(conversation.id, requestId)
             : undefined;
         let sent = state.sent;
-        let capped = false;
-        if (decision === "send" && existing === undefined) {
-          // pi-ledger L7. The run's first model round is counted here, at admission.
-          capped = !takeRound(proactive, now);
-        }
+        // pi-ledger L7. The run's first model round is checked here, and counted after the submit.
+        const capped = decision === "send" && existing === undefined && !hasRound(proactive, now);
         if (capped) {
           const chat = input.destination.kind === "telegram" ? input.destination.chatId : undefined;
           noticeCap(
@@ -198,6 +196,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
           if (existing === undefined) {
             // Its answer is judged and delivered when it settles (`proactive.ts`).
             const pending = await tx.doc(Proactive);
+            takeRound(pending, now);
             pending.pending = [
               ...pending.pending,
               {

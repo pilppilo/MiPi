@@ -121,6 +121,12 @@ function today(state: ProactiveState, now: number): NonNullable<ProactiveState["
   return state.cap;
 }
 
+/** Whether today's budget has room for one more model round; changes nothing. */
+export function hasRound(state: ProactiveState, now: number): boolean {
+  const count = state.cap?.day === chicagoDay(now) ? state.cap.count : 0;
+  return count < (state.limit ?? DEFAULT_DAILY_RUN_CAP);
+}
+
 /** Counts one model round if today's budget has room; false at the cap, counting nothing. */
 export function takeRound(state: ProactiveState, now: number): boolean {
   const cap = today(state, now);
@@ -131,7 +137,7 @@ export function takeRound(state: ProactiveState, now: number): boolean {
 
 /**
  * Today's one cap notice: to `chatId` when the blocked reminder answers in a chat, otherwise the private chat that last
- * wrote. With neither, none is sent, but the day still counts as noticed.
+ * wrote. With neither, nothing is sent and the day isn't marked noticed, so a later blocked run can still tell.
  */
 export function noticeCap(
   state: ProactiveState,
@@ -142,11 +148,11 @@ export function noticeCap(
 ): void {
   const cap = today(state, now);
   if (cap.noticeSent) return;
-  cap.noticeSent = true;
   const chat = chatId ?? channel.lastChat;
-  if (chat !== undefined) {
-    enqueueReply(outbox, { id: `cap:${cap.day}`, chatId: chat, text: CAP_NOTICE }, now);
-  }
+  // With no chat to tell, the notice waits for a later blocked run that has one.
+  if (chat === undefined) return;
+  cap.noticeSent = true;
+  enqueueReply(outbox, { id: `cap:${cap.day}`, chatId: chat, text: CAP_NOTICE }, now);
 }
 
 const bounded = <T>(items: T[]): T[] => items.slice(-RECORDS_KEPT);
@@ -231,11 +237,13 @@ export const RoundBudget = defineTask<
         }
         // pi-ledger L7. Rounds are counted here, after each tool round, because `beforeRequest` can't write.
         const now = runtime.now();
-        const reason: StopReason | undefined = !takeRound(state, now)
-          ? "daily-cap"
-          : (run?.turns ?? 0) >= RUN_ROUND_LIMIT
+        // The run's own limit first: a round it won't take is never charged to the day.
+        const reason: StopReason | undefined =
+          (run?.turns ?? 0) >= RUN_ROUND_LIMIT
             ? "run-limit"
-            : undefined;
+            : !takeRound(state, now)
+              ? "daily-cap"
+              : undefined;
         if (reason === undefined) {
           return { status: "terminal", outcome: { status: "completed", result: {} } };
         }
@@ -450,7 +458,16 @@ export async function reconcileAnswers(tx: Tx, now: number): Promise<boolean> {
         send(`tool-error:${input.submissionId}`, chat, quiet ? notice : `${notice}\n\n${text}`);
         continue;
       }
-      if (quiet) continue;
+      if (isNoSend(text)) continue;
+      if (text.length === 0) {
+        // Thinking only, or nothing: a reminder is never dropped without a word.
+        send(
+          `empty:${input.submissionId}`,
+          chat,
+          `The reminder "${reminderLabel(input.instruction)}" ran but produced no answer.`,
+        );
+        continue;
+      }
       send(`answer:${answer}:${chat}`, chat, text, input.reminderId);
     }
   }

@@ -240,6 +240,36 @@ describe("proactive runs", () => {
       }
     }));
 
+  it("sends a reminder's real answer along with its failed-tool notice", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage, [toolRound(), ...said("The feed is down.")]);
+      try {
+        await remind(agent.harness, "reminder:t", "Check the feed", telegram);
+        await agent.advance(60_000);
+        expect(sentTexts(agent)).toEqual([
+          expect.stringMatching(
+            /^The reminder "Check the feed" hit a failed tool \(no_such_tool\): .+\n\nThe feed is down\.$/s,
+          ),
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("never drops a reminder whose answer is only thinking", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage, said("<think>only thinking</think>"));
+      try {
+        await remind(agent.harness, "reminder:e", "Stretch", telegram);
+        await agent.advance(60_000);
+        expect(sentTexts(agent)).toEqual(['The reminder "Stretch" ran but produced no answer.']);
+      } finally {
+        await agent.close();
+      }
+    }));
+
   it("answers a message and a reminder that shared a run once, never with NO_SEND", () =>
     inObject(async (storage) => {
       clock.now = NOON;
@@ -291,7 +321,7 @@ describe("proactive runs", () => {
         expect(sentTexts(agent)).toEqual([
           `The reminder "Keep looking" stopped after ${RUN_ROUND_LIMIT} rounds.`,
         ]);
-        expect((await proactive(agent.harness))?.cap).toMatchObject({ count: RUN_ROUND_LIMIT + 1 });
+        expect((await proactive(agent.harness))?.cap).toMatchObject({ count: RUN_ROUND_LIMIT });
       } finally {
         await agent.close();
       }
@@ -330,6 +360,54 @@ describe("proactive runs", () => {
       }
     }));
 
+  it("sends a second capped Telegram reminder without waiting for the next alarm", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage);
+      try {
+        await setLimit(agent.harness, 0);
+        await remind(agent.harness, "reminder:1", "First pill", telegram);
+        await agent.advance(60_000);
+        expect(sentTexts(agent)).toEqual([
+          CAP_NOTICE,
+          "Reminder: First pill (sent without MiPi: daily limit reached).",
+        ]);
+        // The day's notice is spent, so this commit changes only the outbox.
+        await remind(agent.harness, "reminder:2", "Second pill", telegram);
+        clock.now += 60_000;
+        agent.harness.resume();
+        // Only what the door's watchers do, as between alarms: no recover() here.
+        for (let wait = 0; wait < 100 && agent.sent.length < 3; wait++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(sentTexts(agent).at(-1)).toBe(
+          "Reminder: Second pill (sent without MiPi: daily limit reached).",
+        );
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("sends a capped web reminder's notice to the chat that wrote last", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage, said("Hi."));
+      try {
+        await agent.channel.admit(text(1, "Hello"));
+        await agent.advance(BATCH_WINDOW_MS);
+        await setLimit(agent.harness, 0);
+        const root = await agent.harness.root(ctx);
+        await remind(agent.harness, "reminder:w", "Water plants", {
+          kind: "web",
+          conversationId: root.id,
+        });
+        await agent.advance(60_000);
+        expect(sentTexts(agent)).toEqual(["Hi.", CAP_NOTICE]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
   it("waits a capped web reminder until the cap resets, and skips a capped repeat", () =>
     inObject(async (storage) => {
       clock.now = NOON;
@@ -351,14 +429,26 @@ describe("proactive runs", () => {
         });
         const repeat = waiting.find(({ input }) => input.id === "reminder:rep");
         expect(repeat?.checkpoint).toMatchObject({ sent: 0, skippedCap: 1 });
-        // No model ran. The web reminder was blocked first: with no chat to tell, the day's notice is spent quietly.
-        expect(sentTexts(agent)).toEqual([]);
+        // No model ran. The web reminder was blocked first with no chat to tell, so the notice waited for the repeat's.
+        expect(sentTexts(agent)).toEqual([CAP_NOTICE]);
         expect((await proactive(agent.harness))?.cap).toMatchObject({ count: 0, noticeSent: true });
-        expect(
+        const scheduled = async () =>
           (await userTexts(agent.harness, root.id)).filter((content) =>
             content.startsWith("Scheduled instruction"),
-          ),
-        ).toEqual([]);
+          );
+        expect(await scheduled()).toEqual([]);
+
+        // The next Chicago day, with room again: the web reminder runs.
+        await setLimit(agent.harness, 5);
+        clock.now = web!.checkpoint!.at as number;
+        agent.harness.resume();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        await agent.settle();
+        expect(await scheduled()).toEqual([expect.stringContaining(": Water plants\n")]);
+        expect((await proactive(agent.harness))?.cap).toMatchObject({
+          day: chicagoDay(clock.now),
+          count: 1,
+        });
       } finally {
         await agent.close();
       }

@@ -94,8 +94,10 @@ const TERMINAL: ReadonlySet<ChunkStatus> = new Set([
 export const isFinished = (reply: OutboxReply): boolean =>
   reply.chunks.every((chunk) => TERMINAL.has(chunk.status));
 
+export const OUTBOX_DOC_KIND = "app.telegram-outbox";
+
 export const TelegramOutbox = defineDoc<OutboxState>({
-  kind: "app.telegram-outbox",
+  kind: OUTBOX_DOC_KIND,
   version: 1,
   scope: "session",
   initial: () => ({ replies: [], pacedUntil: {} }),

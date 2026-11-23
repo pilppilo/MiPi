@@ -159,9 +159,13 @@ export function quietAnswers(entries: readonly TranscriptEntry[]): ReadonlySet<n
         inputs = [];
         failed = false;
         break;
-      case "system":
       case "compaction":
       case "reset":
+        // What came before is summarised or gone; judge only what follows.
+        inputs = [];
+        failed = false;
+        break;
+      case "system":
       case "event":
         break;
       default: {

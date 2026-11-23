@@ -9,8 +9,9 @@ COD-153 (M6, part 3): proactive runs. A scheduled check can stay quiet, knows wh
 - `NO_SEND`: a reminder's run that finds nothing worth saying answers `NO_SEND`, and Telegram sends nothing. It counts only as the whole visible answer (after any `<think>` block). A failed tool still sends a notice, and a run that also answered a message is never quiet: the message gets a fallback instead of `NO_SEND`.
 - Provenance (`app.proactive`): an `onYield` hook task records which inputs each answer covers, and Telegram inputs and reminders are reconciled together, one judgement per answer.
 - Recent sends: the last 10 confirmed reminder messages, shown to the next reminder in its notes so it doesn't repeat itself. They live in the session, so they survive `/new`.
-- Daily cap on model rounds for scheduled runs: `MIPI_DAILY_RUN_CAP` (new var, default `50`, `0` pauses them; an invalid value is reported and the default used), per Chicago day. Interactive chat never counts. At the cap a run stops with one notice a day; a one-time Telegram reminder is still sent as plain text without the model; a one-time web reminder waits until just after Chicago midnight; a repeat skips that time.
+- Daily cap on model rounds for scheduled runs: `MIPI_DAILY_RUN_CAP` (new var, default `50`, `0` pauses them; an invalid value is reported and the default used), per Chicago day. Interactive chat never counts. At the cap a run stops with one notice a day (it waits for a blocked run with a chat to tell, if none is known yet); a one-time Telegram reminder is still sent as plain text without the model; a one-time web reminder waits until just after Chicago midnight; a repeat skips that time.
 - A run is stopped after 8 tool rounds, with a notice naming the reminder.
+- A reminder whose answer is empty (thinking only) sends a notice instead of nothing.
 - Web: a reminder's `NO_SEND` answer shows as a muted "Nothing to report".
 
 **Changed**

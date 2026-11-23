@@ -69,6 +69,15 @@ describe("NO_SEND answers", () => {
       entry(11, "assistant", "<think>none</think>NO_SEND"),
     ];
     expect([...quietAnswers(entries)]).toEqual([2, 11]);
+    // An unanswered message before a compaction doesn't count against the checks after it.
+    expect([
+      ...quietAnswers([
+        entry(20, "user", "Hi"),
+        entry(21, "compaction", "Summary"),
+        entry(22, "scheduled", "Check"),
+        entry(23, "assistant", "NO_SEND"),
+      ]),
+    ]).toEqual([23]);
     const html = renderToStaticMarkup(
       createElement(TranscriptList, { entries: entries.slice(0, 2), tools: [], runActive: false }),
     );
