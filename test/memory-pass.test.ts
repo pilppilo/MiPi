@@ -92,6 +92,7 @@ describe("what the pass reads", () => {
         entry("assistant", "<think>noted</think>Nice!", 2),
         entry("user", scheduled, 3),
         entry("assistant", "It's sunny.", 4),
+        entry("assistant", "NO_SEND", 5),
       ]),
     ).toEqual([
       { speaker: "user", text: "[jerome · now]\nI moved to Austin." },
@@ -337,10 +338,8 @@ describe("the memory pass", () => {
       }, ctx);
       idle(agent);
       expect(await agent.pass.pass(full.id)).toBe(false);
-      expect((await marks(agent.harness))[String(full.id)]).toMatchObject({
-        entry: 0,
-        notBefore: agent.clock.now + MEMORY_IDLE_MS,
-      });
+      // Nothing written for a full memory: the wake leaves the pass out instead (below).
+      expect((await marks(agent.harness))[String(full.id)]).toBeUndefined();
       await agent.harness.commit(async (tx) => {
         (await tx.doc(MemoryDoc)).lessons = [];
       }, ctx);
@@ -437,6 +436,108 @@ describe("the memory pass", () => {
       expect(wake.at).toBeLessThanOrEqual(Date.now() + MEMORY_IDLE_MS);
       pass.close();
       changed = Promise.withResolvers<void>();
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("runs one pass per range at a time, even when asked twice at once", async () => {
+    const release = Promise.withResolvers<void>();
+    const agent = await openAgent([
+      say("Noted."),
+      async () => {
+        await release.promise;
+        return lessons("The owner's sister is Ana.");
+      },
+    ]);
+    try {
+      const conversation = await chat(agent, "My sister is Ana.", "web:1");
+      idle(agent);
+      const first = agent.pass.run();
+      while (agent.requests.length < 2) await new Promise((resolve) => setTimeout(resolve, 1));
+      // A second alarm while the request is out: neither a second run nor a second pass of the conversation asks.
+      await agent.pass.run();
+      expect(await agent.pass.pass(conversation.id)).toBe(false);
+      release.resolve();
+      await first;
+      expect(agent.requests).toHaveLength(2);
+      expect((await memory(agent.harness)).lessons).toHaveLength(1);
+      expect((await agent.harness.snapshot(MemoryPassDoc, ctx))?.cap?.count).toBe(1);
+    } finally {
+      release.resolve();
+      await agent.close();
+    }
+  });
+
+  it("has its next wake set when a run ends, never one in the past", async () => {
+    const agent = await openAgent([say("Noted."), lessons("The owner likes tea.")]);
+    try {
+      await chat(agent, "I like tea.", "web:1");
+      // Not idle yet: the run passes nothing and leaves the wake at the time the pass is due.
+      await agent.pass.run();
+      expect(agent.pass.wake().at).toBeDefined();
+      idle(agent);
+      await agent.pass.run();
+      expect((await memory(agent.harness)).lessons).toHaveLength(1);
+      // Nothing new since the pass: no wake at all, rather than the time that just fired.
+      expect(agent.pass.wake()).toEqual({ active: false });
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("sets no wake while memory is full or the runs are paused, and one again once they aren't", async () => {
+    const agent = await openAgent([say("Noted.")]);
+    try {
+      await chat(agent, "I like tea.", "web:1");
+      await agent.pass.run();
+      const due = agent.pass.wake().at;
+      expect(due).toBeDefined();
+
+      await agent.harness.commit(async (tx) => {
+        const state = await tx.doc(MemoryDoc);
+        for (let index = 0; index < MAX_LESSONS; index++) {
+          addLesson(state, `Lesson ${index}`, { source: "web", conversationId: 1 }, index);
+        }
+      }, ctx);
+      await agent.pass.run();
+      expect(agent.pass.wake()).toEqual({ active: false });
+
+      await agent.harness.commit(async (tx) => {
+        (await tx.doc(MemoryDoc)).lessons = [];
+        (await tx.doc(Proactive)).limit = 0;
+      }, ctx);
+      await agent.pass.run();
+      expect(agent.pass.wake()).toEqual({ active: false });
+
+      await agent.harness.commit(async (tx) => {
+        (await tx.doc(Proactive)).limit = 50;
+      }, ctx);
+      await agent.pass.run();
+      expect(agent.pass.wake().at).toBe(due);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("sets no wake for a conversation with nothing said in it", async () => {
+    const agent = await openAgent([]);
+    try {
+      // Entries, but no message with a time: a bookkeeping entry, as an app or Pi Durable may write.
+      const conversation = await agent.harness.createConversation(
+        { ownership: { kind: "ownerless" } },
+        ctx,
+      );
+      await agent.harness.commit(async (tx) => {
+        await tx.appendEntry(conversation.id, {
+          kind: "test.bookkeeping",
+          data: { note: "no time" },
+        });
+      }, ctx);
+      // A refresh alone, without a pass first (a pass would move the mark past it): no wake, rather than one in 1970.
+      agent.pass.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(agent.pass.wake()).toEqual({ active: false });
     } finally {
       await agent.close();
     }

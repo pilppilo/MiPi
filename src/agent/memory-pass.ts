@@ -35,7 +35,7 @@ import { PROFILES } from "./profiles.ts";
 import { providerSession, recordUsage } from "./titles.ts";
 import { touchesWebFetch } from "../tools/memory.ts";
 import { defang } from "../lib/fence.ts";
-import { visibleAnswer } from "../lib/proactive-text.ts";
+import { isNoSend, visibleAnswer } from "../lib/proactive-text.ts";
 import { parseScheduledInstruction } from "../protocol.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -122,7 +122,8 @@ export function passLines(entries: readonly EntryRecord[]): PassLine[] {
       }
     } else if (AssistantEntry.is(entry)) {
       const text = visibleAnswer(messageText(entry));
-      if (text.length > 0) lines.push({ speaker: "assistant", text });
+      // A check that found nothing (`NO_SEND`) said nothing.
+      if (text.length > 0 && !isNoSend(text)) lines.push({ speaker: "assistant", text });
     }
   }
   return lines;
@@ -182,7 +183,10 @@ const offersRemember = async (tx: Tx, conversationId: ConversationId): Promise<b
     REMEMBER_TOOL_NAME,
   );
 
-/** The newest entry of a conversation that it wrote itself, and when (its newest message's time). */
+/**
+ * The newest entry of a conversation that it wrote itself, and when (its newest message's time). Undefined until it has
+ * a message with a time: a conversation of system entries only has said nothing, and no time to count idle from.
+ */
 async function newestActivity(
   tx: Tx,
   conversationId: ConversationId,
@@ -199,7 +203,7 @@ async function newestActivity(
     }
     cursor = page.next;
   } while (cursor !== undefined);
-  return newest === undefined ? undefined : { entry: newest, at: 0 };
+  return undefined;
 }
 
 /** When a conversation's pass is due, or undefined when it has nothing new. */
@@ -269,8 +273,13 @@ export async function planPass(
   const due = dueAt(activity, mark);
   if (due === undefined) return { kind: "skip", reason: "nothing new" };
   if (due > now) return { kind: "later", at: due, reason: "not idle yet" };
+  // Moves the mark past a range that has nothing to save, in this commit.
+  const advance = (to: number, reason: string): PassPlan => {
+    if ((mark?.entry ?? 0) < to) setMark(state, conversationId, { entry: to });
+    return { kind: "advance", to, reason };
+  };
   if (!(await offersRemember(tx, conversationId))) {
-    return { kind: "advance", to: activity.entry, reason: "profile without remember" };
+    return advance(activity.entry, "profile without remember");
   }
   const live = await tx.doc(LiveDoc, conversationId);
   if (live.run !== undefined || (await tx.doc(InboxDoc, conversationId)).items.length > 0) {
@@ -285,22 +294,22 @@ export async function planPass(
   const entries = await entriesAfter(tx, conversationId, from);
   const to = entries.at(-1)?.id ?? activity.entry;
   // Anywhere in the range, not only the part the model would read: an answer may summarize an earlier page.
-  if (entries.some(touchesWebFetch)) return { kind: "advance", to, reason: "fetched content" };
+  if (entries.some(touchesWebFetch)) return advance(to, "fetched content");
   const lines = passLines(entries);
   if (!lines.some(({ speaker }) => speaker === "user")) {
-    return { kind: "advance", to, reason: "no message from a person" };
+    return advance(to, "no message from a person");
   }
-  // The range waits in these three cases, so what was said in it can still be saved later; `notBefore` keeps the
-  // alarm from coming straight back for it.
+  // The range waits in these cases, so what was said in it can still be saved later.
   const wait = (at: number, reason: string): PassPlan => {
     setMark(state, conversationId, { ...mark, entry: from, notBefore: at });
     return { kind: "later", at, reason };
   };
   const memory = await tx.doc(MemoryDoc);
-  // Full now: looked at again later, and saved from once a lesson is forgotten.
-  if (memory.lessons.length >= MAX_LESSONS) return wait(now + MEMORY_IDLE_MS, "memory full");
-  // Scheduled runs paused: so is the pass, which is unasked-for spend too.
-  if ((await tx.doc(Proactive)).limit === 0) return wait(now + MEMORY_IDLE_MS, "paused");
+  // Full, or the scheduled runs paused (the pass is unasked-for spend too): nothing is written, and the wake leaves the
+  // pass out until a lesson is forgotten or the runs resume (`#earliest`), so it never wakes just to wait again.
+  if (memory.lessons.length >= MAX_LESSONS) return { kind: "skip", reason: "memory full" };
+  if ((await tx.doc(Proactive)).limit === 0) return { kind: "skip", reason: "paused" };
+  // Today's passes used: the range waits for Chicago midnight, so the alarm doesn't come straight back for it.
   const day = chicagoDay(now);
   const used = state.cap?.day === day ? state.cap.count : 0;
   if (used >= PASS_DAILY_CAP) return wait(afterNextChicagoMidnight(now), "daily cap");
@@ -342,8 +351,10 @@ export class MemoryPassRuntime {
   readonly #options: MemoryPassOptions;
   #wake: MemoryPassWake = { active: false };
   #closed = false;
-  #refreshing = false;
+  #refreshing: Promise<void> | undefined;
   #again = false;
+  #running = false;
+  readonly #inFlight = new Set<ConversationId>();
 
   constructor(options: MemoryPassOptions) {
     this.#options = options;
@@ -376,15 +387,22 @@ export class MemoryPassRuntime {
     }, context);
   }
 
-  /** Recomputes the wake; called after commits that added entries, and after every alarm. Coalesces overlapping calls. */
+  /** Recomputes the wake in the background: after commits that add entries or change memory or the run cap. */
   refresh(): void {
-    if (this.#closed) return;
-    if (this.#refreshing) {
+    void this.#refreshNow();
+  }
+
+  /**
+   * Recomputes the wake and resolves once it is set. Overlapping calls share one run, which goes round again for the
+   * calls that came during it, so the wake is never older than the last call.
+   */
+  #refreshNow(): Promise<void> {
+    if (this.#closed) return Promise.resolve();
+    if (this.#refreshing !== undefined) {
       this.#again = true;
-      return;
+      return this.#refreshing;
     }
-    this.#refreshing = true;
-    void (async () => {
+    this.#refreshing = (async () => {
       try {
         do {
           this.#again = false;
@@ -398,54 +416,90 @@ export class MemoryPassRuntime {
       } catch (error) {
         if (!this.#closed) this.#options.report("Planning the memory pass failed", error);
       } finally {
-        this.#refreshing = false;
+        this.#refreshing = undefined;
       }
     })();
+    return this.#refreshing;
   }
 
   /**
-   * The earliest pass due. Reads only: the marks through a snapshot, which never creates the document, so a refresh
-   * never writes (a write here raced every other commit, and in tests a second harness on the same storage).
+   * The earliest pass due, or undefined when none can call the model: memory full, or the scheduled runs paused.
+   * Reads only, never writes: snapshots never create a document, and the scans go in one read-only commit (a write here
+   * raced every other commit, and in tests a second harness on the same storage).
    */
   async #earliest(): Promise<number | undefined> {
     const { harness } = this.#options;
+    const memory = await harness.snapshot(MemoryDoc, context);
+    if ((memory?.lessons.length ?? 0) >= MAX_LESSONS) return undefined;
+    if ((await harness.snapshot(Proactive, context))?.limit === 0) return undefined;
     const state = (await harness.snapshot(MemoryPassDoc, context)) ?? { marks: {} };
+    const activities = await harness.commit(async (tx) => {
+      const found: Array<{ id: ConversationId; entry: number; at: number }> = [];
+      let cursor: Cursor | undefined;
+      do {
+        const page = await tx.scanConversations({}, 100, cursor);
+        for (const record of page.items) {
+          if (record.owner !== undefined) continue;
+          const activity = await newestActivity(tx, record.id);
+          if (activity !== undefined) found.push({ id: record.id, ...activity });
+        }
+        cursor = page.next;
+      } while (cursor !== undefined);
+      return found;
+    }, context);
     let earliest: number | undefined;
-    for (const id of await this.#conversations()) {
-      const activity = await harness.commit((tx) => newestActivity(tx, id), context);
-      const at = activity === undefined ? undefined : dueAt(activity, markOf(state, id));
-      if (at !== undefined && (earliest === undefined || at < earliest)) earliest = at;
+    for (const { id, entry, at: activeAt } of activities) {
+      const at = dueAt({ entry, at: activeAt }, markOf(state, id));
+      if (at === undefined || (earliest !== undefined && at >= earliest)) continue;
+      // Only conversations whose profile offers `remember`: the others are passed over when their pass runs.
+      const meta = await harness.snapshot(ConversationMeta, id, context);
+      if (!PROFILES[profileOf(meta)].tools.includes(REMEMBER_TOOL_NAME)) continue;
+      earliest = at;
     }
     return earliest;
   }
 
-  /** Runs the passes that are due, at most `PASSES_PER_ALARM`, then sets the next wake. */
+  /**
+   * Runs the passes that are due, at most `PASSES_PER_ALARM`, then sets the next wake before it resolves, so the alarm
+   * that ran it is set from the new wake, not the one that just fired. One run at a time: a second alarm while a
+   * request is out would plan the same range again, since its mark moves only when the request ends.
+   */
   async run(): Promise<void> {
-    if (this.#closed) return;
-    let passes = 0;
-    for (const id of await this.#conversations()) {
-      if (this.#closed || passes >= PASSES_PER_ALARM) break;
-      if (await this.pass(id)) passes += 1;
+    if (this.#closed || this.#running) return;
+    this.#running = true;
+    try {
+      let passes = 0;
+      for (const id of await this.#conversations()) {
+        if (this.#closed || passes >= PASSES_PER_ALARM) break;
+        if (await this.pass(id)) passes += 1;
+      }
+    } finally {
+      this.#running = false;
     }
-    this.refresh();
+    await this.#refreshNow();
   }
 
   /** One conversation's pass. Resolves true when it asked the model. */
   async pass(conversationId: ConversationId): Promise<boolean> {
+    // One pass per conversation at a time, for the same reason as `run`.
+    if (this.#inFlight.has(conversationId)) return false;
+    this.#inFlight.add(conversationId);
+    try {
+      return await this.#pass(conversationId);
+    } finally {
+      this.#inFlight.delete(conversationId);
+    }
+  }
+
+  async #pass(conversationId: ConversationId): Promise<boolean> {
     const { harness } = this.#options;
     const now = this.#now();
     const plan = await harness.commit((tx) => planPass(tx, conversationId, now), context);
     switch (plan.kind) {
       case "skip":
       case "later":
-        return false;
+      // `planPass` moved the mark already.
       case "advance":
-        await harness.commit(async (tx) => {
-          const state = await tx.doc(MemoryPassDoc);
-          if ((markOf(state, conversationId)?.entry ?? 0) < plan.to) {
-            setMark(state, conversationId, { entry: plan.to });
-          }
-        }, context);
         return false;
       case "ask":
         await this.#ask(conversationId, plan);

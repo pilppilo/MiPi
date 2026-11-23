@@ -33,7 +33,7 @@ import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
-import { parseDailyRunCap, Proactive } from "./proactive.ts";
+import { parseDailyRunCap, Proactive, PROACTIVE_DOC_KIND } from "./proactive.ts";
 import {
   type ExportCursor,
   type ExportHeader,
@@ -72,6 +72,7 @@ import type { TelegramInbound } from "../lib/telegram-update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
 import { AlarmScheduler, earliestWake, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
 import { MemoryPassRuntime } from "./memory-pass.ts";
+import { MEMORY_DOC_KIND } from "./memory.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
 import { botApiSender } from "./telegram-outbox.ts";
 import { RelayRuntime, type RelayResult } from "./relay.ts";
@@ -577,7 +578,17 @@ export class MipiAgent extends DurableObject<Env> {
           // A reminder (M6) records its Telegram answers in the door's document from inside its own task.
           if (isTelegramChange(publication)) this.#telegram?.refresh();
           // New entries move a conversation's idle time, and so the memory pass's next wake (M8).
-          if (publication.changes.some((change) => change.type === "entry"))
+          // Memory and the run cap decide whether a pass can run at all: forgetting a lesson or resuming the runs
+          // brings it back.
+          if (
+            publication.changes.some(
+              (change) =>
+                change.type === "entry" ||
+                (change.type === "document" &&
+                  (change.record?.kind === MEMORY_DOC_KIND ||
+                    change.record?.kind === PROACTIVE_DOC_KIND)),
+            )
+          )
             this.#memoryPass?.refresh();
           for (const change of publication.changes) {
             if (change.type !== "conversation" || change.value.owner === undefined) continue;
