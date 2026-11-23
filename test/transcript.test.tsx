@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { TranscriptList } from "../src/client/Transcript.tsx";
+import { quietAnswers, TranscriptList } from "../src/client/Transcript.tsx";
 import type { TranscriptEntry, ToolProgress } from "../src/client/session-state.ts";
 
 const toolRequest: TranscriptEntry = {
@@ -42,6 +42,40 @@ function render(
     }),
   );
 }
+
+const entry = (
+  id: number,
+  role: TranscriptEntry["role"],
+  text: string,
+  more: Partial<TranscriptEntry> = {},
+): TranscriptEntry => ({ id, conversationId: 1, kind: "x", role, text, canFork: false, ...more });
+
+describe("NO_SEND answers", () => {
+  it("are quiet only after scheduled inputs with no failed tool", () => {
+    const failed: Partial<TranscriptEntry> = {
+      toolResult: { callId: "c", name: "t", isError: true },
+    };
+    const entries = [
+      entry(1, "scheduled", "Check the oven"),
+      entry(2, "assistant", "NO_SEND"),
+      entry(3, "user", "Hi"),
+      entry(4, "scheduled", "Check the door"),
+      entry(5, "assistant", "NO_SEND"),
+      entry(6, "scheduled", "Check the feed"),
+      entry(7, "assistant", "", { toolCalls: [{ callId: "c", name: "t", args: {} }] }),
+      entry(8, "tool", "broken", failed),
+      entry(9, "assistant", "NO_SEND"),
+      entry(10, "scheduled", "Check the mail"),
+      entry(11, "assistant", "<think>none</think>NO_SEND"),
+    ];
+    expect([...quietAnswers(entries)]).toEqual([2, 11]);
+    const html = renderToStaticMarkup(
+      createElement(TranscriptList, { entries: entries.slice(0, 2), tools: [], runActive: false }),
+    );
+    expect(html).toContain("Nothing to report");
+    expect(html).not.toContain(">NO_SEND<");
+  });
+});
 
 describe("transcript rendering", () => {
   it("hides system entries when asked, and shows them otherwise", () => {

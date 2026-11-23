@@ -40,6 +40,8 @@ import {
 import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
 
 const ctx = context.BACKGROUND_CONTEXT;
+/** How a submission settles when an afterTools hook task ends its run (pinned by the hooks test). */
+const TERMINATED_STATUS = "done";
 
 /** Every runtime name of a seam module, each defined (a type-only export never shows up here). */
 const runtimeNames = (module: Record<string, unknown>): string[] => {
@@ -55,6 +57,7 @@ describe("Pi seam contract", () => {
     expect(runtimeNames(durable)).toEqual([
       "AssistantEntry",
       "ConversationIdle",
+      "GenerationTask",
       "Harness",
       "InboxDoc",
       "LiveDoc",
@@ -67,6 +70,8 @@ describe("Pi seam contract", () => {
       "defineDocFamily",
       "defineExtension",
       "defineTask",
+      "hook",
+      "hookTask",
       "section",
     ]);
     expect(runtimeNames(shared)).toEqual([
@@ -290,6 +295,178 @@ describe("Pi seam contract", () => {
         expect(rowCounts(state.storage.sql)).toEqual(exported!.counts);
       },
     );
+    await evictDurableObject(stub);
+  });
+
+  it("runs hook tasks on a run: onYield sees the answer, afterTools can end the run", async () => {
+    const stub = env.AGENT.getByName("contract-hooks");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      const faux = fauxProvider();
+      faux.setResponses([
+        // First input: one tool round, then the answer.
+        fauxAssistantMessage([fauxToolCall("fail", {})], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxText("First answer.")]),
+        // Second input: its tool round is the last one allowed.
+        fauxAssistantMessage([fauxToolCall("fail", {})], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxText("Never asked for.")]),
+      ]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+
+      const Seen = durable.defineDoc<{
+        yields: Array<{ answer: number; inputs: string[]; committed: boolean }>;
+        rounds: Array<{ results: number; errors: number }>;
+      }>({
+        kind: "contract.seen",
+        version: 1,
+        scope: "session",
+        initial: () => ({ yields: [], rounds: [] }),
+        checkpointWhen: () => false,
+      });
+      const OnYield = durable.defineTask<
+        Record<string, never>,
+        { phase: "go" },
+        Record<string, never>
+      >({
+        name: "contract.on-yield",
+        version: 1,
+        initial: () => ({ phase: "go" }),
+        phases: {
+          go: async (_task, runtime, taskContext) => {
+            await runtime.commit(async (tx) => {
+              const run = (await tx.doc(durable.LiveDoc, runtime.conversationId)).run;
+              const answer = run?.yield?.answer;
+              if (run !== undefined && answer !== undefined) {
+                const seen = await tx.doc(Seen);
+                seen.yields = [
+                  ...seen.yields,
+                  {
+                    answer: Number(answer),
+                    inputs: run.inputs.map(String),
+                    committed: (await tx.entry(answer)) !== undefined,
+                  },
+                ];
+              }
+              return { status: "terminal", outcome: { status: "completed", result: {} } };
+            }, taskContext);
+          },
+        },
+        abort: async (_task, runtime, taskContext) => {
+          await runtime.commit(
+            () => ({ status: "terminal", outcome: { status: "aborted" } }),
+            taskContext,
+          );
+        },
+      });
+      const AfterTools = durable.defineTask<
+        { readonly results: number[] },
+        { phase: "go" },
+        { terminate?: true }
+      >({
+        name: "contract.after-tools",
+        version: 1,
+        initial: () => ({ phase: "go" }),
+        phases: {
+          go: async (task, runtime, taskContext) => {
+            let errors = 0;
+            for (const id of task.input.results) {
+              const message = (await runtime.entry(id as never, taskContext))?.model?.[0];
+              if (message?.role === "toolResult" && message.isError) errors += 1;
+            }
+            await runtime.commit(async (tx) => {
+              const seen = await tx.doc(Seen);
+              seen.rounds = [...seen.rounds, { results: task.input.results.length, errors }];
+              return {
+                status: "terminal",
+                outcome: {
+                  status: "completed",
+                  result: seen.rounds.length >= 2 ? { terminate: true } : {},
+                },
+              };
+            }, taskContext);
+          },
+        },
+        abort: async (_task, runtime, taskContext) => {
+          await runtime.commit(
+            () => ({ status: "terminal", outcome: { status: "aborted" } }),
+            taskContext,
+          );
+        },
+      });
+      const fail: durable.ToolRegistration = {
+        name: "fail",
+        description: "Always fails",
+        parameters: schema.obj({}),
+        replay: "safe",
+        execute: async () => {
+          throw new Error("broken on purpose");
+        },
+      };
+      const extension = durable.defineExtension({
+        name: "contract-hooks",
+        tasks: [OnYield, AfterTools],
+        tools: [fail],
+        hooks: [
+          durable.hook(durable.GenerationTask, {
+            onYield: async () => ({ tasks: [durable.hookTask(OnYield, {})] }),
+            afterTools: async (_assistant, results) => ({
+              tasks: [durable.hookTask(AfterTools, { results: results.map(Number) })],
+            }),
+          }),
+        ],
+      });
+      const registry = durable.createRegistry();
+      registry.install(extension);
+      const storage = await openDurableObjectSqliteStorage(state.storage);
+      const harness = await durable.Harness.open(
+        storage,
+        {
+          models,
+          registry,
+          settings: { extensions: [extension] },
+          conversationCreated: (tx, conversation) =>
+            conversation.parent === undefined
+              ? durable.configure(tx, conversation.id, {
+                  model: { provider: "faux", modelId: "faux-1" },
+                  tools: [fail],
+                })
+              : undefined,
+        },
+        ctx,
+      );
+      try {
+        const root = await harness.root(ctx);
+        const first = await root.submit(
+          { type: "input", content: "One", requestId: "hooks-1" },
+          ctx,
+        );
+        const done = await first.wait(ctx);
+        await harness.waitForIdle(ctx);
+        // The answer the onYield task read is the one the submission settled with, and was already committed.
+        expect(done.status).toBe("done");
+        const seen = await harness.snapshot(Seen, ctx);
+        expect(seen?.yields).toHaveLength(1);
+        expect(seen?.yields[0]).toMatchObject({ inputs: [String(first.id)], committed: true });
+        expect(done.status === "done" ? Number(done.answer) : undefined).toBe(
+          seen?.yields[0]?.answer,
+        );
+        expect(seen?.rounds).toEqual([{ results: 1, errors: 1 }]);
+
+        // `{ terminate: true }` from afterTools ends the run: no further request, and the input settles unanswered.
+        const second = await root.submit(
+          { type: "input", content: "Two", requestId: "hooks-2" },
+          ctx,
+        );
+        const stopped = await second.wait(ctx);
+        await harness.waitForIdle(ctx);
+        expect(stopped.status).toBe(TERMINATED_STATUS);
+        expect((await harness.snapshot(Seen, ctx))?.rounds).toHaveLength(2);
+        expect(faux.state.callCount).toBe(3);
+      } finally {
+        await harness.close(ctx);
+      }
+    });
     await evictDurableObject(stub);
   });
 

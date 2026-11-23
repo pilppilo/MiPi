@@ -14,7 +14,6 @@ import {
   type Conversation,
   type ConversationId,
   ConversationIdle,
-  type EntryRecord,
   type Harness,
   InboxDoc,
   LiveDoc,
@@ -37,6 +36,12 @@ import {
 import { TELEGRAM_DOC_KIND, TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import { telegramBatchRequest, telegramRequest } from "../lib/requests.ts";
+import {
+  Proactive,
+  PROACTIVE_DOC_KIND,
+  reconcileAnswers,
+  recordProactiveSend,
+} from "./proactive.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -69,7 +74,9 @@ export function isTelegramChange(publication: {
   }[];
 }): boolean {
   return publication.changes.some(
-    (change) => change.type === "document" && change.record?.kind === TELEGRAM_DOC_KIND,
+    (change) =>
+      change.type === "document" &&
+      (change.record?.kind === TELEGRAM_DOC_KIND || change.record?.kind === PROACTIVE_DOC_KIND),
   );
 }
 
@@ -127,15 +134,7 @@ export function addReceipt(state: TelegramChannelState, updateId: number, now: n
   });
 }
 
-/** The visible text of an answer: its text parts, without thinking. */
-export function answerText(entry: EntryRecord | undefined): string {
-  const message = entry?.model?.find((candidate) => candidate.role === "assistant");
-  if (message === undefined || message.role !== "assistant") return "";
-  return message.content
-    .flatMap((part) => (part.type === "text" ? [part.text] : []))
-    .join("")
-    .trim();
-}
+export { answerText } from "./proactive.ts";
 
 export interface TelegramChannelOptions {
   readonly harness: Harness;
@@ -185,9 +184,7 @@ export class TelegramChannelRuntime {
   /** Picks up what a previous instance left: watches pending inputs, then runs commands and the outbox. */
   async start(): Promise<void> {
     // Plain values only leave a commit: its documents are drafts that end with it.
-    const submissions = await this.#commit(async (tx) =>
-      (await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
-    );
+    const submissions = await this.#commit((tx) => this.#waiting(tx));
     for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
     await this.recover();
   }
@@ -208,9 +205,7 @@ export class TelegramChannelRuntime {
       try {
         do {
           this.#refreshAgain = false;
-          const submissions = await this.#commit(async (tx) =>
-            (await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
-          );
+          const submissions = await this.#commit((tx) => this.#waiting(tx));
           for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
         } while (this.#refreshAgain && !this.#closed);
       } catch (error) {
@@ -219,6 +214,14 @@ export class TelegramChannelRuntime {
         this.#refreshing = false;
       }
     })();
+  }
+
+  /** Submissions waiting for an answer this door delivers: its own inputs and every pending reminder. */
+  async #waiting(tx: Tx): Promise<number[]> {
+    return [
+      ...(await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
+      ...(await tx.doc(Proactive)).pending.map(({ submissionId }) => submissionId),
+    ];
   }
 
   /** Stops background work; what is pending stays stored for the next instance. */
@@ -254,9 +257,11 @@ export class TelegramChannelRuntime {
   }
 
   async #admit(update: TelegramInbound): Promise<void> {
-    const conversationId = await this.#commit((tx) =>
-      boundConversation(tx, telegramBinding(update.chatId), this.#options.profile),
-    );
+    const conversationId = await this.#commit(async (tx) => {
+      // The private chat that wrote last: where a notice goes when nothing else names a chat (M6).
+      (await tx.doc(TelegramChannel)).lastChat = update.chatId;
+      return boundConversation(tx, telegramBinding(update.chatId), this.#options.profile);
+    });
     switch (update.kind) {
       case "text":
         return this.#admitText(update, conversationId);
@@ -687,64 +692,8 @@ export class TelegramChannelRuntime {
    */
   reconcile(): Promise<void> {
     return this.#queue.run("reconcile", async () => {
-      const queued = await this.#commit(async (tx) => {
-        const state = await tx.doc(TelegramChannel);
-        if (state.inputs.length === 0) return false;
-        const outbox = await tx.doc(TelegramOutbox);
-        const now = this.#now();
-        const kept: TelegramChannelState["inputs"] = [];
-        // One notice per chat and conversation for the inputs that ended unanswered together (one failed turn answers
-        // several); a failed turn of the conversation from before `/new` gets its own.
-        const unanswered = new Map<
-          string,
-          { chatId: number; firstSubmission: number; reason: string }
-        >();
-        let changed = false;
-        for (const input of state.inputs) {
-          const stored = await tx.submission(input.submissionId as SubmissionId);
-          const record = stored?.type === "input" ? stored : undefined;
-          if (record?.status === "queued" || record?.status === "placed") {
-            kept.push(input);
-            continue;
-          }
-          changed = true;
-          if (record?.status === "done") {
-            enqueueReply(
-              outbox,
-              {
-                id: `answer:${record.answer}:${input.chatId}`,
-                chatId: input.chatId,
-                text: answerText(await tx.entry(record.answer)),
-              },
-              now,
-            );
-          } else {
-            const reason = record === undefined ? "its record is gone" : record.reason;
-            const key = `${input.chatId}:${input.conversationId}`;
-            const group = unanswered.get(key);
-            if (group === undefined || input.submissionId < group.firstSubmission) {
-              unanswered.set(key, {
-                chatId: input.chatId,
-                firstSubmission: input.submissionId,
-                reason,
-              });
-            }
-          }
-        }
-        for (const { chatId, ...group } of unanswered.values()) {
-          enqueueReply(
-            outbox,
-            {
-              id: `unanswered:${group.firstSubmission}:${chatId}`,
-              chatId,
-              text: `I couldn't answer that (${group.reason}). Send it again to retry.`,
-            },
-            now,
-          );
-        }
-        if (changed) state.inputs = kept;
-        return changed;
-      });
+      // One judgement per answer, over this door's inputs and reminders alike (M6, `proactive.ts`).
+      const queued = await this.#commit((tx) => reconcileAnswers(tx, this.#now()));
       if (queued) this.#kickDrain();
     });
   }
@@ -794,9 +743,10 @@ export class TelegramChannelRuntime {
           outcome: result.kind,
         });
       }
-      await this.#commit(async (tx) =>
-        recordSend(await tx.doc(TelegramOutbox), send, result, this.#now()),
-      );
+      await this.#commit(async (tx) => {
+        recordSend(await tx.doc(TelegramOutbox), send, result, this.#now());
+        if (result.kind === "sent") await recordProactiveSend(tx, send.replyId, this.#now());
+      });
     } finally {
       this.#inFlight.delete(key);
     }
@@ -809,6 +759,7 @@ export class TelegramChannelRuntime {
       const value = await change(tx);
       const state = await tx.doc(TelegramChannel);
       const outbox = await tx.doc(TelegramOutbox);
+      const reminders = (await tx.doc(Proactive)).pending.length;
       const staged = state.staged ?? [];
       const times = [
         nextOutboxWake(outbox, this.#now()),
@@ -816,7 +767,11 @@ export class TelegramChannelRuntime {
       ].filter((value): value is number => value !== undefined);
       const at = times.length === 0 ? undefined : Math.min(...times);
       wake = {
-        active: state.inputs.length > 0 || state.commands.length > 0 || staged.length > 0,
+        active:
+          state.inputs.length > 0 ||
+          state.commands.length > 0 ||
+          staged.length > 0 ||
+          reminders > 0,
         ...(at === undefined ? {} : { at }),
       };
       return value;

@@ -33,6 +33,7 @@ import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
+import { parseDailyRunCap, Proactive } from "./proactive.ts";
 import {
   type ExportCursor,
   type ExportHeader,
@@ -491,6 +492,20 @@ export class MipiAgent extends DurableObject<Env> {
     }
   }
 
+  /** Stores the daily cap for scheduled runs (`MIPI_DAILY_RUN_CAP`); an invalid value is reported and the default used. */
+  async #applyDailyRunCap(harness: Harness): Promise<void> {
+    const { cap, invalid } = parseDailyRunCap(this.env.MIPI_DAILY_RUN_CAP);
+    if (invalid !== undefined) {
+      reportError("MIPI_DAILY_RUN_CAP is not a whole number", new Error(`Got "${invalid}"`), {
+        using: cap,
+      });
+    }
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(Proactive);
+      if (state.limit !== cap) state.limit = cap;
+    }, BACKGROUND_CONTEXT);
+  }
+
   async #initialize(): Promise<void> {
     // A fallback before anything can throw: an object whose open or recovery fails is started again.
     const fallback = Date.now() + HEARTBEAT_MS;
@@ -569,6 +584,7 @@ export class MipiAgent extends DurableObject<Env> {
           }),
         );
       }
+      await this.#applyDailyRunCap(harness);
       await this.#restoreViews();
       const telegram = new TelegramChannelRuntime({
         harness,

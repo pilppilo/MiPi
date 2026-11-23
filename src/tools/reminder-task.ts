@@ -12,7 +12,15 @@
  */
 import { type ConversationId, defineTask } from "../agent/pi/durable.ts";
 import { localTime } from "../agent/stamp.ts";
+import {
+  afterNextChicagoMidnight,
+  noticeCap,
+  Proactive,
+  type ReminderDestination,
+  takeRound,
+} from "../agent/proactive.ts";
 import { TelegramChannel } from "../agent/telegram-state.ts";
+import { enqueueReply, TelegramOutbox } from "../agent/telegram-outbox.ts";
 import { reminderRequest } from "../lib/requests.ts";
 import { describeRepeat, nextRepeat, type Repeat } from "../lib/when.ts";
 import { formatReminder } from "../protocol.ts";
@@ -22,9 +30,7 @@ export const LATE_WINDOW_MS = 15 * 60_000;
 /** Reminders of this agent that may be waiting at once, legacy schedules included. */
 export const MAX_ACTIVE_REMINDERS = 25;
 
-export type ReminderDestination =
-  | { readonly kind: "telegram"; readonly chatId: number }
-  | { readonly kind: "web"; readonly conversationId: number };
+export type { ReminderDestination } from "../agent/proactive.ts";
 
 export type ReminderInput = {
   readonly id: string;
@@ -48,6 +54,8 @@ type ReminderProgress = {
   skippedBusy: number;
   /** Repeat times skipped because they came more than `LATE_WINDOW_MS` late. */
   skippedLate: number;
+  /** Repeat times skipped because proactive runs reached the daily cap (M6). */
+  skippedCap?: number;
 };
 
 /** A phase sees only its own checkpoint, so the phases are a tagged union. */
@@ -112,13 +120,8 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
         return;
       }
       const now = runtime.now();
-      const content = formatReminder(
-        input,
-        localTime(now, input.zone),
-        input.every === undefined ? undefined : describeRepeat(input.every),
-      );
       await runtime.commit(async (tx) => {
-        // Reads first; the submit is this commit's first table write, then the documents.
+        // Reads first; the submit is this commit's first table write. Documents may change before it.
         const previous =
           state.sent === 0
             ? undefined
@@ -132,10 +135,57 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
           now,
           previousBusy: previous?.status === "queued" || previous?.status === "placed",
         });
+        const proactive = await tx.doc(Proactive);
+        const requestId = reminderRequest(input.id, state.sent);
+        const existing =
+          decision === "send"
+            ? await tx.submissionByRequest(conversation.id, requestId)
+            : undefined;
         let sent = state.sent;
-        if (decision === "send") {
-          const requestId = reminderRequest(input.id, state.sent);
-          const existing = await tx.submissionByRequest(conversation.id, requestId);
+        let capped = false;
+        if (decision === "send" && existing === undefined) {
+          // pi-ledger L7. The run's first model round is counted here, at admission.
+          capped = !takeRound(proactive, now);
+        }
+        if (capped) {
+          const chat = input.destination.kind === "telegram" ? input.destination.chatId : undefined;
+          noticeCap(
+            proactive,
+            await tx.doc(TelegramChannel),
+            await tx.doc(TelegramOutbox),
+            chat,
+            now,
+          );
+          if (input.every === undefined) {
+            if (chat !== undefined) {
+              // A reminder asked for is never dropped: sent as it is, without the model.
+              enqueueReply(
+                await tx.doc(TelegramOutbox),
+                {
+                  id: `reminder-capped:${input.id}`,
+                  chatId: chat,
+                  text: `Reminder: ${input.instruction} (sent without MiPi: daily limit reached).`,
+                },
+                now,
+              );
+              return { status: "terminal", outcome: { status: "completed", result: null } };
+            }
+            // On the web: it runs once the cap resets, past Chicago midnight.
+            return {
+              status: "running",
+              checkpoint: { ...state, phase: "wait", at: afterNextChicagoMidnight(now) },
+            };
+          }
+        } else if (decision === "send") {
+          const content = formatReminder(
+            input,
+            localTime(now, input.zone),
+            input.every === undefined ? undefined : describeRepeat(input.every),
+            proactive.recentSends.map(({ sentAt, snippet }) => ({
+              at: localTime(sentAt, input.zone),
+              snippet,
+            })),
+          );
           const submissionId =
             existing?.id ??
             (await conversation.submit(tx, {
@@ -145,15 +195,20 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
               // Behind whatever runs now, as every door's input; it joins that turn's follow-ups.
               whenBusy: "followUp",
             }));
-          if (existing === undefined && input.destination.kind === "telegram") {
-            // The Telegram door turns the answer into a message to the chat the reminder was made in.
-            const channel = await tx.doc(TelegramChannel);
-            channel.inputs = [
-              ...channel.inputs,
+          if (existing === undefined) {
+            // Its answer is judged and delivered when it settles (`proactive.ts`).
+            const pending = await tx.doc(Proactive);
+            pending.pending = [
+              ...pending.pending,
               {
-                chatId: input.destination.chatId,
-                conversationId: conversation.id,
                 submissionId,
+                reminderId: input.id,
+                instruction: input.instruction,
+                conversationId: conversation.id,
+                destination:
+                  input.destination.kind === "telegram"
+                    ? { kind: "telegram", chatId: input.destination.chatId }
+                    : { kind: "web", conversationId: input.destination.conversationId },
               },
             ];
           }
@@ -170,6 +225,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             sent,
             skippedBusy: state.skippedBusy + (decision === "skip-busy" ? 1 : 0),
             skippedLate: state.skippedLate + (decision === "skip-late" ? 1 : 0),
+            skippedCap: (state.skippedCap ?? 0) + (capped ? 1 : 0),
           },
         };
       }, context);
