@@ -1,6 +1,12 @@
 /** The one alarm (`alarm.ts`): the earliest of every part's needs, deleted when none, and isolated consumers. */
 import { describe, expect, it } from "vitest";
-import { AlarmScheduler, alarmTime, HEARTBEAT_MS, runAlarmConsumers } from "../src/agent/alarm.ts";
+import {
+  AlarmScheduler,
+  alarmTime,
+  earliestWake,
+  HEARTBEAT_MS,
+  runAlarmConsumers,
+} from "../src/agent/alarm.ts";
 
 const fakeStorage = () => {
   const writes: Array<number | "deleted"> = [];
@@ -25,6 +31,20 @@ describe("alarmTime", () => {
     expect(alarmTime({ active: false }, { active: true }, 0)).toBe(HEARTBEAT_MS);
     expect(alarmTime({ active: true, at: 5_000 }, { active: false, at: 9_000 }, 0)).toBe(5_000);
     expect(alarmTime({ active: false, at: 90_000 }, { active: false, at: 2_000 }, 0)).toBe(2_000);
+  });
+});
+
+describe("earliestWake", () => {
+  it("takes the earliest time, and is active when any door is", () => {
+    expect(earliestWake(undefined, undefined)).toEqual({ active: false });
+    expect(earliestWake({ active: false, at: 9 }, { active: false, at: 4 })).toEqual({
+      at: 4,
+      active: false,
+    });
+    expect(earliestWake({ active: true }, { active: false, at: 4 })).toEqual({
+      at: 4,
+      active: true,
+    });
   });
 });
 
