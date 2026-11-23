@@ -139,14 +139,24 @@ async function resultOf(tx: Tx, submissionId: SubmissionId): Promise<RelayResult
   }
 }
 
-/** Submissions of the receipts still open, so pruning never drops them. */
-async function openSubmissions(tx: Tx, receipts: readonly RelayReceipt[]): Promise<Set<number>> {
+/**
+ * Receipts whose input is still open, among the oldest that pruning would look at: it walks from the oldest until it has
+ * passed as many settled ones as adding one receipt makes too many, so every receipt it may drop has been checked.
+ */
+export async function openSubmissions(
+  tx: Tx,
+  receipts: readonly RelayReceipt[],
+): Promise<Set<number>> {
   const open = new Set<number>();
-  // Only the oldest can be pruned, so only they need a look.
-  const candidates = receipts.slice(0, Math.max(0, receipts.length + 1 - RELAY_RECEIPTS_KEPT));
-  for (const receipt of candidates) {
-    if ((await resultOf(tx, receipt.submissionId as SubmissionId)).kind === "pending") {
+  let excess = receipts.length + 1 - RELAY_RECEIPTS_KEPT;
+  for (const receipt of receipts) {
+    if (excess <= 0) break;
+    // The record alone says whether it is open; no need to read the answer.
+    const stored = await tx.submission(receipt.submissionId as SubmissionId);
+    if (stored?.type === "input" && (stored.status === "queued" || stored.status === "placed")) {
       open.add(receipt.submissionId);
+    } else {
+      excess -= 1;
     }
   }
   return open;
@@ -207,10 +217,11 @@ export class RelayRuntime {
     if (conversation === undefined) throw new Error(`Conversation ${conversationId} is missing`);
     const hash = await sha256Hex(text);
     const requestId = relayRequest(key);
-    const now = this.#now();
     // Arm before admitting work: an early alarm is harmless, a missing one strands the turn.
     await this.#options.armAlarm();
     const admission = await harness.commit(async (tx): Promise<Admission> => {
+      // Inside the commit, so admissions stay in order when several arrive at once.
+      const now = this.#now();
       // Read, submit, then write.
       const state = await tx.doc(RelayDoc);
       const receipt = state.receipts.find((kept) => kept.key === key);
@@ -270,8 +281,11 @@ export class RelayRuntime {
     if (submission !== undefined) {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
+        const settled = submission.wait(context);
+        // A closing harness rejects it after the timeout. `Promise.race` already handles that; this says so explicitly.
+        void settled.catch(() => undefined);
         await Promise.race([
-          submission.wait(context),
+          settled,
           new Promise<void>((resolve) => {
             timer = setTimeout(resolve, this.#options.waitMs ?? RELAY_WAIT_MS);
           }),

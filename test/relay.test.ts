@@ -23,6 +23,7 @@ import {
   RELAY_MAX_TEXT_BYTES,
   RELAY_PER_HOUR,
   RELAY_RECEIPTS_KEPT,
+  openSubmissions,
   RelayDoc,
   type RelayReceipt,
   relayContent,
@@ -293,6 +294,68 @@ describe("relay admission", () => {
     }
   });
 
+  it("says unanswered, with the reason, when the turn ends without an answer", async () => {
+    const failing: FauxResponseStep = () =>
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: "provider down" });
+    const agent = await openRelay(Array.from({ length: 6 }, () => failing));
+    try {
+      const result = await agent.relay.admit("fails", "hello?");
+      expect(result.kind).toBe("unanswered");
+      expect(result.kind === "unanswered" && result.reason.length > 0).toBe(true);
+      expect(await agent.relay.result("fails")).toEqual(result);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("says unavailable when the agent closes during the wait, with no stray rejection", async () => {
+    const release = Promise.withResolvers<void>();
+    const agent = await openRelay([held(release.promise, "Too late")], { waitMs: 60_000 });
+    const rejections: unknown[] = [];
+    const onRejection = (event: PromiseRejectionEvent) => {
+      rejections.push(event.reason);
+      event.preventDefault();
+    };
+    // workerd raises the web event, not Node's `unhandledRejection`.
+    globalThis.addEventListener("unhandledrejection", onRejection);
+    try {
+      const waiting = agent.relay.admit("closing", "are you there?");
+      while (agent.requests.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+      const closing = agent.close();
+      expect(await waiting).toEqual({ kind: "unavailable" });
+      release.resolve();
+      await closing;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(rejections).toEqual([]);
+    } finally {
+      globalThis.removeEventListener("unhandledrejection", onRejection);
+      release.resolve();
+    }
+  });
+
+  it("absorbs the rejection of a wait that already timed out when the agent closes", async () => {
+    const release = Promise.withResolvers<void>();
+    const agent = await openRelay([held(release.promise, "Too late")], { waitMs: 5 });
+    const rejections: unknown[] = [];
+    const onRejection = (event: PromiseRejectionEvent) => {
+      rejections.push(event.reason);
+      event.preventDefault();
+    };
+    // workerd raises the web event, not Node's `unhandledRejection`.
+    globalThis.addEventListener("unhandledrejection", onRejection);
+    try {
+      expect(await agent.relay.admit("late", "slow one")).toEqual({ kind: "pending" });
+      const closing = agent.close();
+      release.resolve();
+      await closing;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(rejections).toEqual([]);
+    } finally {
+      globalThis.removeEventListener("unhandledrejection", onRejection);
+      release.resolve();
+    }
+  });
+
   it("refuses bad keys, empty text and text over the cap before admitting anything", async () => {
     const agent = await openRelay([]);
     try {
@@ -331,5 +394,24 @@ describe("relay receipts", () => {
     expect(state.receipts[0]!.key).toBe("k0");
     expect(state.receipts.some(({ key }) => key === "k1")).toBe(false);
     expect(state.receipts.at(-1)!.key).toBe(`k${RELAY_RECEIPTS_KEPT}`);
+  });
+
+  it("checks every receipt pruning may drop, also when the oldest two are open", async () => {
+    const receipts = Array.from({ length: RELAY_RECEIPTS_KEPT }, (_, index) => receipt(index));
+    const looked: number[] = [];
+    const tx = {
+      submission: async (id: number) => {
+        looked.push(id);
+        return { type: "input", status: id < 2 ? "placed" : "done" };
+      },
+    };
+    const open = await openSubmissions(tx as never, receipts);
+    expect([...open]).toEqual([0, 1]);
+    // Up to the first settled one, and no further.
+    expect(looked).toEqual([0, 1, 2]);
+    const state: RelayState = { receipts, admitted: [] };
+    addRelayReceipt(state, receipt(RELAY_RECEIPTS_KEPT), open);
+    expect(state.receipts.slice(0, 3).map(({ key }) => key)).toEqual(["k0", "k1", "k3"]);
+    expect(state.receipts).toHaveLength(RELAY_RECEIPTS_KEPT);
   });
 });
