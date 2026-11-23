@@ -85,25 +85,27 @@ export function tidyText(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
     .split("\n")
-    .map((line) => line.replace(/[ \t\f\v ]+/g, " ").trim())
+    .map((line) => line.replace(/[ \t\f\v\u00a0]+/g, " ").trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
-/** The readable text of an HTML document. */
+/**
+ * The readable text of an HTML document, in two passes. The first removes the elements that aren't text, whole: a
+ * count of open ones would stick on a self-closing one (`<svg />`), which never fires its end tag, and drop the rest of
+ * the page. The second reads the text of what is left, with line breaks at blocks.
+ */
 export async function htmlToText(html: string): Promise<string> {
-  const parts: string[] = [];
-  let skipping = 0;
-  const rewriter = new HTMLRewriter()
+  const stripped = new HTMLRewriter()
     .on(SKIPPED.join(", "), {
       element(element) {
-        skipping += 1;
-        element.onEndTag(() => {
-          skipping -= 1;
-        });
+        element.remove();
       },
     })
+    .transform(new Response(html));
+  const parts: string[] = [];
+  const reader = new HTMLRewriter()
     .on("br", {
       element() {
         parts.push("\n");
@@ -122,9 +124,9 @@ export async function htmlToText(html: string): Promise<string> {
     })
     .onDocument({
       text(chunk) {
-        if (skipping === 0) parts.push(chunk.text);
+        parts.push(chunk.text);
       },
     });
-  await rewriter.transform(new Response(html)).arrayBuffer();
+  await reader.transform(stripped).arrayBuffer();
   return tidyText(decodeEntities(parts.join("")));
 }

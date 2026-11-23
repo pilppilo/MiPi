@@ -12,6 +12,7 @@ import { obj, str } from "../agent/pi/schema.ts";
 import { attribute, clip, defang } from "../lib/fence.ts";
 import { htmlToText, tidyText } from "../lib/html-text.ts";
 import { MIPI_VERSION } from "../version.ts";
+import { AgentSettings, normalHost } from "../agent/settings.ts";
 import { WEB_FETCH_TOOL_NAME } from "./memory.ts";
 
 export const MAX_REDIRECTS = 3;
@@ -25,15 +26,18 @@ export const MAX_URL_LENGTH = 2048;
 /** Host names that only mean something on a local network, or to the machine itself. */
 const LOCAL_SUFFIXES = ["localhost", "local", "internal", "home.arpa", "lan", "intranet"];
 
-/** Why a URL may not be fetched, or undefined when it may. */
-export function refusedUrl(url: URL): string | undefined {
+/**
+ * Why a URL may not be fetched, or undefined when it may. `ownHosts` are the hostnames MiPi itself answers on: fetching
+ * them would show a page its own Access login or open routes.
+ */
+export function refusedUrl(url: URL, ownHosts: readonly string[] = []): string | undefined {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     return "only http and https URLs can be fetched";
   }
   if (url.username !== "" || url.password !== "")
     return "URLs with a username or password are refused";
   // `URL` lowercases the host and normalizes IPv4 written in hex, octal or as one number to dotted decimal.
-  const host = url.hostname.replace(/\.$/, "");
+  const host = normalHost(url.hostname);
   if (host.startsWith("[") || host.includes(":"))
     return "IP addresses are refused; use a host name";
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return "IP addresses are refused; use a host name";
@@ -41,6 +45,7 @@ export function refusedUrl(url: URL): string | undefined {
   if (LOCAL_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) {
     return "local and internal host names are refused";
   }
+  if (ownHosts.some((own) => normalHost(own) === host)) return "MiPi doesn't fetch its own address";
   return undefined;
 }
 
@@ -106,6 +111,8 @@ export interface WebFetchOptions {
   readonly fetch: (request: Request) => Promise<Response>;
   readonly timeoutMs?: number;
   readonly maxRawBytes?: number;
+  /** Hostnames refused besides the local ones: MiPi's own. */
+  readonly ownHosts?: readonly string[];
 }
 
 /** Fetches a page by the rules: checked hosts, manual redirects, one deadline, capped body, text only. */
@@ -123,7 +130,7 @@ export async function fetchPage(address: string, options: WebFetchOptions): Prom
   const timer = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
   try {
     for (let hop = 0; ; hop++) {
-      const refused = refusedUrl(url);
+      const refused = refusedUrl(url, options.ownHosts);
       if (refused !== undefined) {
         throw new Error(
           hop === 0
@@ -216,9 +223,13 @@ export function createWebFetchTool(options: WebFetchOptions): ToolRegistration {
     }),
     // A GET changes nothing, so a rerun after a restart fetches again.
     replay: "safe",
-    execute: async (args) => {
+    execute: async (args, api, context) => {
       const { url } = args as { url: string };
-      const page = await fetchPage(url.trim(), options);
+      const ownHosts = (await api.snapshot(AgentSettings, context))?.ownHosts ?? [];
+      const page = await fetchPage(url.trim(), {
+        ...options,
+        ownHosts: [...(options.ownHosts ?? []), ...ownHosts],
+      });
       return {
         output: [{ type: "text", text: fencedPage(page) }],
         details: {

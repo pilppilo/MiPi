@@ -17,11 +17,12 @@ COD-183 (M8 slice 2, part of COD-154): `web_fetch` reads one web page.
   - Single-label names.
   - URLs with a username or password.
   - Any scheme other than http and https.
+  - MiPi's own hostnames. Each door records the hostname it was reached on (the web socket upgrade, Telegram's webhook, the relay) in `app.settings` as `ownHosts`, and `web_fetch` reads them. So a page can't make MiPi fetch its own Access login or its open routes, on `workers.dev` or on a custom domain.
 - Content: only text types are read (`text/*`, JSON, XML, `+json` and `+xml`). For anything else the body is cancelled and the tool says what it was.
   - The raw body is read up to 1 MB and the rest is cancelled.
   - The text is cut at 50,000 characters, and a cut page says so.
 - HTML becomes text through HTMLRewriter (`src/lib/html-text.ts`).
-  - Scripts, styles, `noscript`, `svg`, `template`, `iframe` and `object` are dropped.
+  - Scripts, styles, `noscript`, `svg`, `template`, `iframe` and `object` are removed whole in a first pass, so a self-closing `<svg />` can't swallow the rest of the page.
   - Block elements become line breaks, and entities are decoded.
 - The page reaches the model inside `<fetched url="…">` tags it can't close, with a line saying it is data, not instructions. `remember` already refuses in a run that fetched (slice 1).
 
@@ -35,4 +36,4 @@ COD-183 (M8 slice 2, part of COD-154): `web_fetch` reads one web page.
 
 **Migration**
 
-- None.
+- None. `ownHosts` is a new optional field of `app.settings`.

@@ -30,7 +30,7 @@ import { fetchLiveGoModelIds, ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
 import { isProfileName, PROFILE_NAMES, PROFILES, profileOrDefault } from "./profiles.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
-import { AgentSettings } from "./settings.ts";
+import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
@@ -641,10 +641,11 @@ export class MipiAgent extends DurableObject<Env> {
    * Called by the Worker's Telegram webhook with an update it authenticated and parsed. Resolves once the update is
    * stored; `unavailable` (maintenance, refused data, a failed commit) makes Telegram deliver it again later.
    */
-  async telegramAdmit(update: TelegramInbound): Promise<TelegramAdmission> {
+  async telegramAdmit(update: TelegramInbound, host?: string): Promise<TelegramAdmission> {
     await this.#reopenIfStaleExport();
     const telegram = this.#telegram;
     if (this.#state.kind !== "open" || telegram === undefined) return { kind: "unavailable" };
+    await this.#noteHost(host);
     try {
       await telegram.admit(update);
       return { kind: "stored" };
@@ -658,30 +659,51 @@ export class MipiAgent extends DurableObject<Env> {
    * Called by the Worker's relay route with an authenticated message (M7). Admits it and waits a while for the answer;
    * `pending` means the client polls `relayResult`. Nothing here holds a queue while it waits.
    */
-  async relayAdmit(key: string, text: string): Promise<RelayResult> {
-    return this.#relayCall("Admitting a relay message failed", key, (relay) =>
+  async relayAdmit(key: string, text: string, host?: string): Promise<RelayResult> {
+    return this.#relayCall("Admitting a relay message failed", key, host, (relay) =>
       relay.admit(key, text),
     );
   }
 
   /** Where a relay key stands (M7). */
-  async relayResult(key: string): Promise<RelayResult> {
-    return this.#relayCall("Reading a relay result failed", key, (relay) => relay.result(key));
+  async relayResult(key: string, host?: string): Promise<RelayResult> {
+    return this.#relayCall("Reading a relay result failed", key, host, (relay) =>
+      relay.result(key),
+    );
   }
 
   async #relayCall(
     failure: string,
     key: string,
+    host: string | undefined,
     call: (relay: RelayRuntime) => Promise<RelayResult>,
   ): Promise<RelayResult> {
     await this.#reopenIfStaleExport();
     const relay = this.#relay;
     if (this.#state.kind !== "open" || relay === undefined) return { kind: "unavailable" };
+    await this.#noteHost(host);
     try {
       return await call(relay);
     } catch (error) {
       reportError(failure, error, { key });
       return { kind: "unavailable" };
+    }
+  }
+
+  /**
+   * Records a hostname this agent was reached on, for `web_fetch` to refuse (`AgentSettings.ownHosts`). Writes only
+   * for a host not seen before; a failure is reported and never fails the request that brought it.
+   */
+  async #noteHost(host: string | undefined): Promise<void> {
+    if (host === undefined || this.#state.kind !== "open") return;
+    try {
+      await this.#harness.commit(async (tx) => {
+        const settings = await tx.doc(AgentSettings);
+        const hosts = withOwnHost(settings.ownHosts, host);
+        if (hosts !== undefined) settings.ownHosts = hosts;
+      }, BACKGROUND_CONTEXT);
+    } catch (error) {
+      reportError("Recording this agent's hostname failed", error, { host });
     }
   }
 
@@ -694,6 +716,7 @@ export class MipiAgent extends DurableObject<Env> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return json({ error: "WebSocket upgrade required" }, 426, { Upgrade: "websocket" });
     }
+    await this.#noteHost(new URL(request.url).hostname);
 
     const pair = new WebSocketPair();
     const client = pair[0];
