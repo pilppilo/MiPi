@@ -51,6 +51,21 @@ export function formatScheduledInstruction(
 }
 
 /** The instruction text of a scheduled delivery input, or `undefined` for ordinary input. */
+/**
+ * A reminder's input (M6): the instruction as the legacy format shows it, plus, for a repeat, a note that the reminder
+ * schedules its own next time, so the model never schedules it again. The client shows only the instruction.
+ */
+export function formatReminder(
+  reminder: { readonly id: string; readonly instruction: string },
+  deliveredAt: string,
+  repeats?: string,
+): string {
+  const text = formatScheduledInstruction(reminder, deliveredAt);
+  return repeats === undefined
+    ? text
+    : `${text}${RECURRENCE_NOTE_PREFIX} It repeats ${repeats}, on its own: don't schedule it again.`;
+}
+
 export function parseScheduledInstruction(content: string): string | undefined {
   const head = SCHEDULED_INSTRUCTION_HEAD.exec(content);
   if (head === null) return undefined;

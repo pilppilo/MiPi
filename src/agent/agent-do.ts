@@ -69,7 +69,7 @@ import {
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
-import { TelegramChannelRuntime } from "./telegram.ts";
+import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
 import { botApiSender } from "./telegram-outbox.ts";
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
@@ -547,6 +547,8 @@ export class MipiAgent extends DurableObject<Env> {
       // Notify connected clients when their conversation records are committed.
       harness.observeCommits({
         advance: (publication) => {
+          // A reminder (M6) records its Telegram answers in the door's document from inside its own task.
+          if (isTelegramChange(publication)) this.#telegram?.refresh();
           for (const change of publication.changes) {
             if (change.type !== "conversation" || change.value.owner === undefined) continue;
             this.#broadcast({
