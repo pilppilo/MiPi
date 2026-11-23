@@ -71,16 +71,29 @@ export async function runFetched(tx: ScanTx, conversationId: ConversationId): Pr
   return false;
 }
 
-/** The door the running turn came through, from its first input's request id (`src/lib/requests.ts`). */
-async function runSource(tx: ScanTx, conversationId: ConversationId): Promise<LessonSource> {
-  const placed = (await tx.doc(LiveDoc, conversationId)).run?.inputs ?? [];
-  const first = placed[0] === undefined ? undefined : await tx.submission(placed[0]);
-  const requestId = first?.requestId ?? "";
+/** The door of one input, from its request id (`src/lib/requests.ts`). */
+function sourceOf(requestId: string | undefined): LessonSource {
+  if (requestId === undefined) return "unknown";
   if (requestId.startsWith("web:")) return "web";
   if (requestId.startsWith("tg:")) return "telegram";
   if (requestId.startsWith("relay:")) return "relay";
   if (requestId.startsWith("sched:")) return "reminder";
   return "unknown";
+}
+
+/**
+ * The door the running turn came through. A turn can answer several inputs together; a person's message (web, Telegram,
+ * relay) names the door before a reminder does, since a reminder answered beside it is not who asked.
+ */
+async function runSource(tx: ScanTx, conversationId: ConversationId): Promise<LessonSource> {
+  const placed = (await tx.doc(LiveDoc, conversationId)).run?.inputs ?? [];
+  const sources: LessonSource[] = [];
+  for (const id of placed) sources.push(sourceOf((await tx.submission(id))?.requestId));
+  return (
+    sources.find((source) => source === "web" || source === "telegram" || source === "relay") ??
+    sources[0] ??
+    "unknown"
+  );
 }
 
 const text = (value: string) => ({ output: [{ type: "text" as const, text: value }] });

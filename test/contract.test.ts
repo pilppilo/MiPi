@@ -123,6 +123,7 @@ describe("Pi seam contract", () => {
         initial: () => ({ seen: false }),
         checkpointWhen: () => false,
       });
+      let runFirst: number | undefined;
       const echo: durable.ToolRegistration = {
         name: "echo",
         description: "Echo text",
@@ -132,9 +133,11 @@ describe("Pi seam contract", () => {
           mode: schema.oneOf(["plain", "loud"]),
         }),
         replay: "safe",
-        execute: async (args: { text: string; times?: number }) => ({
-          output: [{ type: "text" as const, text: args.text.repeat(args.times ?? 1) }],
-        }),
+        execute: async (args: { text: string; times?: number }, api, context) => {
+          // What `remember`'s fetch gate reads (M8): a running tool sees its run's first entry in `pi.live`.
+          runFirst = (await api.snapshot(durable.LiveDoc, api.conversationId, context))?.run?.first;
+          return { output: [{ type: "text" as const, text: args.text.repeat(args.times ?? 1) }] };
+        },
       };
       const extension = durable.defineExtension({
         name: "contract",
@@ -186,6 +189,8 @@ describe("Pi seam contract", () => {
         ).toEqual(["faux/faux-1"]);
 
         const entries = (await root.entries({}, 50, undefined, ctx)).items;
+        // `run.first` is the run's first entry: the user message the echo call answers.
+        expect(runFirst).toBe(entries.find((entry) => durable.UserEntry.is(entry))?.id);
         expect(entries.some((entry) => durable.UserEntry.is(entry))).toBe(true);
         expect(entries.some((entry) => durable.AssistantEntry.is(entry))).toBe(true);
         const messages = (await root.context(ctx)).messages;

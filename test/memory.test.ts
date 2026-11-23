@@ -42,7 +42,7 @@ const from = { source: "web" as const, conversationId: 1 };
 const fresh = (): MemoryState => ({ nextId: 1, lessons: [] });
 
 describe("lesson rules", () => {
-  it("strips invisible characters, then makes one trimmed line", () => {
+  it("makes one line, then strips invisible characters and trims", () => {
     expect(normalizeLesson("  Likes​ tea\n\tin the⁠ morning  ")).toBe("Likes tea in the morning");
     expect(normalizeLesson("‮RTL‬ and ﻿BOM")).toBe("RTL and BOM");
   });
