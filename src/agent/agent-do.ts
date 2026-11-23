@@ -67,6 +67,10 @@ import {
   type ServerEvent,
 } from "../protocol.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
+import type { TelegramInbound } from "../lib/telegram-update.ts";
+import type { TelegramAdmission } from "../worker/telegram.ts";
+import { TelegramChannelRuntime } from "./telegram.ts";
+import { botApiSender } from "./telegram-outbox.ts";
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
   Response.json(body, { status, headers });
@@ -225,6 +229,8 @@ export class MipiAgent extends DurableObject<Env> {
   readonly #typingConnections = new Set<WebSocket>();
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
   #alarmWrites: Promise<void> = Promise.resolve();
+  /** The Telegram door's admissions, replies and outbox; present while the harness is open. */
+  #telegram: TelegramChannelRuntime | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -285,6 +291,8 @@ export class MipiAgent extends DurableObject<Env> {
       await this.#stopView(socket);
     }
     this.#typingConnections.clear();
+    this.#telegram?.close();
+    this.#telegram = undefined;
     await this.#activity.stop();
     await this.#harness.close(BACKGROUND_CONTEXT);
     await this.#alarmWrites;
@@ -550,14 +558,58 @@ export class MipiAgent extends DurableObject<Env> {
         end: () => {},
       });
       await this.#restoreViews();
+      const telegram = new TelegramChannelRuntime({
+        harness,
+        owner: ownerName(this.env.MIPI_OWNER),
+        timeZone: this.env.MIPI_TIMEZONE,
+        profile: startingProfile("telegram", profileOrDefault(this.env.MIPI_PROFILE)),
+        version: MIPI_VERSION,
+        modelList: this.#modelList,
+        send: botApiSender(this.#setting("TELEGRAM_BOT_TOKEN")),
+        armAlarm: () => this.#scheduleNextAlarm({ ...harness.wake(), active: true }),
+        onWakeChange: () =>
+          void this.#scheduleNextAlarm(harness.wake()).catch(() =>
+            this.ctx.abort("Alarm write failed"),
+          ),
+        onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
+        report: reportError,
+      });
+      this.#telegram = telegram;
       // Armed before `resume()` runs anything, as for any call that can start work.
       await this.#scheduleNextAlarm(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
       harness.resume();
+      // Replies and sends a lost instance left; not awaited, so opening never waits on Telegram.
+      void telegram
+        .start()
+        .catch((error) => reportError("Starting the Telegram door failed", error));
     } catch (error) {
       await activity?.stop();
       await harness.close(BACKGROUND_CONTEXT);
       throw error;
+    }
+  }
+
+  /** Optional configuration, read where the object meets its bindings: a secret may be absent at runtime. */
+  #setting(name: string): string | undefined {
+    const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
+    return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+  }
+
+  /**
+   * Called by the Worker's Telegram webhook with an update it authenticated and parsed. Resolves once the update is
+   * stored; `unavailable` (maintenance, refused data, a failed commit) makes Telegram deliver it again later.
+   */
+  async telegramAdmit(update: TelegramInbound): Promise<TelegramAdmission> {
+    await this.#reopenIfStaleExport();
+    const telegram = this.#telegram;
+    if (this.#state.kind !== "open" || telegram === undefined) return { kind: "unavailable" };
+    try {
+      await telegram.admit(update);
+      return { kind: "stored" };
+    } catch (error) {
+      reportError("Admitting a Telegram update failed", error, { updateId: update.updateId });
+      return { kind: "unavailable" };
     }
   }
 
@@ -621,6 +673,8 @@ export class MipiAgent extends DurableObject<Env> {
     // Armed before `resume()` can start work, as on open.
     await this.#scheduleNextAlarm({ ...this.#harness.wake(), active: true });
     this.#harness.resume();
+    // Telegram replies, deferred commands and sends that are due; each part reports its own failure.
+    await this.#telegram?.recover();
     // Alarms are at-least-once, and `onWake` repeats no unchanged wake: an early or spurious alarm would otherwise
     // leave the heartbeat armed with nothing to do. `wake()` already counts the work `resume()` made runnable.
     await this.#scheduleNextAlarm(this.#harness.wake());
@@ -1135,18 +1189,21 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   /**
-   * The one alarm: the earliest sleep, or a recovery heartbeat while work can run, whichever comes first. Everything
-   * that needs the alarm goes through here (the Telegram outbox joins it in M6).
+   * The one alarm: the earliest of Pi Durable's next sleep, the Telegram outbox's next send, and a recovery heartbeat
+   * while work can run (a turn, or a Telegram input or command waiting on one). Everything that needs the alarm goes
+   * through here.
    */
   #scheduleNextAlarm(wake: Wake): Promise<void> {
     // Serialized, so an older wake cannot overwrite a newer, earlier deadline.
     const write = this.#alarmWrites.then(async () => {
-      const heartbeat = wake.active ? Date.now() + HEARTBEAT_MS : undefined;
-      // `wake.at` is on the Harness clock, which is the default `Date.now`.
-      const at =
-        heartbeat === undefined || wake.at === undefined
-          ? (heartbeat ?? wake.at)
-          : Math.min(heartbeat, wake.at);
+      // Read when the write runs, so it is the newest.
+      const telegram = this.#telegram?.wake() ?? { active: false };
+      const heartbeat = wake.active || telegram.active ? Date.now() + HEARTBEAT_MS : undefined;
+      // `wake.at` is on the Harness clock, which is the default `Date.now`, as is the outbox's.
+      const candidates = [heartbeat, wake.at, telegram.at].filter(
+        (value): value is number => value !== undefined,
+      );
+      const at = candidates.length === 0 ? undefined : Math.min(...candidates);
       if (at === undefined) await this.ctx.storage.deleteAlarm();
       else await this.ctx.storage.setAlarm(at);
     });

@@ -1,4 +1,5 @@
 import { handleAdmin } from "./admin.ts";
+import { handleTelegramWebhook } from "./telegram.ts";
 import { accessConfig, authenticate, handleUnlock, isSameOrigin, type Principal } from "./auth.ts";
 import { SUPPORTED_SCHEMA_VERSION } from "../agent/pi/storage.ts";
 import { MIPI_VERSION, PI_DURABLE_VERSION } from "../version.ts";
@@ -22,6 +23,11 @@ const sessionSocketRoute = /^\/api\/sessions\/([^/]+)\/?$/;
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // Telegram's webhook: before owner auth (Access bypasses this exact path); its own secret authenticates it.
+    if (url.pathname === "/api/telegram") {
+      return handleTelegramWebhook(request, env, () => ownerAgent(env));
+    }
 
     // Public liveness check (bypassed by Access). Versions only for the deploy scripts, never publicly.
     if (url.pathname === "/api/health") {

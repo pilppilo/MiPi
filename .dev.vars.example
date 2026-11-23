@@ -11,3 +11,11 @@ ACCESS_AUD=
 ACCESS_SERVICE_CLIENT_ID=
 # Local development only: 1 skips all auth on localhost. Any other host refuses every request while it is set.
 MIPI_ACCESS_SKIP=
+# Telegram (M5). The bot's token from @BotFather, and the webhook secret Telegram sends back on every update
+# (1–256 of A–Z, a–z, 0–9, _ and -). Without a valid secret the webhook refuses everything.
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_WEBHOOK_SECRET=
+# Telegram user ids allowed to talk to the agent, separated by commas. Empty: nobody.
+TELEGRAM_ALLOWED_USER_IDS=
+# This lane's bot username, without @, so "/model@<bot>" is recognised and commands for other bots are ignored.
+TELEGRAM_BOT_USERNAME=

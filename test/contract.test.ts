@@ -95,6 +95,7 @@ describe("Pi seam contract", () => {
           stopReason: "toolUse",
         }),
         fauxAssistantMessage([fauxText("Echoed.")]),
+        fauxAssistantMessage([fauxText("Admitted in a commit.")]),
       ]);
       const models = createModels();
       models.setProvider(faux.provider);
@@ -183,6 +184,40 @@ describe("Pi seam contract", () => {
         expect(messages).toEqual(
           expect.arrayContaining([expect.objectContaining({ role: "toolResult", isError: false })]),
         );
+
+        // Telegram admission (M5): a document read, then `submit(tx, …)`, then document writes, in one commit; a table
+        // write before the submit is refused. The settled record and its answer are read back in a commit, and a
+        // submission is reacquired by id to wait for it.
+        await expect(
+          harness.commit(async (tx) => {
+            await tx.createConversation({ ownership: { kind: "ownerless" } });
+            await root.submit(tx, { type: "input", content: "Too late", requestId: "contract-x" });
+          }, ctx),
+        ).rejects.toThrow();
+        const admittedId = await harness.commit(async (tx) => {
+          const before = (await tx.doc(Notes)).count;
+          expect(await tx.submissionByRequest(root.id, "contract-2")).toBeUndefined();
+          const id = await root.submit(tx, {
+            type: "input",
+            content: "Admit me",
+            requestId: "contract-2",
+            whenBusy: "followUp",
+          });
+          (await tx.doc(Notes)).count = before + 1;
+          return id;
+        }, ctx);
+        const reacquired = await harness.submission(admittedId, ctx);
+        expect((await reacquired!.wait(ctx)).status).toBe("done");
+        await harness.waitForIdle(ctx);
+        const answer = await harness.commit(async (tx) => {
+          const record = await tx.submission(admittedId);
+          expect((await tx.submissionByRequest(root.id, "contract-2"))?.id).toBe(admittedId);
+          if (record?.type !== "input" || record.status !== "done") return undefined;
+          const entry = await tx.entry(record.answer);
+          return entry?.model?.[0]?.role === "assistant" ? entry.model[0].content : undefined;
+        }, ctx);
+        expect(answer).toEqual([expect.objectContaining({ text: "Admitted in a commit." })]);
+        expect(await harness.snapshot(Notes, ctx)).toEqual({ count: 2 });
 
         // The storage readers the M2b guard depends on.
         expect(SUPPORTED_SCHEMA_VERSION).toBeGreaterThan(0);

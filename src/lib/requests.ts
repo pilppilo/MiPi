@@ -13,3 +13,10 @@ export function webRequest(key: string): string {
   if (safe.length === 0) throw new Error("The request id has no usable characters");
   return `web:${safe}`;
 }
+
+/** A Telegram message, keyed by its `update_id`: Telegram redelivers an update with the same id. */
+export function telegramRequest(updateId: number): string {
+  if (!Number.isSafeInteger(updateId) || updateId < 0)
+    throw new Error("Invalid Telegram update id");
+  return `tg:${updateId}`;
+}
