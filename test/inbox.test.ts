@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, Harness, InboxDoc, MemoryStorage } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
+import { createHarnessOptions } from "../src/agent/harness.ts";
 import { queuedInputs } from "../src/protocol.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -52,6 +53,52 @@ describe("queued prompts", () => {
       await expect(first.wait(context)).resolves.toMatchObject({ status: "done" });
       await expect(second.wait(context)).resolves.toMatchObject({ status: "done" });
       expect(queuedInputs(await harness.snapshot(InboxDoc, root.id, context))).toEqual([]);
+    } finally {
+      releaseFirst.resolve();
+      await harness.close(context);
+    }
+  });
+
+  it("answers every input queued during a turn in one next turn, for any door (followUpMode: all)", async () => {
+    const releaseFirst = Promise.withResolvers<void>();
+    const requests: number[] = [];
+    const faux = fauxProvider();
+    faux.setResponses([
+      async (request) => {
+        requests.push(request.messages.length);
+        await releaseFirst.promise;
+        return fauxAssistantMessage([fauxText("First answer.")]);
+      },
+      (request) => {
+        requests.push(request.messages.length);
+        return fauxAssistantMessage([fauxText("One answer for three.")]);
+      },
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const harness = await Harness.open(
+      new MemoryStorage(),
+      createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+      context,
+    );
+    try {
+      const root = await harness.root(context);
+      // A web message on an idle conversation starts its turn at once.
+      const first = await root.submit({ type: "input", content: "First" }, context);
+      const queued = [];
+      for (const content of ["Two", "Three", "Four"]) {
+        queued.push(await root.submit({ type: "input", content, whenBusy: "followUp" }, context));
+      }
+      releaseFirst.resolve();
+      await first.wait(context);
+      const settled = await Promise.all(queued.map((submission) => submission.wait(context)));
+      await harness.waitForIdle(context);
+      // Two requests in all: the three queued inputs were placed together and got one answer.
+      expect(requests).toHaveLength(2);
+      const answers = new Set(
+        settled.map((record) => (record.status === "done" ? record.answer : undefined)),
+      );
+      expect(answers.size).toBe(1);
     } finally {
       releaseFirst.resolve();
       await harness.close(context);

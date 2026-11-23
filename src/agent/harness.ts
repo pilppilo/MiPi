@@ -82,6 +82,9 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
       extensions: [chatExtension],
       compaction: compactionSettings(goModels()),
       stream: { cacheRetention: CACHE_RETENTION },
+      // Every input queued behind a running turn joins the next turn together, whichever door it came through, so a
+      // burst gets one answer instead of one turn per message.
+      followUpMode: "all",
     },
     // New top-level conversations start on the configured profile; a channel binding may switch it in the same commit.
     // Forks keep their parent's agent and profile, and subagents are configured by the tool that creates them.

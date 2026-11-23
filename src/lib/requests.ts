@@ -20,3 +20,10 @@ export function telegramRequest(updateId: number): string {
     throw new Error("Invalid Telegram update id");
   return `tg:${updateId}`;
 }
+
+/** A burst of Telegram messages sent as one input, keyed by the first message's `update_id`. */
+export function telegramBatchRequest(firstUpdateId: number): string {
+  if (!Number.isSafeInteger(firstUpdateId) || firstUpdateId < 0)
+    throw new Error("Invalid Telegram update id");
+  return `tg:batch:${firstUpdateId}`;
+}

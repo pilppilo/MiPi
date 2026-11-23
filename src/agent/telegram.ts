@@ -11,10 +11,14 @@
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import {
   configure,
+  type Conversation,
   type ConversationId,
+  ConversationIdle,
   defineDoc,
   type EntryRecord,
   type Harness,
+  InboxDoc,
+  LiveDoc,
   type SubmissionId,
 } from "./pi/durable.ts";
 import { boundConversation, ConversationMeta, profileOf, setProfile } from "./conversations.ts";
@@ -33,7 +37,7 @@ import {
   type TelegramSend,
 } from "./telegram-outbox.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
-import { telegramRequest } from "../lib/requests.ts";
+import { telegramBatchRequest, telegramRequest } from "../lib/requests.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
 
 const context = BACKGROUND_CONTEXT;
@@ -46,6 +50,23 @@ export const RECEIPT_WINDOW_MS = 48 * 60 * 60_000;
 export const RECEIPTS_KEPT = 2_000;
 /** Sends per drain, so one alarm can't run for long. */
 export const SENDS_PER_DRAIN = 20;
+/** An idle chat's messages wait this long after the first one, then go to the model together (COD-174). */
+export const BATCH_WINDOW_MS = 2_000;
+/** A window is sent early once it holds this many messages… */
+export const BATCH_MAX_MESSAGES = 50;
+/** …or this many UTF-16 code units of text, the unit the outbox counts in too. */
+export const BATCH_MAX_UNITS = 32_000;
+
+/** Messages of one idle chat waiting for their window to end. */
+export type StagedWindow = {
+  chatId: number;
+  /** The chat's conversation when the window opened; the batch goes there even if `/new` rebinds the chat. */
+  conversationId: number;
+  firstUpdateId: number;
+  /** First message's admission plus `BATCH_WINDOW_MS`. Later messages never move it. */
+  deadline: number;
+  messages: Array<{ updateId: number; text: string; at: number }>;
+};
 
 export type TelegramChannelState = {
   /** Admitted `update_id`s, oldest first. */
@@ -59,6 +80,11 @@ export type TelegramChannelState = {
   }>;
   /** Commands admitted that still need an outside lookup (`/model <id>` reads the live model list). */
   commands: Array<{ updateId: number; chatId: number; conversationId: number; model: string }>;
+  /**
+   * Windows of idle chats still collecting messages (COD-174). Optional, so the document needs no new version: a
+   * build from before it ignores the field (and the messages waiting in it, on a rollback).
+   */
+  staged?: StagedWindow[];
 };
 
 export const TelegramChannel = defineDoc<TelegramChannelState>({
@@ -66,7 +92,8 @@ export const TelegramChannel = defineDoc<TelegramChannelState>({
   version: 1,
   scope: "session",
   initial: () => ({ receipts: [], inputs: [], commands: [] }),
-  checkpointWhen: (value) => value.inputs.length === 0 && value.commands.length === 0,
+  checkpointWhen: (value) =>
+    value.inputs.length === 0 && value.commands.length === 0 && (value.staged ?? []).length === 0,
 });
 
 /** The chat key a Telegram chat's binding lives under (`conversations.ts`). */
@@ -81,6 +108,24 @@ export const HELP_TEXT =
 
 export const NON_TEXT_HINT = "I can only read text messages for now.";
 
+export const BUSY_REPLY = "I'm still working on your last message; try again in a moment.";
+
+/** A window's messages as one input: one stamp, at the first message's time, then the texts in order. */
+export function batchContent(
+  owner: string,
+  timeZone: string | undefined,
+  messages: readonly { readonly text: string; readonly at: number }[],
+): string {
+  return stampInput(owner, batchText(messages), timeZone, messages[0]!.at);
+}
+
+/** A window's texts joined as the model sees them; also what titles the conversation. */
+const batchText = (messages: readonly { readonly text: string }[]): string =>
+  messages.map(({ text }) => text).join("\n\n");
+
+const batchUnits = (messages: readonly { readonly text: string }[]): number =>
+  messages.reduce((total, { text }) => total + text.length, 0);
+
 function hasReceipt(state: TelegramChannelState, updateId: number): boolean {
   return state.receipts.some((receipt) => receipt.updateId === updateId);
 }
@@ -91,6 +136,7 @@ export function addReceipt(state: TelegramChannelState, updateId: number, now: n
   const pending = new Set([
     ...state.inputs.map((input) => input.updateId),
     ...state.commands.map((command) => command.updateId),
+    ...(state.staged ?? []).flatMap((window) => window.messages.map(({ updateId }) => updateId)),
   ]);
   let excess = state.receipts.length - RECEIPTS_KEPT;
   state.receipts = state.receipts.filter((receipt) => {
@@ -172,9 +218,13 @@ export class TelegramChannelRuntime {
     this.#closed = true;
   }
 
-  /** Everything that may be due: settled inputs, deferred commands, and the outbox. Each part fails on its own. */
+  /**
+   * Everything that may be due: windows past their deadline, settled inputs, deferred commands, and the outbox. Each
+   * part fails on its own.
+   */
   async recover(): Promise<void> {
     for (const [name, work] of [
+      ["flush", () => this.flushDue()],
       ["reconcile", () => this.reconcile()],
       ["commands", () => this.runCommands()],
       ["drain", () => this.drain()],
@@ -214,48 +264,215 @@ export class TelegramChannelRuntime {
     }
   }
 
+  /**
+   * A text message. With a window open for its chat it joins the window (or, once the window is full, goes out with
+   * it at once); a window already past its deadline is sent first, in a commit of its own, since a commit can admit
+   * only one submission. Without a window, a busy conversation gets the message as a follow-up straight away, and an
+   * idle one opens a window: Pi Durable decides which, so busy means what the inbox means by it.
+   */
   async #admitText(
     update: Extract<TelegramInbound, { kind: "text" }>,
     conversationId: ConversationId,
   ): Promise<void> {
-    const conversation = await this.#options.harness.conversation(conversationId, context);
-    if (conversation === undefined) throw new Error(`Conversation ${conversationId} is missing`);
+    await this.#flushDueNow(update.chatId);
+    const window = await this.#commit(async (tx) => {
+      const open = (await tx.doc(TelegramChannel)).staged?.find(
+        ({ chatId }) => chatId === update.chatId,
+      );
+      return open === undefined
+        ? undefined
+        : {
+            conversationId: open.conversationId as ConversationId,
+            firstUpdateId: open.firstUpdateId,
+          };
+    });
+    const target = await this.#conversation(window?.conversationId ?? conversationId);
     const requestId = telegramRequest(update.updateId);
-    const content = stampInput(this.#options.owner, update.text, this.#options.timeZone);
+    const message = { updateId: update.updateId, text: update.text, at: this.#now() };
     // As for the web door: arm before admitting work. An early alarm is harmless; a missing one strands the turn.
     await this.#options.armAlarm();
-    const submissionId = await this.#commit(async (tx) => {
-      const state = await tx.doc(TelegramChannel);
-      if (hasReceipt(state, update.updateId)) return undefined;
-      // Pi Durable's `submit(tx, …)` must come before any table write in this commit: read, submit, then write.
-      const existing = await tx.submissionByRequest(conversationId, requestId);
-      const id =
-        existing?.id ??
-        (await conversation.submit(tx, {
-          type: "input",
-          content,
-          requestId,
-          // Queue behind a running turn instead of rejecting, as the web door does.
-          whenBusy: "followUp",
-        }));
-      addReceipt(state, update.updateId, this.#now());
-      // An input admitted before, whose receipt is gone, was answered then: nothing to send again.
-      if (existing !== undefined) return undefined;
-      state.inputs.push({
-        updateId: update.updateId,
-        chatId: update.chatId,
-        conversationId,
-        submissionId: id,
-      });
-      return id;
+    const submitted = await this.#commit(
+      async (tx): Promise<{ id: SubmissionId; text: string } | undefined> => {
+        const state = await tx.doc(TelegramChannel);
+        if (hasReceipt(state, update.updateId)) return undefined;
+        const open = state.staged?.find(
+          (staged) =>
+            staged.chatId === update.chatId && staged.firstUpdateId === window?.firstUpdateId,
+        );
+        if (open !== undefined) {
+          const messages = [...open.messages.map((staged) => ({ ...staged })), message];
+          if (messages.length < BATCH_MAX_MESSAGES && batchUnits(messages) < BATCH_MAX_UNITS) {
+            open.messages.push(message);
+            addReceipt(state, update.updateId, this.#now());
+            return undefined;
+          }
+          // Full: the window goes out now, with this message, in this commit.
+          const id = await this.#submitBatch(tx, target, open.firstUpdateId, messages);
+          this.#unstage(state, open.chatId, open.firstUpdateId);
+          addReceipt(state, update.updateId, this.#now());
+          if (id === undefined) return undefined;
+          state.inputs.push({
+            updateId: open.firstUpdateId,
+            chatId: open.chatId,
+            conversationId: target.id,
+            submissionId: id,
+          });
+          return { id, text: batchText(messages) };
+        }
+        // Pi Durable's `submit(tx, …)` must come before any table write in this commit: read, submit, then write.
+        const existing = await tx.submissionByRequest(target.id, requestId);
+        if (existing !== undefined) {
+          // Admitted before, and its receipt is gone: it was answered then, so nothing to send again.
+          addReceipt(state, update.updateId, this.#now());
+          return undefined;
+        }
+        let id: SubmissionId;
+        try {
+          id = await target.submit(tx, {
+            type: "input",
+            content: stampInput(
+              this.#options.owner,
+              update.text,
+              this.#options.timeZone,
+              message.at,
+            ),
+            requestId,
+            // Busy: queue behind the running turn, which `followUpMode: "all"` answers together with the rest.
+            whenBusy: "followUp",
+            // Idle: rejected before anything is written, so the message can wait for the window instead.
+            whenIdle: "reject",
+          });
+        } catch (error) {
+          if (!(error instanceof ConversationIdle)) throw error;
+          // Assigned, not pushed: a value assigned to a draft is copied, so a push onto it would be lost.
+          state.staged = [
+            ...(state.staged ?? []),
+            {
+              chatId: update.chatId,
+              conversationId: target.id,
+              firstUpdateId: update.updateId,
+              deadline: message.at + BATCH_WINDOW_MS,
+              messages: [message],
+            },
+          ];
+          addReceipt(state, update.updateId, this.#now());
+          return undefined;
+        }
+        addReceipt(state, update.updateId, this.#now());
+        state.inputs.push({
+          updateId: update.updateId,
+          chatId: update.chatId,
+          conversationId: target.id,
+          submissionId: id,
+        });
+        return { id, text: update.text };
+      },
+    );
+    if (submitted !== undefined) await this.#submitted(target.id, submitted);
+  }
+
+  async #conversation(id: ConversationId): Promise<Conversation> {
+    const conversation = await this.#options.harness.conversation(id, context);
+    if (conversation === undefined) throw new Error(`Conversation ${id} is missing`);
+    return conversation;
+  }
+
+  /**
+   * Admits a window's messages as one input, or finds the one admitted before under the same request id: the only
+   * table write of its commit, so call it before any other. Undefined when it was admitted before.
+   */
+  async #submitBatch(
+    tx: Tx,
+    conversation: Conversation,
+    firstUpdateId: number,
+    messages: readonly { readonly text: string; readonly at: number }[],
+  ): Promise<SubmissionId | undefined> {
+    const requestId = telegramBatchRequest(firstUpdateId);
+    if ((await tx.submissionByRequest(conversation.id, requestId)) !== undefined) return undefined;
+    return conversation.submit(tx, {
+      type: "input",
+      content: batchContent(this.#options.owner, this.#options.timeZone, messages),
+      requestId,
+      // Web or scheduled work may have started during the wait: then the batch is its follow-up.
+      whenBusy: "followUp",
     });
-    if (submissionId === undefined) return;
-    this.#watch(submissionId);
+  }
+
+  #unstage(state: TelegramChannelState, chatId: number, firstUpdateId: number): void {
+    state.staged = (state.staged ?? []).filter(
+      (window) => !(window.chatId === chatId && window.firstUpdateId === firstUpdateId),
+    );
+  }
+
+  async #submitted(
+    conversationId: ConversationId,
+    submitted: { readonly id: SubmissionId; readonly text: string },
+  ): Promise<void> {
+    this.#watch(submitted.id);
     try {
-      await this.#options.onSubmitted?.(conversationId, update.text);
+      await this.#options.onSubmitted?.(conversationId, submitted.text);
     } catch (error) {
       this.#options.report("Telegram follow-up after a submit failed", error, { conversationId });
     }
+  }
+
+  /** Sends every window past its deadline, in the admission queue so it can't race an update of the same chat. */
+  flushDue(): Promise<void> {
+    return this.#queue.run("admit", () => this.#flushDueNow());
+  }
+
+  /** Each due window (of `chatId`, when given) in a commit of its own: read, submit, then remove it. */
+  async #flushDueNow(chatId?: number): Promise<void> {
+    const due = await this.#commit(async (tx) =>
+      ((await tx.doc(TelegramChannel)).staged ?? [])
+        .filter(
+          (window) =>
+            window.deadline <= this.#now() && (chatId === undefined || window.chatId === chatId),
+        )
+        .map(({ chatId: chat, conversationId, firstUpdateId }) => ({
+          chatId: chat,
+          conversationId: conversationId as ConversationId,
+          firstUpdateId,
+        })),
+    );
+    for (const window of due) {
+      if (this.#closed) return;
+      const conversation = await this.#conversation(window.conversationId);
+      await this.#options.armAlarm();
+      const submitted = await this.#commit(async (tx) => {
+        const state = await tx.doc(TelegramChannel);
+        const open = state.staged?.find(
+          (staged) =>
+            staged.chatId === window.chatId && staged.firstUpdateId === window.firstUpdateId,
+        );
+        if (open === undefined) return undefined;
+        const messages = open.messages.map((staged) => ({ ...staged }));
+        const id = await this.#submitBatch(tx, conversation, open.firstUpdateId, messages);
+        this.#unstage(state, window.chatId, window.firstUpdateId);
+        if (id === undefined) return undefined;
+        state.inputs.push({
+          updateId: window.firstUpdateId,
+          chatId: window.chatId,
+          conversationId: conversation.id,
+          submissionId: id,
+        });
+        return { id, text: batchText(messages) };
+      });
+      if (submitted !== undefined) await this.#submitted(conversation.id, submitted);
+    }
+  }
+
+  /**
+   * Whether `conversationId` has work staged or running, for commands that change it: a window of this door, a
+   * Telegram input waiting for its answer, a run (Pi Durable's `pi.live`), or inputs queued from any door.
+   */
+  async #busy(tx: Tx, conversationId: ConversationId): Promise<boolean> {
+    const state = await tx.doc(TelegramChannel);
+    if ((state.staged ?? []).some((window) => window.conversationId === conversationId))
+      return true;
+    if (state.inputs.some((input) => input.conversationId === conversationId)) return true;
+    if ((await tx.doc(LiveDoc, conversationId)).run !== undefined) return true;
+    return (await tx.doc(InboxDoc, conversationId)).items.length > 0;
   }
 
   async #admitCommand(
@@ -270,14 +487,53 @@ export class TelegramChannelRuntime {
       case "version":
         await this.#reply(updateId, chatId, () => `MiPi ${this.#options.version}`);
         return;
-      case "new":
+      case "new": {
+        // Messages waiting in the chat's window belong to the old conversation: they go there first, in the same
+        // commit, before the chat is rebound (the submit before any table write, the new conversation's included).
+        const window = await this.#commit(async (tx) => {
+          const open = (await tx.doc(TelegramChannel)).staged?.find(
+            (staged) => staged.chatId === chatId,
+          );
+          return open === undefined
+            ? undefined
+            : {
+                conversationId: open.conversationId as ConversationId,
+                firstUpdateId: open.firstUpdateId,
+              };
+        });
+        const previous =
+          window === undefined ? undefined : await this.#conversation(window.conversationId);
+        if (window !== undefined) await this.#options.armAlarm();
+        let submitted: { id: SubmissionId; text: string } | undefined;
         await this.#reply(updateId, chatId, async (tx) => {
+          const state = await tx.doc(TelegramChannel);
+          const open = state.staged?.find(
+            (staged) => staged.chatId === chatId && staged.firstUpdateId === window?.firstUpdateId,
+          );
+          if (open !== undefined && previous !== undefined) {
+            const messages = open.messages.map((staged) => ({ ...staged }));
+            const id = await this.#submitBatch(tx, previous, open.firstUpdateId, messages);
+            this.#unstage(state, open.chatId, open.firstUpdateId);
+            if (id !== undefined) {
+              state.inputs.push({
+                updateId: open.firstUpdateId,
+                chatId,
+                conversationId: previous.id,
+                submissionId: id,
+              });
+              submitted = { id, text: batchText(messages) };
+            }
+          }
           await boundConversation(tx, telegramBinding(chatId), this.#options.profile, {
             rebind: true,
           });
           return "Started a new conversation.";
         });
+        if (submitted !== undefined && previous !== undefined) {
+          await this.#submitted(previous.id, submitted);
+        }
         return;
+      }
       case "profile":
         await this.#reply(updateId, chatId, async (tx) => {
           if (argument.length === 0) {
@@ -288,6 +544,7 @@ export class TelegramChannelRuntime {
           if (!isProfileName(name)) {
             return `${argument} is not a profile. Pick one of: ${PROFILE_NAMES.join(", ")}.`;
           }
+          if (await this.#busy(tx, conversationId)) return BUSY_REPLY;
           await setProfile(tx, conversationId, name);
           return `Profile set to ${name}.`;
         });
@@ -304,14 +561,25 @@ export class TelegramChannelRuntime {
           return;
         }
         // The live model list is an outside lookup: record the command now, answer it after the webhook returns.
+        // Busy now: answered at once, nothing recorded.
         const recorded = await this.#commit(async (tx) => {
           const state = await tx.doc(TelegramChannel);
-          if (hasReceipt(state, updateId)) return false;
+          if (hasReceipt(state, updateId)) return "duplicate" as const;
+          if (await this.#busy(tx, conversationId)) {
+            addReceipt(state, updateId, this.#now());
+            enqueueReply(
+              await tx.doc(TelegramOutbox),
+              { id: `cmd:${updateId}`, chatId, text: BUSY_REPLY },
+              this.#now(),
+            );
+            return "busy" as const;
+          }
           state.commands.push({ updateId, chatId, conversationId, model: argument });
           addReceipt(state, updateId, this.#now());
-          return true;
+          return "recorded" as const;
         });
-        if (recorded) void this.runCommands().catch(() => undefined);
+        if (recorded === "busy") this.#kickDrain();
+        if (recorded === "recorded") void this.runCommands().catch(() => undefined);
         return;
       }
       default: {
@@ -366,7 +634,10 @@ export class TelegramChannelRuntime {
           if (index === -1) return;
           state.commands.splice(index, 1);
           let text: string;
-          if (model !== undefined) {
+          // The conversation the command came from, even if `/new` rebound the chat since.
+          if (await this.#busy(tx, command.conversationId as ConversationId)) {
+            text = BUSY_REPLY;
+          } else if (model !== undefined) {
             await configure(tx, command.conversationId as ConversationId, { model });
             text = `Model set to ${model.modelId}.`;
           } else {
@@ -414,6 +685,12 @@ export class TelegramChannelRuntime {
         const outbox = await tx.doc(TelegramOutbox);
         const now = this.#now();
         const kept: TelegramChannelState["inputs"] = [];
+        // One notice per chat and conversation for the inputs that ended unanswered together (one failed turn answers
+        // several); a failed turn of the conversation from before `/new` gets its own.
+        const unanswered = new Map<
+          string,
+          { chatId: number; firstSubmission: number; reason: string }
+        >();
         let changed = false;
         for (const input of state.inputs) {
           const stored = await tx.submission(input.submissionId as SubmissionId);
@@ -435,16 +712,27 @@ export class TelegramChannelRuntime {
             );
           } else {
             const reason = record === undefined ? "its record is gone" : record.reason;
-            enqueueReply(
-              outbox,
-              {
-                id: `unanswered:${input.submissionId}`,
+            const key = `${input.chatId}:${input.conversationId}`;
+            const group = unanswered.get(key);
+            if (group === undefined || input.submissionId < group.firstSubmission) {
+              unanswered.set(key, {
                 chatId: input.chatId,
-                text: `I couldn't answer that message (${reason}). Send it again to retry.`,
-              },
-              now,
-            );
+                firstSubmission: input.submissionId,
+                reason,
+              });
+            }
           }
+        }
+        for (const { chatId, ...group } of unanswered.values()) {
+          enqueueReply(
+            outbox,
+            {
+              id: `unanswered:${group.firstSubmission}:${chatId}`,
+              chatId,
+              text: `I couldn't answer that (${group.reason}). Send it again to retry.`,
+            },
+            now,
+          );
         }
         if (changed) state.inputs = kept;
         return changed;
@@ -508,9 +796,14 @@ export class TelegramChannelRuntime {
       const value = await change(tx);
       const state = await tx.doc(TelegramChannel);
       const outbox = await tx.doc(TelegramOutbox);
-      const at = nextOutboxWake(outbox, this.#now());
+      const staged = state.staged ?? [];
+      const times = [
+        nextOutboxWake(outbox, this.#now()),
+        ...staged.map(({ deadline }) => deadline),
+      ].filter((value): value is number => value !== undefined);
+      const at = times.length === 0 ? undefined : Math.min(...times);
       wake = {
-        active: state.inputs.length > 0 || state.commands.length > 0,
+        active: state.inputs.length > 0 || state.commands.length > 0 || staged.length > 0,
         ...(at === undefined ? {} : { at }),
       };
       return value;

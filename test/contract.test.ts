@@ -54,7 +54,10 @@ describe("Pi seam contract", () => {
     // Adding a name to a seam file means adding it here too, on purpose.
     expect(runtimeNames(durable)).toEqual([
       "AssistantEntry",
+      "ConversationIdle",
       "Harness",
+      "InboxDoc",
+      "LiveDoc",
       "ProviderDoc",
       "UsageDoc",
       "UserEntry",
@@ -218,6 +221,32 @@ describe("Pi seam contract", () => {
         }, ctx);
         expect(answer).toEqual([expect.objectContaining({ text: "Admitted in a commit." })]);
         expect(await harness.snapshot(Notes, ctx)).toEqual({ count: 2 });
+
+        // Bursts (COD-174): an idle conversation refuses `whenIdle: "reject"` input with `ConversationIdle` before
+        // anything is written, and the same commit goes on to write documents; `pi.live` and `pi.inbox` read idle.
+        const staged = await harness.commit(async (tx) => {
+          expect((await tx.doc(durable.LiveDoc, root.id)).run).toBeUndefined();
+          expect((await tx.doc(durable.InboxDoc, root.id)).items).toEqual([]);
+          try {
+            await root.submit(tx, {
+              type: "input",
+              content: "Wait for the window",
+              requestId: "contract-idle",
+              whenIdle: "reject",
+              whenBusy: "followUp",
+            });
+            return false;
+          } catch (error) {
+            expect(error).toBeInstanceOf(durable.ConversationIdle);
+            (await tx.doc(Notes)).count += 1;
+            return true;
+          }
+        }, ctx);
+        expect(staged).toBe(true);
+        expect(await harness.snapshot(Notes, ctx)).toEqual({ count: 3 });
+        await harness.commit(async (tx) => {
+          expect(await tx.submissionByRequest(root.id, "contract-idle")).toBeUndefined();
+        }, ctx);
 
         // The storage readers the M2b guard depends on.
         expect(SUPPORTED_SCHEMA_VERSION).toBeGreaterThan(0);
