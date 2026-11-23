@@ -15,6 +15,7 @@ import {
   type ReadEnv,
 } from "./pi/models.ts";
 import { ConversationMeta } from "./conversations.ts";
+import { memorySection } from "./memory.ts";
 import { DEFAULT_PROFILE, type ProfileName, profileTools, toolsFor } from "./profiles.ts";
 import { ScheduledReminder } from "../tools/reminder-task.ts";
 import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
@@ -67,6 +68,8 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
           tag: false,
         },
       ),
+      // After the static preamble: a lesson changes only the end of the system prompt. Shown where `remember` is offered.
+      memorySection,
     ],
   });
   const profile = config.profile ?? DEFAULT_PROFILE;
