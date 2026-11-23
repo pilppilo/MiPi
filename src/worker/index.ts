@@ -1,4 +1,5 @@
 import { handleAdmin } from "./admin.ts";
+import { handleRelay, isRelayPath } from "./relay.ts";
 import { handleTelegramWebhook } from "./telegram.ts";
 import { accessConfig, authenticate, handleUnlock, isSameOrigin, type Principal } from "./auth.ts";
 import { SUPPORTED_SCHEMA_VERSION } from "../agent/pi/storage.ts";
@@ -27,6 +28,11 @@ export default {
     // Telegram's webhook: before owner auth (Access bypasses this exact path); its own secret authenticates it.
     if (url.pathname === "/api/telegram") {
       return handleTelegramWebhook(request, env, () => ownerAgent(env));
+    }
+
+    // The PiDu relay (M7): before owner auth (Access bypasses `api/relay`); its bearer token authenticates it.
+    if (isRelayPath(url.pathname)) {
+      return handleRelay(request, env, url.pathname, () => ownerAgent(env));
     }
 
     // Public liveness check (bypassed by Access). Versions only for the deploy scripts, never publicly.

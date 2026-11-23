@@ -19,3 +19,7 @@ TELEGRAM_WEBHOOK_SECRET=
 TELEGRAM_ALLOWED_USER_IDS=
 # This lane's bot username, without @, so "/model@<bot>" is recognised and commands for other bots are ignored.
 TELEGRAM_BOT_USERNAME=
+# PiDu relay (M7): the bearer token PiDu sends to /api/relay (24+ random characters). Empty: the relay is off.
+RELAY_TOKEN=
+# Only while rotating RELAY_TOKEN: the old token, still accepted until PiDu has the new one.
+RELAY_TOKEN_PREVIOUS=

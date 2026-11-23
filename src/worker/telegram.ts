@@ -7,6 +7,7 @@
  * deliberately drops); 503 makes Telegram retry later.
  */
 import { constantTimeEqual } from "./auth.ts";
+import { readBounded } from "./body.ts";
 import {
   parseAllowedUserIds,
   parseTelegramUpdate,
@@ -40,33 +41,6 @@ function setting(env: Env, name: string): string | undefined {
 export function webhookSecret(env: Env): string | undefined {
   const secret = setting(env, "TELEGRAM_WEBHOOK_SECRET");
   return secret !== undefined && WEBHOOK_SECRET_PATTERN.test(secret) ? secret : undefined;
-}
-
-/** The body, read up to `limit` bytes; undefined once it is larger, without reading the rest. */
-async function readBounded(request: Request, limit: number): Promise<Uint8Array | undefined> {
-  const declared = Number(request.headers.get("Content-Length") ?? "");
-  if (Number.isFinite(declared) && declared > limit) return undefined;
-  if (request.body === null) return new Uint8Array();
-  const reader = request.body.getReader();
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    size += value.byteLength;
-    if (size > limit) {
-      await reader.cancel();
-      return undefined;
-    }
-    parts.push(value);
-  }
-  const body = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) {
-    body.set(part, offset);
-    offset += part.byteLength;
-  }
-  return body;
 }
 
 export async function handleTelegramWebhook(

@@ -53,7 +53,7 @@ Secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secret
 
 ## Cloudflare Access
 
-Configure staging first in Cloudflare Zero Trust under **Access controls → Applications**. Add a **Self-hosted** application for the staging hostname with an Allow policy for the owner's sign-in identity. Use the hostname application for WebSocket support. Add a separate application for the exact `/api/health` path with a Bypass policy. When the Telegram and relay handlers are deployed, configure exact-path bypass applications for their endpoints and verify each handler's own authentication.
+Configure staging first in Cloudflare Zero Trust under **Access controls → Applications**. Add a **Self-hosted** application for the staging hostname with an Allow policy for the owner's sign-in identity. Use the hostname application for WebSocket support. Add a separate application for the exact `/api/health` path with a Bypass policy. When the Telegram and relay handlers are deployed, configure path bypass applications for them and verify each handler's own authentication (see the Telegram and PiDu relay sections).
 
 Create a service token under **Access controls → Service credentials → Service Tokens**. On the staging hostname application, add a Service Auth policy selecting that token. Keep the exact-path health application on its Bypass policy. In the matching GitHub Environment, set:
 
@@ -62,7 +62,7 @@ Create a service token under **Access controls → Service credentials → Servi
 
 Keep the existing admin token available for deployments before Access is enabled. Set `MIPI_ACCESS_SKIP` only for localhost development. Use a separate application and token for production.
 
-On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on an owner `/api/` route, such as the WebSocket upgrade (`GET /api/sessions/<owner>`) or `GET /api/unlock`. A `200` from `/` with that token is expected: `wrangler.jsonc` runs the Worker first only for `/api/*`, so `/` is a static asset and Access lets the token through without the Worker seeing it. Verify relay authentication once its handler is present; Telegram's checks are in the Telegram section below.
+On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on an owner `/api/` route, such as the WebSocket upgrade (`GET /api/sessions/<owner>`) or `GET /api/unlock`. A `200` from `/` with that token is expected: `wrangler.jsonc` runs the Worker first only for `/api/*`, so `/` is a static asset and Access lets the token through without the Worker seeing it. The relay's and Telegram's checks are in their sections below.
 
 Worker preview URLs are not covered by the hostname application, so disable preview URLs for the staging and production Workers, or protect them separately.
 
@@ -92,6 +92,37 @@ The deploy stops with an error naming what is missing if only some are set.
 - Open the bot, press **Start**, send `hi`: one reply. `/version` answers the version, `/new` answers "Started a new conversation.".
 - `curl -X POST <worker>/api/telegram` answers 401 `{"error":"Unauthorized"}` (the Worker's own check, so the bypass works); a `GET` answers 405.
 - A message from another account, or in a group, gets no answer.
+
+## PiDu relay
+
+`POST /api/relay` lets PiDu (or any script with the token) talk to MiPi. Messages go to one conversation, `relay:pidu`, on the `pidu` profile. The relay stays off for a lane until its GitHub Environment has `RELAY_TOKEN`.
+
+**1. GitHub: store the token.** Make 32 or more random letters and digits (a password manager's generator with symbols off). Settings → Environments → `staging` (or `production`) → Environment secrets → Add environment secret: name `RELAY_TOKEN`, value the token. Give the same token to PiDu.
+
+**2. Cloudflare: let the relay past Access.** Zero Trust → Access controls → Applications → Add an application → Self-hosted. Name it `mipi-staging-relay`, use the lane's hostname with **Path** `api/relay` (no leading slash), and add a policy with **Action: Bypass**, **Include: Everyone**. The path covers `api/relay/<key>` too. The Worker checks the token itself on both routes, and every other route keeps its own authentication.
+
+**3. Deploy.** Merging to `main` deploys staging. A token added after a deploy takes effect on the next one: Actions → deploy → Run workflow → target.
+
+**4. Use it.**
+
+```sh
+curl -sS -X POST "$URL/api/relay" \
+  -H "Authorization: Bearer $RELAY_TOKEN" -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" -d '{"text":"What is on my list today?"}'
+```
+
+- The `Idempotency-Key` is 1 to 64 letters, digits, `-` or `_`. Sending the same key again returns the first answer and admits nothing. The same key with a different text gets `409`.
+- The request waits up to 25 seconds. `200 {"id","status":"done","answer"}` is the answer. `202 {"id","status":"pending"}` means it isn't ready yet: poll `GET /api/relay/<key>` with the same token. A turn that ends without an answer is `200 {"status":"unanswered","reason"}`.
+- Text is at most 16,384 UTF-8 bytes (`413`), and at most 60 messages are admitted per sliding hour (`429` with `Retry-After`). A wrong token is `401`, and maintenance is `503`.
+
+**Rotating the token.** Put the new token in `RELAY_TOKEN` and the old one in `RELAY_TOKEN_PREVIOUS`, then deploy: both work. Give PiDu the new token, delete `RELAY_TOKEN_PREVIOUS`, and deploy again: the old one stops working. Deleting `RELAY_TOKEN` and deploying turns the relay off.
+
+**Verify.**
+
+- The curl above answers `200` with an answer, or `202` and then the answer from `GET /api/relay/<key>`.
+- The same curl with the same key returns the same answer.
+- A wrong token answers `401 {"error":"Unauthorized"}` on both routes.
+- Signed out, an owner route such as `GET /api/unlock` is still refused by Access.
 
 ## Versions and changes
 
