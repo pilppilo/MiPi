@@ -21,6 +21,7 @@ import { createHarnessOptions } from "../src/agent/harness.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import {
   BATCH_MAX_MESSAGES,
+  BATCH_MAX_UNITS,
   BUSY_REPLY,
   HELP_TEXT,
   NON_TEXT_HINT,
@@ -60,6 +61,7 @@ interface AgentOptions {
   readonly responses?: readonly FauxResponseStep[];
   readonly send?: SendBehaviour;
   readonly modelIds?: () => Promise<string[]>;
+  readonly onSubmitted?: (conversationId: number, text: string) => Promise<void>;
 }
 
 type Storage = Awaited<ReturnType<typeof openDurableObjectSqliteStorage>>;
@@ -77,8 +79,6 @@ const inObject = (test: (storage: () => Promise<Storage>) => Promise<void>): Pro
   );
 
 const clock = { now: Date.now() };
-/** What the channel reported: a test that expects none fails with them. */
-const reports: string[] = [];
 
 async function openAgent(
   storage: () => Promise<Storage>,
@@ -94,6 +94,8 @@ async function openAgent(
     ctx,
   );
   const sent: Sent[] = [];
+  /** What this agent's channel reported: `settle()` fails on anything but a refused send. */
+  const reports: string[] = [];
   const behaviour = options.send ?? delivered;
   let calls = 0;
   const channel = new TelegramChannelRuntime({
@@ -110,6 +112,7 @@ async function openAgent(
       return result;
     },
     armAlarm: async () => {},
+    ...(options.onSubmitted === undefined ? {} : { onSubmitted: options.onSubmitted }),
     onWakeChange: () => {},
     report: (message, error) => {
       reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
@@ -761,6 +764,98 @@ describe("Telegram bursts (COD-174)", () => {
         const [batch] = await userTexts(agent.harness, conversationId);
         expect(batch!.split("\n\n")).toHaveLength(BATCH_MAX_MESSAGES);
         expect(agent.sent.map(({ text: sent }) => sent)).toEqual(["Lots"]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("answers busy to a deferred /model when work started while the model list was being read", () =>
+    inObject(async (storage) => {
+      const list = Promise.withResolvers<string[]>();
+      const agent = await openAgent(storage, {
+        modelIds: () => list.promise,
+        responses: answers("Busy turn"),
+      });
+      try {
+        // Idle when it arrives: recorded, waiting on the list.
+        await agent.channel.admit(command(1, "model", "deepseek-v4.1-flash"));
+        expect((await channelState(agent.harness)).commands).toHaveLength(1);
+        // A message opens a window before the list answers.
+        await agent.channel.admit(text(2, "meanwhile"));
+        list.resolve(["deepseek-v4.1-flash"]);
+        await agent.channel.runCommands();
+        const bound = (await boundId(agent.harness))!;
+        const conversation = await agent.harness.conversation(bound as never, ctx);
+        expect((await conversation!.agent(ctx)).model?.modelId).toBe("faux-1");
+        // Plain /model still answers while busy.
+        await agent.channel.admit(command(3, "model"));
+        await agent.settle();
+        const texts = agent.sent.map(({ text: sent }) => sent);
+        expect(texts[0]).toBe(BUSY_REPLY);
+        expect(texts).toContain("Model: faux-1.\nChange it with /model <id>.");
+        expect(texts).toContain("Busy turn");
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("sends a window early once its text reaches the size cap", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, { responses: answers("Long read") });
+      try {
+        const half = "x".repeat(BATCH_MAX_UNITS / 2);
+        await agent.channel.admit(text(1, half));
+        expect((await channelState(agent.harness)).staged).toHaveLength(1);
+        await agent.channel.admit(text(2, half));
+        const state = await channelState(agent.harness);
+        expect(state.staged ?? []).toEqual([]);
+        expect(state.inputs).toHaveLength(1);
+        await agent.settle();
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual(["Long read"]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("titles a batched conversation from all of its messages", () =>
+    inObject(async (storage) => {
+      const titled: string[] = [];
+      const agent = await openAgent(storage, {
+        responses: answers("Sure"),
+        onSubmitted: async (_conversationId, submitted) => {
+          titled.push(submitted);
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "hey"));
+        await agent.channel.admit(text(2, "help me debug my wrangler config"));
+        await agent.settle();
+        expect(titled).toEqual(["hey\n\nhelp me debug my wrangler config"]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("keeps failure notices of the conversations before and after /new apart", () =>
+    inObject(async (storage) => {
+      const failing: FauxResponseStep = () =>
+        fauxAssistantMessage([], { stopReason: "error", errorMessage: "provider down" });
+      let agent = await openAgent(storage, {
+        responses: Array.from({ length: 16 }, () => failing),
+      });
+      try {
+        await agent.channel.admit(text(1, "old"));
+        await agent.channel.admit(command(2, "new"));
+        await agent.channel.admit(text(3, "new"));
+        await endWindow(agent);
+        // No watcher turns either failure into a notice: both settle first, and one reconcile after the restart
+        // sees them together.
+        agent.channel.close();
+        await agent.harness.waitForIdle(ctx);
+        agent = await agent.restart();
+        await agent.settle();
+        const notices = agent.sent.filter(({ text: sent }) => sent.startsWith("I couldn't answer"));
+        expect(notices).toHaveLength(2);
       } finally {
         await agent.close();
       }

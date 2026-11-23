@@ -116,13 +116,12 @@ export function batchContent(
   timeZone: string | undefined,
   messages: readonly { readonly text: string; readonly at: number }[],
 ): string {
-  return stampInput(
-    owner,
-    messages.map(({ text }) => text).join("\n\n"),
-    timeZone,
-    messages[0]!.at,
-  );
+  return stampInput(owner, batchText(messages), timeZone, messages[0]!.at);
 }
+
+/** A window's texts joined as the model sees them; also what titles the conversation. */
+const batchText = (messages: readonly { readonly text: string }[]): string =>
+  messages.map(({ text }) => text).join("\n\n");
 
 const batchUnits = (messages: readonly { readonly text: string }[]): number =>
   messages.reduce((total, { text }) => total + text.length, 0);
@@ -318,7 +317,7 @@ export class TelegramChannelRuntime {
             conversationId: target.id,
             submissionId: id,
           });
-          return { id, text: messages[0]!.text };
+          return { id, text: batchText(messages) };
         }
         // Pi Durable's `submit(tx, …)` must come before any table write in this commit: read, submit, then write.
         const existing = await tx.submissionByRequest(target.id, requestId);
@@ -331,7 +330,12 @@ export class TelegramChannelRuntime {
         try {
           id = await target.submit(tx, {
             type: "input",
-            content: stampInput(this.#options.owner, update.text, this.#options.timeZone),
+            content: stampInput(
+              this.#options.owner,
+              update.text,
+              this.#options.timeZone,
+              message.at,
+            ),
             requestId,
             // Busy: queue behind the running turn, which `followUpMode: "all"` answers together with the rest.
             whenBusy: "followUp",
@@ -452,7 +456,7 @@ export class TelegramChannelRuntime {
           conversationId: conversation.id,
           submissionId: id,
         });
-        return { id, text: messages[0]!.text };
+        return { id, text: batchText(messages) };
       });
       if (submitted !== undefined) await this.#submitted(conversation.id, submitted);
     }
@@ -517,7 +521,7 @@ export class TelegramChannelRuntime {
                 conversationId: previous.id,
                 submissionId: id,
               });
-              submitted = { id, text: messages[0]!.text };
+              submitted = { id, text: batchText(messages) };
             }
           }
           await boundConversation(tx, telegramBinding(chatId), this.#options.profile, {
@@ -681,8 +685,12 @@ export class TelegramChannelRuntime {
         const outbox = await tx.doc(TelegramOutbox);
         const now = this.#now();
         const kept: TelegramChannelState["inputs"] = [];
-        // One notice per chat for the inputs that ended unanswered together (one failed turn answers several).
-        const unanswered = new Map<number, { firstSubmission: number; reason: string }>();
+        // One notice per chat and conversation for the inputs that ended unanswered together (one failed turn answers
+        // several); a failed turn of the conversation from before `/new` gets its own.
+        const unanswered = new Map<
+          string,
+          { chatId: number; firstSubmission: number; reason: string }
+        >();
         let changed = false;
         for (const input of state.inputs) {
           const stored = await tx.submission(input.submissionId as SubmissionId);
@@ -704,13 +712,18 @@ export class TelegramChannelRuntime {
             );
           } else {
             const reason = record === undefined ? "its record is gone" : record.reason;
-            const group = unanswered.get(input.chatId);
+            const key = `${input.chatId}:${input.conversationId}`;
+            const group = unanswered.get(key);
             if (group === undefined || input.submissionId < group.firstSubmission) {
-              unanswered.set(input.chatId, { firstSubmission: input.submissionId, reason });
+              unanswered.set(key, {
+                chatId: input.chatId,
+                firstSubmission: input.submissionId,
+                reason,
+              });
             }
           }
         }
-        for (const [chatId, group] of unanswered) {
+        for (const { chatId, ...group } of unanswered.values()) {
           enqueueReply(
             outbox,
             {
