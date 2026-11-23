@@ -50,6 +50,9 @@ jobs:
       TELEGRAM_WEBHOOK_SECRET: ${{ secrets.TELEGRAM_WEBHOOK_SECRET }}
       TELEGRAM_ALLOWED_USER_IDS: ${{ vars.TELEGRAM_ALLOWED_USER_IDS }}
       TELEGRAM_BOT_USERNAME: ${{ vars.TELEGRAM_BOT_USERNAME }}
+      # PiDu relay (M7): on once the lane's Environment has RELAY_TOKEN. RELAY_TOKEN_PREVIOUS only while rotating it.
+      RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
+      RELAY_TOKEN_PREVIOUS: ${{ secrets.RELAY_TOKEN_PREVIOUS }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -93,7 +96,14 @@ jobs:
               exit 1
             fi
           fi
-          for name in MIPI_SPIKE_TOKEN ADMIN_TOKEN; do
+          if [ -z "$RELAY_TOKEN" ] && [ -n "$RELAY_TOKEN_PREVIOUS" ]; then
+            echo "::error::RELAY_TOKEN_PREVIOUS is set without RELAY_TOKEN (Environment $TARGET); the relay would stay off"
+            exit 1
+          fi
+          relay_names=""
+          if [ -n "$RELAY_TOKEN" ]; then relay_names="RELAY_TOKEN"; fi
+          if [ -n "$RELAY_TOKEN_PREVIOUS" ]; then relay_names="$relay_names RELAY_TOKEN_PREVIOUS"; fi
+          for name in MIPI_SPIKE_TOKEN ADMIN_TOKEN $relay_names; do
             value="${!name}"
             if [ "${#value}" -lt 24 ]; then
               echo "::error::$name is shorter than 24 characters; use a long random string"
@@ -133,9 +143,15 @@ jobs:
           umask 077
           jq -n --arg key "$OPENCODE_API_KEY" --arg spike "$MIPI_SPIKE_TOKEN" --arg admin "$ADMIN_TOKEN" \
             --arg bot "$TELEGRAM_BOT_TOKEN" --arg hook "$TELEGRAM_WEBHOOK_SECRET" \
+            --arg relay "$RELAY_TOKEN" --arg relay_previous "$RELAY_TOKEN_PREVIOUS" \
             '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}
-              + (if $bot == "" then {} else {TELEGRAM_BOT_TOKEN: $bot, TELEGRAM_WEBHOOK_SECRET: $hook} end)' > "$secrets"
+              + (if $bot == "" then {} else {TELEGRAM_BOT_TOKEN: $bot, TELEGRAM_WEBHOOK_SECRET: $hook} end)
+              + {RELAY_TOKEN: (if $relay == "" then "off" else $relay end),
+                 RELAY_TOKEN_PREVIOUS: (if $relay_previous == "" then "off" else $relay_previous end)}' > "$secrets"
           # Secrets ship with the version itself, so no deployed version ever runs without its key.
+          # --secrets-file only adds: a secret left out keeps its old value. So both relay tokens are always written, and
+          # an unset one as "off", which is under 24 characters and accepted by nothing: removing RELAY_TOKEN turns the
+          # relay off, and removing RELAY_TOKEN_PREVIOUS after a rotation stops the old token working.
           # Access settings ride with the version as vars (they're not secret); unset, Access stays off.
           access_vars=()
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then
