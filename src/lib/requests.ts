@@ -28,6 +28,17 @@ export function telegramBatchRequest(firstUpdateId: number): string {
   return `tg:batch:${firstUpdateId}`;
 }
 
+/** What a relay `Idempotency-Key` may be. Checked, never cleaned: cleaning could make two keys one. */
+export const RELAY_KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+
+export const isRelayKey = (key: string): boolean => RELAY_KEY_PATTERN.test(key);
+
+/** A relay message (M7), keyed by the client's `Idempotency-Key`: a retry with the same key admits nothing twice. */
+export function relayRequest(key: string): string {
+  if (!isRelayKey(key)) throw new Error("A relay key is 1 to 64 letters, digits, - or _");
+  return `relay:${key}`;
+}
+
 /** One occurrence of a reminder (M6): the first is 0. The same id on a retry admits nothing twice. */
 export function reminderRequest(reminderId: string, occurrence: number): string {
   if (!Number.isSafeInteger(occurrence) || occurrence < 0) throw new Error("Invalid occurrence");

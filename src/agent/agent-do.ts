@@ -73,6 +73,7 @@ import type { TelegramAdmission } from "../worker/telegram.ts";
 import { AlarmScheduler, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
 import { botApiSender } from "./telegram-outbox.ts";
+import { RelayRuntime, type RelayResult } from "./relay.ts";
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
   Response.json(body, { status, headers });
@@ -232,6 +233,8 @@ export class MipiAgent extends DurableObject<Env> {
   readonly #alarm = new AlarmScheduler(this.ctx.storage, () => this.#telegram?.wake());
   /** The Telegram door's admissions, replies and outbox; present while the harness is open. */
   #telegram: TelegramChannelRuntime | undefined;
+  /** The PiDu relay's admissions and results (M7); present while the harness is open. */
+  #relay: RelayRuntime | undefined;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -294,6 +297,8 @@ export class MipiAgent extends DurableObject<Env> {
     this.#typingConnections.clear();
     this.#telegram?.close();
     this.#telegram = undefined;
+    this.#relay?.close();
+    this.#relay = undefined;
     await this.#activity.stop();
     await this.#harness.close(BACKGROUND_CONTEXT);
     await this.#alarm.settled();
@@ -603,6 +608,14 @@ export class MipiAgent extends DurableObject<Env> {
         report: reportError,
       });
       this.#telegram = telegram;
+      this.#relay = new RelayRuntime({
+        harness,
+        timeZone: this.env.MIPI_TIMEZONE,
+        profile: startingProfile("relay", profileOrDefault(this.env.MIPI_PROFILE)),
+        armAlarm: () => this.#alarm.schedule({ ...harness.wake(), active: true }),
+        onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
+        report: reportError,
+      });
       // Armed before `resume()` runs anything, as for any call that can start work.
       await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
@@ -637,6 +650,37 @@ export class MipiAgent extends DurableObject<Env> {
       return { kind: "stored" };
     } catch (error) {
       reportError("Admitting a Telegram update failed", error, { updateId: update.updateId });
+      return { kind: "unavailable" };
+    }
+  }
+
+  /**
+   * Called by the Worker's relay route with an authenticated message (M7). Admits it and waits a while for the answer;
+   * `pending` means the client polls `relayResult`. Nothing here holds a queue while it waits.
+   */
+  async relayAdmit(key: string, text: string): Promise<RelayResult> {
+    return this.#relayCall("Admitting a relay message failed", key, (relay) =>
+      relay.admit(key, text),
+    );
+  }
+
+  /** Where a relay key stands (M7). */
+  async relayResult(key: string): Promise<RelayResult> {
+    return this.#relayCall("Reading a relay result failed", key, (relay) => relay.result(key));
+  }
+
+  async #relayCall(
+    failure: string,
+    key: string,
+    call: (relay: RelayRuntime) => Promise<RelayResult>,
+  ): Promise<RelayResult> {
+    await this.#reopenIfStaleExport();
+    const relay = this.#relay;
+    if (this.#state.kind !== "open" || relay === undefined) return { kind: "unavailable" };
+    try {
+      return await call(relay);
+    } catch (error) {
+      reportError(failure, error, { key });
       return { kind: "unavailable" };
     }
   }
