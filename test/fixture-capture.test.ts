@@ -5,7 +5,7 @@
  * later build that can't read what this one wrote fails there.
  *
  * The data is made by MiPi's own composition and doors on a faux model: a web conversation that remembered a lesson,
- * a Telegram chat with a sent reply and a sleeping reminder, a relay exchange, a background memory pass, and the
+ * a Telegram chat with a sent reply and a repeating reminder (on a clock fixed in the past, so it never fires on replay), a relay exchange, a background memory pass, and the
  * agent's own settings.
  */
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
@@ -22,7 +22,7 @@ import {
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
-import { startingProfile } from "../src/agent/conversations.ts";
+import { boundConversation, startingProfile } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/harness.ts";
 import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/agent/memory-pass.ts";
 import { ModelList } from "../src/agent/model-list.ts";
@@ -81,9 +81,12 @@ async function seed(): Promise<void> {
       if (text.includes("passport")) {
         return fauxAssistantMessage(
           [
+            // A repeat, on the harness clock fixed in the past: on replay its time is long gone, so it is skipped as
+            // late and sleeps until the next one, never firing. A one-time reminder would come due on a real date
+            // and fire on every replay after it.
             fauxToolCall("schedule", {
               instruction: "Remind me to renew the passport",
-              delaySeconds: 30 * 24 * 3600,
+              when: "every weekday 8:00",
             }),
           ],
           { stopReason: "toolUse" },
@@ -95,9 +98,14 @@ async function seed(): Promise<void> {
     faux.setResponses(Array.from({ length: 20 }, () => answer));
     const models = createModels();
     models.setProvider(faux.provider);
+    // Pi Durable's clock, fixed on a Monday evening long before any replay: the reminder's times are all in the past.
+    const harnessClock = Date.UTC(2026, 0, 5, 23, 0);
     const harness = await Harness.open(
       await openDurableObjectSqliteStorage(state.storage),
-      createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+      {
+        ...createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+        now: () => harnessClock,
+      },
       ctx,
     );
     const clock = { now: Date.now() };
@@ -142,7 +150,12 @@ async function seed(): Promise<void> {
         (await tx.doc(Proactive)).limit = 50;
       }, ctx);
 
-      const web = await harness.createConversation({ ownership: { kind: "ownerless" } }, ctx);
+      // Bound as the web door binds it, so the fixture holds the `web` channel binding too.
+      const webId = await harness.commit(
+        (tx) => boundConversation(tx, "web", startingProfile("web", "default")),
+        ctx,
+      );
+      const web = (await harness.conversation(webId, ctx))!;
       await (
         await web.submit(
           {

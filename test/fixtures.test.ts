@@ -98,6 +98,29 @@ describe("fixture databases", () => {
       socket.webSocket!.accept();
       socket.webSocket!.close(1000, "done");
 
+      // The repeat's stored time is long past: on opening, it is skipped as late and sleeps until its next time, without
+      // a turn. Until it does, it may still be running.
+      let reminder: { status?: string; skippedLate?: number } = {};
+      for (let attempt = 0; attempt < 200 && reminder.status !== "sleeping"; attempt++) {
+        reminder = await runInDurableObject(stub, (_instance, state) => {
+          const [row] = state.storage.sql
+            .exec<{ record: string }>(`SELECT record FROM tasks WHERE kind = '"app.reminder"'`)
+            .toArray();
+          const record = JSON.parse(row?.record ?? "{}") as {
+            state?: { status?: string; checkpoint?: { skippedLate?: number; at?: number } };
+          };
+          return {
+            ...(record.state?.status === undefined ? {} : { status: record.state.status }),
+            ...(record.state?.checkpoint?.skippedLate === undefined
+              ? {}
+              : { skippedLate: record.state.checkpoint.skippedLate }),
+          };
+        });
+        if (reminder.status !== "sleeping") await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(reminder.status).toBe("sleeping");
+      expect(reminder.skippedLate).toBeGreaterThanOrEqual(1);
+
       // What each door stored reads back as this build's documents and tasks.
       await runInDurableObject(stub, async (_instance, state) => {
         await state.blockConcurrencyWhile(async () => {});
@@ -115,16 +138,18 @@ describe("fixture databases", () => {
             expect.arrayContaining(["The owner drinks tea, not coffee."]),
           );
           expect(lessons.some(({ from }) => from.source === "background")).toBe(true);
-          const telegram = await harness.commit(
-            async (tx) => (await tx.doc(ChannelBindings, "tg:4242", null)).conversationId,
-            ctx,
-          );
-          expect(telegram).toBeDefined();
+          // Snapshots only: this inspecting harness writes nothing beside the live agent.
+          for (const key of ["tg:4242", "web", "relay:pidu"]) {
+            expect(
+              (await harness.snapshot(ChannelBindings, key, ctx))?.conversationId,
+              key,
+            ).toBeDefined();
+          }
           const reminders = (await harness.inspect(ctx)).tasks.filter(
             ({ record }) => record.kind === ScheduledReminder.definition.name,
           );
           expect(reminders).toHaveLength(1);
-          expect(reminders[0]!.record.state.status).toBe("sleeping");
+          expect(reminders[0]!.record.input).toMatchObject({ every: expect.anything() });
         } finally {
           await harness.close(ctx);
         }
