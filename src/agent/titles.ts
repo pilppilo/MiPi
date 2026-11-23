@@ -39,6 +39,33 @@ function addUsage(total: Usage, usage: Usage): void {
   }
 }
 
+/** Adds a request's spend to the conversation's `pi.usage`, in the caller's commit, as Pi Durable's own requests do. */
+export async function recordUsage(
+  tx: Parameters<Parameters<Harness["commit"]>[0]>[0],
+  conversationId: ConversationId,
+  model: { readonly provider: string; readonly id: string },
+  usage: Usage,
+): Promise<void> {
+  const ledger = await tx.doc(UsageDoc, conversationId);
+  const key = `${model.provider}/${model.id}`;
+  ledger.models[key] ??= zeroUsage();
+  addUsage(ledger.models[key] as Usage, usage);
+}
+
+/** The conversation's identity with the provider (OpenCode Go refuses a request without one), given if it has none. */
+export async function providerSession(
+  harness: Harness,
+  conversationId: ConversationId,
+): Promise<string> {
+  return (
+    (await harness.snapshot(ProviderDoc, conversationId, context))?.sessionId ??
+    (await harness.commit(
+      async (tx) => (await tx.doc(ProviderDoc, conversationId)).sessionId,
+      context,
+    ))
+  );
+}
+
 /**
  * Names an untitled conversation after its first message, in the caller's commit. Returns the title it gave when the
  * model should be asked for a better one (`writeTitle`), otherwise undefined.
@@ -74,12 +101,7 @@ export async function writeTitle(
     if (model === undefined) return false;
     // The conversation's own identity with the provider, as Pi Durable sends with its requests: OpenCode Go refuses a
     // request without one. A conversation that has none yet gets it, as Pi Durable gives it before its next request.
-    const sessionId =
-      (await harness.snapshot(ProviderDoc, conversationId, context))?.sessionId ??
-      (await harness.commit(
-        async (tx) => (await tx.doc(ProviderDoc, conversationId)).sessionId,
-        context,
-      ));
+    const sessionId = await providerSession(harness, conversationId);
     const reply = await models.completeSimple(
       model,
       {
@@ -102,10 +124,7 @@ export async function writeTitle(
       reply.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""),
     );
     return await harness.commit(async (tx) => {
-      const usage = await tx.doc(UsageDoc, conversationId);
-      const key = `${model.provider}/${model.id}`;
-      usage.models[key] ??= zeroUsage();
-      addUsage(usage.models[key] as Usage, reply.usage);
+      await recordUsage(tx, conversationId, model, reply.usage);
       // Only a reply that ended by itself: one cut off at the token limit is a model that went on, not a title.
       if (title === undefined || reply.stopReason !== "stop") return false;
       const meta = await tx.doc(ConversationMeta, conversationId);

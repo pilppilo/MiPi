@@ -16,7 +16,8 @@ import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/stora
 import { describe, expect, it } from "vitest";
 import { withSpikeToken } from "./spike.ts";
 import { createHarnessOptions } from "../src/agent/harness.ts";
-import { expectAlarm } from "./alarm.ts";
+import { HEARTBEAT_MS } from "../src/agent/alarm.ts";
+import { MEMORY_IDLE_MS } from "../src/agent/memory-pass.ts";
 import worker from "../src/worker/index.ts";
 import { MAX_CLIENT_FRAME_CHARACTERS, queuedInputs } from "../src/protocol.ts";
 import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
@@ -254,7 +255,7 @@ describe("chat application", () => {
     aliceSocket.close(1000, "test complete");
     bobSocket.close(1000, "test complete");
   });
-  it("clears the heartbeat alarm once a submitted turn settles", async () => {
+  it("replaces the heartbeat with the memory pass's wake once a submitted turn settles", async () => {
     const sessionId = "heartbeat-cleared";
     await configureOfflineModel(sessionId);
     const stub = env.AGENT.getByName(sessionId);
@@ -276,8 +277,16 @@ describe("chat application", () => {
       (message) => message.type === "command.result" && message.requestId === "heartbeat-prompt",
     );
 
-    // Whatever the submit path armed, `onWake` deletes the alarm once nothing can run.
-    await expectAlarm(stub, null);
+    // Whatever the submit path armed, the 60-second heartbeat goes once nothing can run. What stays is the memory
+    // pass's wake (M8), when the conversation will have been idle for `MEMORY_IDLE_MS`: no heartbeat while waiting.
+    let alarm: number | null = null;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      alarm = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
+      if (alarm !== null && alarm > Date.now() + 10 * HEARTBEAT_MS) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(alarm).toBeGreaterThan(Date.now() + MEMORY_IDLE_MS - 60_000);
+    expect(alarm).toBeLessThanOrEqual(Date.now() + MEMORY_IDLE_MS);
     socket.close(1000, "test complete");
   });
 

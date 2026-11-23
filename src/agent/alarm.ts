@@ -30,6 +30,13 @@ export function alarmTime(
   return times.length === 0 ? undefined : Math.min(...times);
 }
 
+/** The earliest of several doors' wakes, active when any is. */
+export function earliestWake(...wakes: readonly (TelegramWake | undefined)[]): TelegramWake {
+  const times = wakes.flatMap((wake) => (wake?.at === undefined ? [] : [wake.at]));
+  const active = wakes.some((wake) => wake?.active === true);
+  return times.length === 0 ? { active } : { at: Math.min(...times), active };
+}
+
 export class AlarmScheduler {
   readonly #storage: AlarmStorage;
   readonly #telegram: () => TelegramWake | undefined;
