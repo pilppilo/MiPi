@@ -62,7 +62,9 @@ Create a service token under **Access controls → Service credentials → Servi
 
 Keep the existing admin token available for deployments before Access is enabled. Set `MIPI_ACCESS_SKIP` only for localhost development. Use a separate application and token for production.
 
-On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on protected web routes. Verify Telegram and relay authentication once their handlers are present.
+On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on an owner `/api/` route, such as the WebSocket upgrade (`GET /api/sessions/<owner>`) or `GET /api/unlock`. A `200` from `/` with that token is expected: `wrangler.jsonc` runs the Worker first only for `/api/*`, so `/` is a static asset and Access lets the token through without the Worker seeing it. Verify Telegram and relay authentication once their handlers are present.
+
+Worker preview URLs are not covered by the hostname application, so disable preview URLs for the staging and production Workers, or protect them separately.
 
 ## Versions and changes
 
