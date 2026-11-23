@@ -4,130 +4,48 @@
  * Everything else is escaped text, as written.
  *
  * A reply is split before it is rendered, and each chunk is rendered on its own, so no tag ever spans two messages.
- * Code (fenced, then inline) is read before anything else, so `*` and `_` inside code stay as they are. `_` and `__`
- * are emphasis only at word boundaries, so `MIPI_DAILY_RUN_CAP` keeps its underscores. Spans are parsed recursively
- * and a marker without its partner stays literal, so tags are always well nested (Telegram refuses crossing tags).
+ * Fenced code is read before anything else; inline markdown is parsed by `markdown.ts`, shared with the web door, and
+ * a marker without its partner stays literal there, so tags are always well nested (Telegram refuses crossing tags).
  */
+import { CLOSE_FENCE, type Inline, languageOf, OPEN_FENCE, parseInline } from "./markdown.ts";
 import { splitForTelegram, TELEGRAM_TEXT_LIMIT } from "./telegram-text.ts";
 
 /** Room the splitter keeps for a code fence closed at a chunk's end and reopened at the next one's start. */
 export const FENCE_RESERVE = 32;
-/** A code block's language is shown only when it is this simple, so it can never break the attribute. */
-const LANGUAGE = /^[A-Za-z0-9_+-]{1,20}$/;
-/** An opening fence: its info string has no backtick (CommonMark), so "```foo```" on one line is not a fence. */
-const OPEN_FENCE = /^\s*```([^`]*)$/;
-/** A closing fence has nothing after it; a fence with an info string inside a block is content. */
-const CLOSE_FENCE = /^\s*```\s*$/;
 
 export const escapeHtml = (text: string): string =>
   text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 const escapeAttribute = (text: string): string => escapeHtml(text).replaceAll('"', "&quot;");
 
-/** A fence's language, when it is one the class may carry. */
-const languageOf = (info: string): string | undefined => {
-  const word = info.trim().split(/\s+/)[0] ?? "";
-  return LANGUAGE.test(word) ? word : undefined;
-};
+const TAGS = { strong: "b", em: "i", strike: "s" } as const;
 
-const LINK = /^\[([^\]\n]+)\]\((https?:\/\/[^\s()<>"]+)\)/;
-
-const MARKERS = [
-  { marker: "**", tag: "b" },
-  { marker: "__", tag: "b" },
-  { marker: "~~", tag: "s" },
-  { marker: "*", tag: "i" },
-  { marker: "_", tag: "i" },
-] as const;
-
-const isSpace = (char: string | undefined): boolean => char === undefined || /\s/.test(char);
-const isWord = (char: string | undefined): boolean =>
-  char !== undefined && /[\p{L}\p{N}]/u.test(char);
-const underscored = (marker: string): boolean => marker.startsWith("_");
-
-function canOpen(text: string, at: number, marker: string): boolean {
-  const after = text[at + marker.length];
-  if (isSpace(after)) return false;
-  // `**` is read before `*`: a lone `*` right before another is not an opener.
-  if (marker.length === 1 && after === marker) return false;
-  return !underscored(marker) || !isWord(text[at - 1]);
-}
-
-function canClose(text: string, at: number, marker: string): boolean {
-  if (isSpace(text[at - 1])) return false;
-  const after = text[at + marker.length];
-  if (marker.length === 1 && (after === marker || text[at - 1] === marker)) return false;
-  return !underscored(marker) || !isWord(after);
-}
-
-/**
- * Where the span opened just before `start` closes, or -1. The span holds at least one character, so `****` stays
- * literal. Code spans and links are opaque: a marker inside one closes nothing.
- */
-function closing(text: string, start: number, marker: string): number {
-  // From `start` itself, so a code span or link that opens the span is skipped whole too.
-  for (let at = start; at <= text.length - marker.length; at++) {
-    if (text[at] === "`") {
-      const end = text.indexOf("`", at + 1);
-      if (end !== -1) {
-        at = end;
-        continue;
+/** Inline nodes (`markdown.ts`) as Telegram HTML: every text escaped, so text never becomes a tag. */
+function inlineHtml(nodes: readonly Inline[]): string {
+  return nodes
+    .map((node) => {
+      switch (node.type) {
+        case "text":
+          return escapeHtml(node.text);
+        case "code":
+          return `<code>${escapeHtml(node.text)}</code>`;
+        case "link":
+          return `<a href="${escapeAttribute(node.href)}">${inlineHtml(node.children)}</a>`;
+        case "strong":
+        case "em":
+        case "strike":
+          return `<${TAGS[node.type]}>${inlineHtml(node.children)}</${TAGS[node.type]}>`;
+        default: {
+          const _: never = node;
+          throw new Error("Unknown inline node");
+        }
       }
-    }
-    if (text[at] === "[") {
-      const link = LINK.exec(text.slice(at));
-      if (link !== null) {
-        at += link[0].length - 1;
-        continue;
-      }
-    }
-    // Not right at the start: an empty span (`****`) stays literal.
-    if (at === start) continue;
-    if (!text.startsWith(marker, at) || !canClose(text, at, marker)) continue;
-    // `***`: the double marker closes at its last two, leaving the first to close an inner single one.
-    if (marker.length === 2 && text[at + 2] === marker[0]) continue;
-    return at;
-  }
-  return -1;
+    })
+    .join("");
 }
 
 /** One line's inline markdown as HTML. */
-export function renderInline(text: string): string {
-  let html = "";
-  let at = 0;
-  while (at < text.length) {
-    const char = text[at]!;
-    if (char === "`") {
-      const end = text.indexOf("`", at + 1);
-      if (end > at + 1) {
-        html += `<code>${escapeHtml(text.slice(at + 1, end))}</code>`;
-        at = end + 1;
-        continue;
-      }
-    }
-    if (char === "[") {
-      const link = LINK.exec(text.slice(at));
-      if (link !== null) {
-        html += `<a href="${escapeAttribute(link[2]!)}">${renderInline(link[1]!)}</a>`;
-        at += link[0].length;
-        continue;
-      }
-    }
-    const span = MARKERS.find(({ marker }) => text.startsWith(marker, at));
-    if (span !== undefined && canOpen(text, at, span.marker)) {
-      const end = closing(text, at + span.marker.length, span.marker);
-      if (end !== -1) {
-        const inner = text.slice(at + span.marker.length, end);
-        html += `<${span.tag}>${renderInline(inner)}</${span.tag}>`;
-        at = end + span.marker.length;
-        continue;
-      }
-    }
-    html += escapeHtml(char);
-    at += 1;
-  }
-  return html;
-}
+export const renderInline = (text: string): string => inlineHtml(parseInline(text));
 
 /** A chunk of markdown as Telegram HTML. Fences in it are balanced (see `splitMarkdownForTelegram`). */
 export function renderTelegramHtml(markdown: string): string {

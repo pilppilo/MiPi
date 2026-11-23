@@ -1,3 +1,4 @@
+import { Markdown } from "./Markdown.tsx";
 import type { ToolDiagnostic } from "../agent/pi/shared.ts";
 import { isNoSend } from "../lib/proactive-text.ts";
 import type {
@@ -259,7 +260,9 @@ function ToolExecution({
           <pre>{JSON.stringify(call.args, null, 2)}</pre>
         </details>
       ) : null}
-      {output === undefined || output.length === 0 ? null : <MessageText text={output} />}
+      {output === undefined || output.length === 0 ? null : (
+        <ToolOutput text={output} details={details} open={status === "failed"} />
+      )}
       {details === undefined ? null : (
         <details>
           <summary>Details</summary>
@@ -286,6 +289,50 @@ const toolStatusLabel: Record<ToolDisplayStatus, string> = {
   failed: "Failed",
   missing: "No result",
 };
+
+/** Roles whose text is the model's own markdown, shown formatted; everything else is shown as written. */
+const formattedRoles: ReadonlySet<TranscriptEntry["role"]> = new Set(["assistant", "compaction"]);
+
+/** Past these, a tool's output starts collapsed: a fetched page can be 50,000 characters. */
+export const TOOL_OUTPUT_OPEN_CHARS = 600;
+export const TOOL_OUTPUT_OPEN_LINES = 12;
+
+/**
+ * A tool's output: shown as written, and collapsed behind a one-line summary when it is long, unless `open` (a
+ * failure, so it shows at once). The summary names what the output is about (a fetched page's URL from the tool's
+ * details) and how long it is.
+ */
+export function ToolOutput({
+  text,
+  details,
+  open,
+}: {
+  readonly text: string;
+  readonly details?: unknown;
+  readonly open: boolean;
+}) {
+  const long =
+    text.length > TOOL_OUTPUT_OPEN_CHARS || text.split("\n").length > TOOL_OUTPUT_OPEN_LINES;
+  if (!long || open) return <MessageText text={text} />;
+  // `in` on the tool's own `details` (unknown on the wire): `web_fetch` puts the page's URL there.
+  const url =
+    typeof details === "object" &&
+    details !== null &&
+    "url" in details &&
+    typeof details.url === "string"
+      ? details.url
+      : undefined;
+  const firstLine = (text.split("\n").find((line) => line.trim().length > 0) ?? "").trim();
+  const subject = url ?? (firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine);
+  return (
+    <details className="tool-output">
+      <summary>
+        {subject} · {text.length.toLocaleString("en-US")} characters
+      </summary>
+      <MessageText text={text} />
+    </details>
+  );
+}
 
 const roleLabel: Record<TranscriptEntry["role"], string> = {
   user: "User",
@@ -337,7 +384,11 @@ export function TranscriptMessage({
         <EntryTitle entryId={entry.id} label={roleLabel[entry.role]} timestamp={timestamp} />
         {!entry.canFork || onFork === undefined ? null : <ForkAction onFork={onFork} />}
       </header>
-      <MessageText text={entry.text} />
+      {formattedRoles.has(entry.role) ? (
+        <Markdown text={entry.text} />
+      ) : (
+        <MessageText text={entry.text} />
+      )}
       {entry.diagnostics === undefined ? null : <Diagnostics diagnostics={entry.diagnostics} />}
     </article>
   );

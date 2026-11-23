@@ -209,3 +209,82 @@ describe("transcript rendering", () => {
     expect(transcript.indexOf("Vienna result")).toBeLessThan(transcript.indexOf("Graz result"));
   });
 });
+
+describe("formatted replies (COD-190)", () => {
+  it("renders an assistant reply's markdown, and a user's message as written", () => {
+    const html = render(
+      [
+        entry(1, "user", "**not bold** and `not code`"),
+        entry(
+          2,
+          "assistant",
+          "**The problem:** it's *slow*.\n\n- one `code`\n- two [docs](https://example.com/docs)\n\n```\nlet x = 1;\n```",
+        ),
+      ],
+      [],
+    );
+    expect(html).toContain("<p>**not bold** and `not code`</p>");
+    expect(html).toContain("<strong>The problem:</strong> it&#x27;s <em>slow</em>.");
+    expect(html).toContain("<ul><li>one <code>code</code></li>");
+    expect(html).toContain(
+      '<a href="https://example.com/docs" target="_blank" rel="noopener noreferrer">docs</a>',
+    );
+    expect(html).toContain("<pre><code>let x = 1;</code></pre>");
+    expect(html).not.toContain("**The problem");
+  });
+
+  it("keeps HTML and other link schemes in a reply as text", () => {
+    const html = render(
+      [
+        entry(
+          1,
+          "assistant",
+          '<script>alert("x")</script> [click](javascript:alert(1)) <img src=x onerror=alert(1)>',
+        ),
+      ],
+      [],
+    );
+    expect(html).not.toContain("<script>");
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<a ");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("[click](javascript:alert(1))");
+  });
+});
+
+describe("tool output (COD-190)", () => {
+  const fetched = `<fetched url="https://example.com/">\n${"Page text. ".repeat(100)}\n</fetched>`;
+  const call: TranscriptEntry = {
+    ...entry(1, "assistant", ""),
+    toolCalls: [{ callId: "f1", name: "web_fetch", args: { url: "https://example.com/" } }],
+  };
+  const result = (text: string, isError = false, details?: unknown): TranscriptEntry =>
+    entry(2, "tool", text, {
+      toolResult: {
+        callId: "f1",
+        name: "web_fetch",
+        isError,
+        ...(details === undefined ? {} : { details: details as never }),
+      },
+    });
+
+  it("collapses a long result behind its URL and size", () => {
+    const html = render(
+      [call, result(fetched, false, { url: "https://example.com/", cut: false })],
+      [],
+    );
+    expect(html).toContain(
+      `<details class="tool-output"><summary>https://example.com/ · ${fetched.length.toLocaleString("en-US")} characters</summary>`,
+    );
+    expect(html).not.toMatch(/<details class="tool-output" open/);
+  });
+
+  it("keeps a short result and a failed one open", () => {
+    expect(render([call, result("Not fetched: IP addresses are refused.")], [])).not.toContain(
+      "tool-output",
+    );
+    const failed = render([call, result(`Error: ${"x".repeat(2000)}`, true)], []);
+    expect(failed).not.toContain('class="tool-output"');
+    expect(failed).toContain("Error: xxx");
+  });
+});
