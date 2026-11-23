@@ -101,7 +101,9 @@ describe("fixture databases", () => {
       // The repeat's stored time is long past: on opening, it is skipped as late and sleeps until its next time, without
       // a turn. Until it does, it may still be running.
       let reminder: { status?: string; skippedLate?: number } = {};
-      for (let attempt = 0; attempt < 200 && reminder.status !== "sleeping"; attempt++) {
+      // Until it has woken: it starts out sleeping too, on its stored time, before `resume()` runs it.
+      const woken = () => reminder.status === "sleeping" && (reminder.skippedLate ?? 0) >= 1;
+      for (let attempt = 0; attempt < 200 && !woken(); attempt++) {
         reminder = await runInDurableObject(stub, (_instance, state) => {
           const [row] = state.storage.sql
             .exec<{ record: string }>(`SELECT record FROM tasks WHERE kind = '"app.reminder"'`)
@@ -116,7 +118,7 @@ describe("fixture databases", () => {
               : { skippedLate: record.state.checkpoint.skippedLate }),
           };
         });
-        if (reminder.status !== "sleeping") await new Promise((resolve) => setTimeout(resolve, 10));
+        if (!woken()) await new Promise((resolve) => setTimeout(resolve, 10));
       }
       expect(reminder.status).toBe("sleeping");
       expect(reminder.skippedLate).toBeGreaterThanOrEqual(1);

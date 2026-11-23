@@ -434,9 +434,8 @@ export class MemoryPassRuntime {
    * The earliest pass due, or undefined when none can call the model: memory full, or the scheduled runs paused.
    * Reads only: the session documents through snapshots, which never create one, and the entries in one commit (a
    * write here raced every other commit, and in tests a second harness on the same storage). It reads no conversation
-   * document: on a cold start, a read of one (`ConversationMeta`) waited on the input gate that an export beginning
-   * then held, while the export waited in `harness.close()` for that read's commit, and the object was reset. A deploy
-   * backs up first, so that is the deploy's backup failing.
+   * document, so a look stays a short scan. (A look in flight once held up an export that closed the agent inside
+   * `blockConcurrencyWhile`; maintenance now closes it outside, `agent-do.ts` `#closeForMaintenance`.)
    */
   async #earliest(): Promise<number | undefined> {
     const { harness } = this.#options;
