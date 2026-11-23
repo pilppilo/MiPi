@@ -30,6 +30,8 @@ export type {
   EntryId,
   EntryRecord,
   HarnessOptions,
+  SubmissionId,
+  SubmissionRecord,
   TaskGraph,
   ToolExecutionApi,
   ToolRegistration,

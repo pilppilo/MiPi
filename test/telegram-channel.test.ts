@@ -1,0 +1,543 @@
+/**
+ * The Telegram door inside the agent: admission, receipts, commands, replies and the outbox, on a real harness with a
+ * faux model over Durable Object SQLite. A "restart" closes the harness and the channel and opens new ones on the same
+ * storage. The outbox's clock is the test's, so pacing and retry waits pass without sleeping.
+ */
+import { runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { createModels } from "@earendil-works/pi-ai/models";
+import {
+  fauxAssistantMessage,
+  type FauxResponseStep,
+  fauxProvider,
+  fauxText,
+} from "@earendil-works/pi-ai/providers/faux";
+import { Harness } from "@earendil-works/pi-durable";
+import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
+import { describe, expect, it } from "vitest";
+import { ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
+import { createHarnessOptions } from "../src/agent/harness.ts";
+import { ModelList } from "../src/agent/model-list.ts";
+import {
+  HELP_TEXT,
+  NON_TEXT_HINT,
+  RECEIPT_WINDOW_MS,
+  RECEIPTS_KEPT,
+  TelegramChannel,
+  TelegramChannelRuntime,
+  type TelegramChannelState,
+  addReceipt,
+} from "../src/agent/telegram.ts";
+import { type SendResult, TelegramOutbox } from "../src/agent/telegram-outbox.ts";
+import type { TelegramInbound } from "../src/lib/telegram-update.ts";
+
+const ctx = BACKGROUND_CONTEXT;
+const CHAT = 4242;
+
+type Sent = { readonly chatId: number; readonly text: string };
+type SendBehaviour = (chatId: number, text: string, call: number) => Promise<SendResult>;
+
+const delivered: SendBehaviour = async (_chatId, _text, call) => ({
+  kind: "sent",
+  messageId: 1000 + call,
+});
+
+interface Agent {
+  readonly harness: Harness;
+  readonly channel: TelegramChannelRuntime;
+  readonly sent: Sent[];
+  /** Waits for every turn, then runs what the alarm would. */
+  settle(): Promise<void>;
+  restart(options?: AgentOptions): Promise<Agent>;
+  close(): Promise<void>;
+}
+
+interface AgentOptions {
+  readonly responses?: readonly FauxResponseStep[];
+  readonly send?: SendBehaviour;
+  readonly modelIds?: () => Promise<string[]>;
+}
+
+type Storage = Awaited<ReturnType<typeof openDurableObjectSqliteStorage>>;
+
+/** Runs `test` in a Durable Object of its own, with a way to open its storage again after a "restart". */
+let objects = 0;
+const inObject = (test: (storage: () => Promise<Storage>) => Promise<void>): Promise<void> =>
+  runInDurableObject(
+    env.AGENT.getByName(`telegram-${++objects}-${Date.now()}`),
+    async (_instance, state) => {
+      // Let MipiAgent finish opening its own harness before opening one beside it.
+      await state.blockConcurrencyWhile(async () => {});
+      await test(() => openDurableObjectSqliteStorage(state.storage));
+    },
+  );
+
+const clock = { now: Date.now() };
+
+async function openAgent(
+  storage: () => Promise<Storage>,
+  options: AgentOptions = {},
+): Promise<Agent> {
+  const faux = fauxProvider();
+  faux.setResponses([...(options.responses ?? [])]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const harness = await Harness.open(
+    await storage(),
+    createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+    ctx,
+  );
+  const sent: Sent[] = [];
+  const behaviour = options.send ?? delivered;
+  let calls = 0;
+  const channel = new TelegramChannelRuntime({
+    harness,
+    owner: "jerome",
+    timeZone: "America/Chicago",
+    profile: "default",
+    version: "0.0.0-test",
+    modelList: new ModelList(options.modelIds ?? (async () => ["deepseek-v4.1-flash"])),
+    send: async (chatId, text) => {
+      calls += 1;
+      const result = await behaviour(chatId, text, calls);
+      if (result.kind === "sent") sent.push({ chatId, text });
+      return result;
+    },
+    armAlarm: async () => {},
+    onWakeChange: () => {},
+    report: () => {},
+    now: () => clock.now,
+  });
+  await channel.start();
+  const agent: Agent = {
+    harness,
+    channel,
+    sent,
+    settle: async () => {
+      await harness.waitForIdle(ctx);
+      await channel.recover();
+      // Let pacing and retry waits pass, as the alarm would.
+      for (let rounds = 0; rounds < 50; rounds++) {
+        const at = channel.wake().at;
+        if (at === undefined) break;
+        clock.now = Math.max(clock.now, at);
+        await channel.recover();
+      }
+    },
+    restart: async (next = {}) => {
+      await agent.close();
+      return openAgent(storage, next);
+    },
+    close: async () => {
+      channel.close();
+      await harness.close(ctx);
+    },
+  };
+  return agent;
+}
+
+const text = (updateId: number, message: string, chatId = CHAT): TelegramInbound => ({
+  kind: "text",
+  updateId,
+  chatId,
+  text: message,
+});
+
+const command = (
+  updateId: number,
+  name: Extract<TelegramInbound, { kind: "command" }>["command"],
+  argument = "",
+): TelegramInbound => ({ kind: "command", updateId, chatId: CHAT, command: name, argument });
+
+const answers = (...texts: string[]): FauxResponseStep[] =>
+  texts.map((reply) => fauxAssistantMessage([fauxText(reply)]));
+
+const plain = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
+
+const channelState = (harness: Harness): Promise<TelegramChannelState> =>
+  harness.commit(async (tx) => plain(await tx.doc(TelegramChannel)), ctx);
+
+const outbox = (harness: Harness) =>
+  harness.commit(async (tx) => plain(await tx.doc(TelegramOutbox)), ctx);
+
+const boundId = (harness: Harness, chatId = CHAT) =>
+  harness.commit(
+    async (tx) => (await tx.doc(ChannelBindings, `tg:${chatId}`, null)).conversationId,
+    ctx,
+  );
+
+const userTexts = async (harness: Harness, conversationId: number): Promise<string[]> => {
+  const conversation = await harness.conversation(conversationId as never, ctx);
+  const page = await conversation!.entries({ order: "ascending" }, 100, undefined, ctx);
+  return page.items.flatMap((entry) => {
+    const message = entry.model?.[0];
+    if (message?.role !== "user") return [];
+    const content =
+      typeof message.content === "string"
+        ? message.content
+        : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+    return [content.replace(/^\[[^\]]*\]\n/, "")];
+  });
+};
+
+describe("Telegram admission", () => {
+  it("answers an allowlisted message once, in its chat, stamped like every door", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, { responses: answers("Hello back") });
+      try {
+        await agent.channel.admit(text(1, "Hello"));
+        await agent.settle();
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "Hello back" }]);
+        const conversationId = (await boundId(agent.harness))!;
+        expect(await userTexts(agent.harness, conversationId)).toEqual(["Hello"]);
+        const conversation = await agent.harness.conversation(conversationId as never, ctx);
+        const page = await conversation!.entries({ order: "ascending" }, 10, undefined, ctx);
+        const first = page.items[0]!.model![0]!;
+        expect(typeof first.content === "string" ? first.content : "").toMatch(
+          /^\[jerome · .+\]\nHello$/,
+        );
+        expect(await channelState(agent.harness)).toMatchObject({ inputs: [], commands: [] });
+        expect(agent.channel.wake()).toEqual({ active: false });
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("ignores a replay before and after the answer, and across a restart", () =>
+    inObject(async (storage) => {
+      let agent = await openAgent(storage, { responses: answers("Once") });
+      try {
+        await agent.channel.admit(text(7, "Only once"));
+        await agent.channel.admit(text(7, "Only once"));
+        await agent.settle();
+        await agent.channel.admit(text(7, "Only once"));
+        agent = await agent.restart();
+        await agent.channel.admit(text(7, "Only once"));
+        await agent.settle();
+        expect(agent.sent).toEqual([]);
+        const conversationId = (await boundId(agent.harness))!;
+        expect(await userTexts(agent.harness, conversationId)).toEqual(["Only once"]);
+        expect((await outbox(agent.harness)).replies).toHaveLength(1);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("keeps replays out of the new conversation after /new, and /new itself runs once", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, { responses: answers("First") });
+      try {
+        await agent.channel.admit(text(1, "Before"));
+        await agent.settle();
+        const before = (await boundId(agent.harness))!;
+        await agent.channel.admit(command(2, "new"));
+        const after = (await boundId(agent.harness))!;
+        expect(after).not.toBe(before);
+        // Telegram retries both updates.
+        await agent.channel.admit(command(2, "new"));
+        await agent.channel.admit(text(1, "Before"));
+        await agent.settle();
+        expect(await boundId(agent.harness)).toBe(after);
+        expect(await userTexts(agent.harness, after)).toEqual([]);
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
+          "First",
+          "Started a new conversation.",
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("sends the answer to the chat the message came from, even after /new rebinds it", () =>
+    inObject(async (storage) => {
+      const release = Promise.withResolvers<void>();
+      const slow: FauxResponseStep = async () => {
+        await release.promise;
+        return fauxAssistantMessage([fauxText("Late answer")]);
+      };
+      const agent = await openAgent(storage, { responses: [slow] });
+      try {
+        await agent.channel.admit(text(1, "Think about it"));
+        await agent.channel.admit(command(2, "new"));
+        release.resolve();
+        await agent.settle();
+        expect(agent.sent).toEqual([
+          { chatId: CHAT, text: "Started a new conversation." },
+          { chatId: CHAT, text: "Late answer" },
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("recovers an answer committed before its reply was queued", () =>
+    inObject(async (storage) => {
+      let agent = await openAgent(storage, { responses: answers("Recovered") });
+      try {
+        await agent.channel.admit(text(1, "Hi"));
+        // The instance dies right after the answer commits: nothing turned it into a reply yet.
+        agent.channel.close();
+        await agent.harness.waitForIdle(ctx);
+        expect((await outbox(agent.harness)).replies).toEqual([]);
+        agent = await agent.restart();
+        await agent.settle();
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "Recovered" }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("tells the chat when a message ends without an answer", () =>
+    inObject(async (storage) => {
+      const failing: FauxResponseStep = () =>
+        fauxAssistantMessage([], { stopReason: "error", errorMessage: "provider down" });
+      const agent = await openAgent(storage, {
+        responses: [failing, failing, failing, failing, failing, failing],
+      });
+      try {
+        await agent.channel.admit(text(1, "Hello?"));
+        await agent.settle();
+        expect(agent.sent).toHaveLength(1);
+        expect(agent.sent[0]!.text).toMatch(/^I couldn't answer that message \(.+\)\./);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("answers a photo or other non-text message with a hint, once", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage);
+      try {
+        await agent.channel.admit({ kind: "non-text", updateId: 3, chatId: CHAT });
+        await agent.channel.admit({ kind: "non-text", updateId: 3, chatId: CHAT });
+        await agent.settle();
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: NON_TEXT_HINT }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+});
+
+describe("Telegram commands", () => {
+  it("answers /start and /version without the model", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage);
+      try {
+        await agent.channel.admit(command(1, "start"));
+        await agent.channel.admit(command(2, "version"));
+        await agent.settle();
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([HELP_TEXT, "MiPi 0.0.0-test"]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("shows, validates and sets the profile", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage);
+      try {
+        await agent.channel.admit(command(1, "profile"));
+        await agent.channel.admit(command(2, "profile", "nope"));
+        await agent.channel.admit(command(3, "profile", "empty"));
+        await agent.settle();
+        const [shown, refused, set] = agent.sent.map(({ text: sent }) => sent);
+        expect(shown).toMatch(/^Profile: default /);
+        expect(refused).toBe("nope is not a profile. Pick one of: default, empty, pidu.");
+        expect(set).toBe("Profile set to empty.");
+        const conversationId = (await boundId(agent.harness))!;
+        const profile = await agent.harness.commit(
+          async (tx) => (await tx.doc(ConversationMeta, conversationId as never)).profile,
+          ctx,
+        );
+        expect(profile).toBe("empty");
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("acknowledges /model <id> before the slow model list answers, then sets or refuses it", () =>
+    inObject(async (storage) => {
+      const list = Promise.withResolvers<string[]>();
+      const agent = await openAgent(storage, { modelIds: () => list.promise });
+      try {
+        // Admission returns although the lookup hasn't.
+        await agent.channel.admit(command(1, "model", "deepseek-v4.1-flash"));
+        await agent.channel.admit(command(2, "model", "made-up-model"));
+        expect((await channelState(agent.harness)).commands).toHaveLength(2);
+        expect(agent.channel.wake().active).toBe(true);
+        list.resolve(["deepseek-v4.1-flash"]);
+        await agent.settle();
+        const [set, refused] = agent.sent.map(({ text: sent }) => sent);
+        expect(set).toBe("Model set to deepseek-v4.1-flash.");
+        expect(refused).toMatch(/^made-up-model is not available/);
+        const conversation = await agent.harness.conversation(
+          (await boundId(agent.harness)) as never,
+          ctx,
+        );
+        expect((await conversation!.agent(ctx)).model?.modelId).toBe("deepseek-v4.1-flash");
+        expect((await channelState(agent.harness)).commands).toEqual([]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("answers a deferred /model after a restart, once", () =>
+    inObject(async (storage) => {
+      let agent = await openAgent(storage, { modelIds: () => new Promise(() => {}) });
+      try {
+        await agent.channel.admit(command(1, "model", "deepseek-v4.1-flash"));
+        agent = await agent.restart();
+        await agent.channel.admit(command(1, "model", "deepseek-v4.1-flash"));
+        await agent.settle();
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
+          "Model set to deepseek-v4.1-flash.",
+        ]);
+      } finally {
+        await agent.close();
+      }
+    }));
+});
+
+describe("Telegram replies", () => {
+  it("sends a reply longer than one message in order", () =>
+    inObject(async (storage) => {
+      const long = Array.from({ length: 900 }, (_, index) => `word${index}`).join(" ");
+      expect(long.length).toBeGreaterThan(4096);
+      const agent = await openAgent(storage, { responses: answers(long) });
+      try {
+        await agent.channel.admit(text(1, "Talk a lot"));
+        await agent.settle();
+        expect(agent.sent.length).toBeGreaterThan(1);
+        for (const { text: sent } of agent.sent) expect(sent.length).toBeLessThanOrEqual(4096);
+        expect(agent.sent.map(({ text: sent }) => sent).join(" ")).toBe(long);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("keeps a confirmed first chunk and sends the rest after a restart between chunks", () =>
+    inObject(async (storage) => {
+      const long = `${"a".repeat(4000)}\n\n${"b".repeat(100)}`;
+      let first: Agent | undefined;
+      first = await openAgent(storage, {
+        responses: answers(long),
+        send: async (_chatId, _text, call) => {
+          // The instance goes away right after Telegram confirmed chunk 1.
+          if (call === 1) first!.channel.close();
+          return { kind: "sent", messageId: call };
+        },
+      });
+      let agent = first;
+      try {
+        await agent.channel.admit(text(1, "Two parts"));
+        await agent.settle();
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual(["a".repeat(4000)]);
+        agent = await agent.restart();
+        await agent.settle();
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual(["b".repeat(100)]);
+        const [reply] = (await outbox(agent.harness)).replies;
+        expect(reply!.chunks.map(({ status }) => status)).toEqual(["sent", "sent"]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("records a send cut off mid-request as delivery-unknown and skips the rest of that reply", () =>
+    inObject(async (storage) => {
+      const long = `${"a".repeat(4000)}\n\n${"b".repeat(100)}`;
+      let agent = await openAgent(storage, {
+        responses: answers(long),
+        // The request never comes back: the instance dies while it is out.
+        send: () => new Promise(() => {}),
+      });
+      try {
+        await agent.channel.admit(text(1, "Two parts"));
+        await agent.harness.waitForIdle(ctx);
+        await agent.channel.reconcile();
+        void agent.channel.drain();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        agent = await agent.restart({ responses: answers("Next one") });
+        await agent.settle();
+        const [cut] = (await outbox(agent.harness)).replies;
+        expect(cut!.chunks.map(({ status }) => status)).toEqual([
+          "delivery-unknown",
+          "skipped-after-failure",
+        ]);
+        // The chat isn't blocked: the next reply goes out.
+        await agent.channel.admit(text(2, "Still there?"));
+        await agent.settle();
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "Next one" }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("ends a reply refused for good (a revoked token, a blocked bot) without waking again", () =>
+    inObject(async (storage) => {
+      let calls = 0;
+      const agent = await openAgent(storage, {
+        responses: answers("Nobody hears this"),
+        send: async () => {
+          calls += 1;
+          return { kind: "failed", reason: "403: Forbidden: bot was blocked by the user" };
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "Hi"));
+        await agent.settle();
+        await agent.channel.recover();
+        expect(calls).toBe(1);
+        const [reply] = (await outbox(agent.harness)).replies;
+        expect(reply!.chunks[0]).toMatchObject({ status: "failed" });
+        expect(agent.channel.wake()).toEqual({ active: false });
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("waits out a 429 and then sends", () =>
+    inObject(async (storage) => {
+      const attempts: number[] = [];
+      const agent = await openAgent(storage, {
+        responses: answers("Patience"),
+        send: async (_chatId, _text, call) => {
+          attempts.push(clock.now);
+          return call === 1
+            ? { kind: "retry", afterMs: 30_000, reason: "429: Too Many Requests" }
+            : { kind: "sent", messageId: 9 };
+        },
+      });
+      try {
+        await agent.channel.admit(text(1, "Hi"));
+        await agent.settle();
+        expect(attempts).toHaveLength(2);
+        expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(30_000);
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "Patience" }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+});
+
+describe("Telegram receipts", () => {
+  it("drop past the window or the cap, but never while their update is pending", () => {
+    const now = 10 * RECEIPT_WINDOW_MS;
+    const state: TelegramChannelState = {
+      receipts: [
+        { updateId: 1, at: now - RECEIPT_WINDOW_MS - 1 },
+        { updateId: 2, at: now - RECEIPT_WINDOW_MS - 1 },
+        { updateId: 3, at: now - 1 },
+      ],
+      inputs: [{ updateId: 2, chatId: CHAT, conversationId: 1, submissionId: 1 }],
+      commands: [],
+    };
+    addReceipt(state, 4, now);
+    expect(state.receipts.map(({ updateId }) => updateId)).toEqual([2, 3, 4]);
+
+    const full: TelegramChannelState = { receipts: [], inputs: [], commands: [] };
+    for (let id = 0; id < RECEIPTS_KEPT + 10; id++) addReceipt(full, id, now);
+    expect(full.receipts).toHaveLength(RECEIPTS_KEPT);
+    expect(full.receipts[0]!.updateId).toBe(10);
+  });
+});

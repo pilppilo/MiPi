@@ -62,9 +62,36 @@ Create a service token under **Access controls → Service credentials → Servi
 
 Keep the existing admin token available for deployments before Access is enabled. Set `MIPI_ACCESS_SKIP` only for localhost development. Use a separate application and token for production.
 
-On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on an owner `/api/` route, such as the WebSocket upgrade (`GET /api/sessions/<owner>`) or `GET /api/unlock`. A `200` from `/` with that token is expected: `wrangler.jsonc` runs the Worker first only for `/api/*`, so `/` is a static asset and Access lets the token through without the Worker seeing it. Verify Telegram and relay authentication once their handlers are present.
+On staging, verify signed-out HTTP and WebSocket requests are denied, then sign in on desktop and phone and exchange a chat message on each. Verify signed-out `/api/health` returns only `{"ok":true}`. Run a backup with the service token and verify the same token is refused on an owner `/api/` route, such as the WebSocket upgrade (`GET /api/sessions/<owner>`) or `GET /api/unlock`. A `200` from `/` with that token is expected: `wrangler.jsonc` runs the Worker first only for `/api/*`, so `/` is a static asset and Access lets the token through without the Worker seeing it. Verify relay authentication once its handler is present; Telegram's checks are in the Telegram section below.
 
 Worker preview URLs are not covered by the hostname application, so disable preview URLs for the staging and production Workers, or protect them separately.
+
+## Telegram
+
+Each lane has its own bot. Telegram stays off for a lane until its GitHub Environment has the bot token. Set it up in this order; all of it can be done before the code is deployed.
+
+**1. Telegram: create the bot.** Send `/newbot` to [@BotFather](https://t.me/BotFather), give it a name and a username ending in `bot`. It replies with a token (`123456789:AAH…`): that is `TELEGRAM_BOT_TOKEN`. The username without `@` is `TELEGRAM_BOT_USERNAME`. Send anything to [@userinfobot](https://t.me/userinfobot): the Id it replies with is `TELEGRAM_ALLOWED_USER_IDS` (several ids are separated by commas). Make a webhook secret of 32–64 random letters and digits (a password manager's generator with symbols off): that is `TELEGRAM_WEBHOOK_SECRET`.
+
+**2. GitHub: store the values.** Settings → Environments → `staging` (or `production`):
+
+| Where                                            | Name                        | Value                      |
+| ------------------------------------------------ | --------------------------- | -------------------------- |
+| Environment secrets → Add environment secret     | `TELEGRAM_BOT_TOKEN`        | the bot's token            |
+| Environment secrets → Add environment secret     | `TELEGRAM_WEBHOOK_SECRET`   | the random secret          |
+| Environment variables → Add environment variable | `TELEGRAM_ALLOWED_USER_IDS` | your Telegram user id      |
+| Environment variables → Add environment variable | `TELEGRAM_BOT_USERNAME`     | the bot's username, no `@` |
+
+The deploy stops with an error naming what is missing if only some are set.
+
+**3. Cloudflare: let Telegram past Access.** Zero Trust → Access controls → Applications → Add an application → Self-hosted. Name it `mipi-staging-telegram`, use the same hostname as the lane's Access application with **Path** `api/telegram` (no leading slash), and add a policy with **Action: Bypass**, **Include: Everyone**, as for `/api/health`. The Worker routes `/api/telegram` before Access authentication and checks the webhook secret itself.
+
+**4. Deploy.** Merging to `main` deploys staging; the deploy's last step, **Register the Telegram webhook**, points the bot at `<worker>/api/telegram` and prints what Telegram reports (`url`, no `last_error_message`). Values added after a deploy take effect on the next one: Actions → deploy → Run workflow → target.
+
+**5. Verify.**
+
+- Open the bot, press **Start**, send `hi`: one reply. `/version` answers the version, `/new` answers "Started a new conversation.".
+- `curl -X POST <worker>/api/telegram` answers 401 `{"error":"Unauthorized"}` (the Worker's own check, so the bypass works); a `GET` answers 405.
+- A message from another account, or in a group, gets no answer.
 
 ## Versions and changes
 
