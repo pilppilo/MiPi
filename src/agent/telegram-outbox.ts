@@ -323,7 +323,8 @@ export function recordSend(
             `${send.key}:${half}`,
             text,
             depth + 1,
-            chunk.mode === "plain" ? "plain" : "html",
+            // An M5 chunk has no HTML: its halves stay plain, as it was.
+            chunk.mode === "plain" || chunk.html === undefined ? "plain" : "html",
           ),
         ),
       );

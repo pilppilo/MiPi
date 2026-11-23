@@ -11,6 +11,8 @@ COD-153 (M6, part 2 of 3): Telegram messages look right and get through.
   - Markers inside code stay as they are.
   - A marker without its partner stays literal.
   - Tags never cross.
+  - A code span or link inside emphasis stays whole, also right at its start.
+  - CRLF line endings are read like LF.
 - A reply is split before it is rendered, so no tag spans two messages. A code block cut by a split is closed and reopened, and the splitter keeps room for those fences.
 - If Telegram can't read a chunk's HTML ("can't parse entities"), that chunk is sent once more as plain text (the markdown source). The switch is saved first, so a restart can't send the broken HTML again.
 - If Telegram finds a chunk too long, only that chunk is split in two, in place. A chunk is split at most three times.

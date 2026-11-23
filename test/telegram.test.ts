@@ -337,6 +337,23 @@ describe("outbox", () => {
     expect(pickSend(state, now + PER_CHAT_GAP_MS, none)).toMatchObject({ replyId: "after" });
   });
 
+  it("keeps the halves of an M5 chunk plain", () => {
+    const text = `${"a".repeat(3000)}\n\n${"b".repeat(3000)}`;
+    const state: OutboxState = {
+      replies: [
+        { id: "old", chatId: 1, createdAt: 0, chunks: [{ text, status: "pending", attempts: 0 }] },
+      ],
+      pacedUntil: {},
+    };
+    const send = pickSend(state, 0, new Set())!;
+    expect(send.html).toBeUndefined();
+    recordSend(state, send, { kind: "too-long", reason: "400: message is too long" }, 0);
+    const halves = state.replies[0]!.chunks;
+    expect(halves).toHaveLength(2);
+    expect(halves.map(({ mode }) => mode)).toEqual(["plain", "plain"]);
+    expect(pickSend(state, 0, new Set())!.html).toBeUndefined();
+  });
+
   it("fails a too-long chunk that can't be halved instead of sending an empty half", () => {
     const state = empty();
     enqueueReply(state, { id: "r", chatId: 1, text: "x" }, 0);

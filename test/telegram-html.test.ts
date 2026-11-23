@@ -131,4 +131,18 @@ describe("the review's cases", () => {
       '<i>see <a href="https://example.com/a*b">docs</a> now</i>',
     );
   });
+
+  it("skips a code span or link that opens an emphasis span", () => {
+    expect(renderInline("**`a**b`**")).toBe("<b><code>a**b</code></b>");
+    expect(renderInline("*[docs](https://example.com/a*b)*")).toBe(
+      '<i><a href="https://example.com/a*b">docs</a></i>',
+    );
+  });
+
+  it("reads CRLF line endings like LF", () => {
+    expect(renderTelegramHtml("# Title\r\n> quote\r\nbody")).toBe(
+      "<b>Title</b>\n<blockquote>quote</blockquote>\nbody",
+    );
+    expect(splitMarkdownForTelegram("```ts\r\nx\r\n```")).toEqual(["```ts\nx\n```"]);
+  });
 });

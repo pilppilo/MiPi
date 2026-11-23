@@ -65,7 +65,8 @@ function canClose(text: string, at: number, marker: string): boolean {
  * literal. Code spans and links are opaque: a marker inside one closes nothing.
  */
 function closing(text: string, start: number, marker: string): number {
-  for (let at = start + 1; at <= text.length - marker.length; at++) {
+  // From `start` itself, so a code span or link that opens the span is skipped whole too.
+  for (let at = start; at <= text.length - marker.length; at++) {
     if (text[at] === "`") {
       const end = text.indexOf("`", at + 1);
       if (end !== -1) {
@@ -80,6 +81,8 @@ function closing(text: string, start: number, marker: string): number {
         continue;
       }
     }
+    // Not right at the start: an empty span (`****`) stays literal.
+    if (at === start) continue;
     if (!text.startsWith(marker, at) || !canClose(text, at, marker)) continue;
     // `***`: the double marker closes at its last two, leaving the first to close an inner single one.
     if (marker.length === 2 && text[at + 2] === marker[0]) continue;
@@ -128,7 +131,7 @@ export function renderInline(text: string): string {
 
 /** A chunk of markdown as Telegram HTML. Fences in it are balanced (see `splitMarkdownForTelegram`). */
 export function renderTelegramHtml(markdown: string): string {
-  const lines = markdown.split("\n");
+  const lines = markdown.replaceAll("\r\n", "\n").split("\n");
   const out: string[] = [];
   let quote: string[] = [];
   const flushQuote = () => {
@@ -178,7 +181,11 @@ export function splitMarkdownForTelegram(
   text: string,
   limit: number = TELEGRAM_TEXT_LIMIT,
 ): string[] {
-  const pieces = splitForTelegram(text, Math.max(2, limit - FENCE_RESERVE));
+  // CRLF from a tool or a model would leave a stray `\r` in headings, quotes and fences.
+  const pieces = splitForTelegram(
+    text.replaceAll("\r\n", "\n"),
+    Math.max(2, limit - FENCE_RESERVE),
+  );
   const chunks: string[] = [];
   /** The language of a block still open at the end of the last piece; `""` for one without. */
   let open: string | undefined;

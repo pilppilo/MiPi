@@ -506,6 +506,9 @@ describe("reminder times", () => {
 
   it("steps a repeat from its own time to the first one after now", () => {
     expect(nextOccurrence({ minutes: 10 }, at, at, ZONE)).toBe(at + 10 * 60_000);
+    // A slightly early alarm (now before the recorded time) never gives that time again.
+    expect(nextOccurrence({ minutes: 10 }, at, at - 5_000, ZONE)).toBe(at + 10 * 60_000);
+    expect(nextOccurrence({ at: "08:00" }, at, at - 5_000, ZONE)).toBeGreaterThan(at);
     expect(nextOccurrence({ minutes: 10 }, at, at + 35 * 60_000, ZONE)).toBe(at + 40 * 60_000);
     // Thirty days down: the next time, in one step, still on the 10-minute grid from the recorded time.
     const month = 30 * 24 * 60 * 60_000;
