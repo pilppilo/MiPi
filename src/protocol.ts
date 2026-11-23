@@ -22,6 +22,8 @@ const SCHEDULED_INSTRUCTION_PREFIX = "Scheduled instruction due now";
 /** `Scheduled instruction due now: …`, or with the delivery's local time: `… due now (Sun, Nov 22, 2026, 12:40 CST): …`. */
 const SCHEDULED_INSTRUCTION_HEAD = /^Scheduled instruction due now(?: \(([^)\n]*)\))?: /;
 const RECURRENCE_NOTE_PREFIX = "\n\nThis instruction recurs.";
+/** Starts a reminder's notes for the model (M6); the client shows only the instruction before them. */
+const REMINDER_NOTES_PREFIX = "\n\n[Notes for this run]";
 
 /** Input submitted when a scheduled instruction is due. Self-contained; no system-prompt support needed. */
 export function formatScheduledInstruction(
@@ -58,11 +60,22 @@ export function formatReminder(
   reminder: { readonly id: string; readonly instruction: string },
   deliveredAt: string,
   repeats?: string,
+  recentSends: readonly { readonly at: string; readonly snippet: string }[] = [],
 ): string {
-  const text = formatScheduledInstruction(reminder, deliveredAt);
-  return repeats === undefined
-    ? text
-    : `${text}${RECURRENCE_NOTE_PREFIX} It repeats ${repeats}, on its own: don't schedule it again.`;
+  const notes = [
+    ...(repeats === undefined
+      ? []
+      : [`It repeats ${repeats}, on its own: don't schedule it again.`]),
+    // M6: a check with nothing to report stays quiet; a reminder never does.
+    "If this is a check and it finds nothing the owner needs to hear, answer exactly NO_SEND. A plain reminder always gets a message.",
+    ...(recentSends.length === 0
+      ? []
+      : [
+          "Messages scheduled runs sent lately (don't repeat them):",
+          ...recentSends.map(({ at, snippet }) => `- ${at}: ${snippet}`),
+        ]),
+  ];
+  return `${formatScheduledInstruction(reminder, deliveredAt)}${REMINDER_NOTES_PREFIX}\n${notes.join("\n")}`;
 }
 
 /** The instruction text of a scheduled delivery input, or `undefined` for ordinary input. */
@@ -70,8 +83,11 @@ export function parseScheduledInstruction(content: string): string | undefined {
   const head = SCHEDULED_INSTRUCTION_HEAD.exec(content);
   if (head === null) return undefined;
   const text = content.slice(head[0].length);
-  const note = text.lastIndexOf(RECURRENCE_NOTE_PREFIX);
-  return note === -1 ? text : text.slice(0, note);
+  const notes = [
+    text.lastIndexOf(RECURRENCE_NOTE_PREFIX),
+    text.indexOf(REMINDER_NOTES_PREFIX),
+  ].filter((index) => index !== -1);
+  return notes.length === 0 ? text : text.slice(0, Math.min(...notes));
 }
 
 /** Display text of queued user input content: a string or text/image parts. */

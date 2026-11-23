@@ -516,3 +516,11 @@ body:has(.session-workspace) {
   align-self: center;
   margin-block: 0.5rem;
 }
+
+/* A scheduled check's NO_SEND answer (M6): nothing was sent, so it stays out of the way. */
+.transcript-quiet {
+  margin: 0;
+  font-size: 0.85em;
+  font-style: italic;
+  opacity: 0.6;
+}

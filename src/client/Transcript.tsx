@@ -1,4 +1,5 @@
 import type { ToolDiagnostic } from "../agent/pi/shared.ts";
+import { isNoSend } from "../lib/proactive-text.ts";
 import type {
   TranscriptEntry,
   TranscriptGap,
@@ -31,6 +32,7 @@ export function TranscriptList({
   const { resultsByRequest, groupedResultIds } = correlateToolResults(entries);
   const progress = new Map(tools.map((tool) => [tool.callId, tool]));
   const gapsAfter = new Map<number, TranscriptGap>(gaps.map((gap) => [gap.after, gap]));
+  const quiet = quietAnswers(entries);
 
   return (
     <ol className="transcript-list">
@@ -89,6 +91,16 @@ export function TranscriptList({
       );
     }
 
+    if (quiet.has(entry.id)) {
+      return (
+        <li key={entry.id}>
+          <p className="transcript-quiet" title={`Entry (id: ${entry.id}): NO_SEND`}>
+            Nothing to report
+          </p>
+        </li>
+      );
+    }
+
     if (entry.toolResult !== undefined) {
       return (
         <li key={entry.id}>
@@ -115,6 +127,54 @@ export function TranscriptList({
       </li>
     );
   }
+}
+
+/**
+ * Answers a scheduled check gave as `NO_SEND` (M6): shown muted, as the Telegram door sends nothing for them. Only
+ * when every input since the last answer was scheduled and no tool failed; otherwise the raw answer stays visible.
+ */
+export function quietAnswers(entries: readonly TranscriptEntry[]): ReadonlySet<number> {
+  const quiet = new Set<number>();
+  let inputs: Array<TranscriptEntry["role"]> = [];
+  let failed = false;
+  for (const entry of entries) {
+    switch (entry.role) {
+      case "user":
+      case "scheduled":
+        inputs.push(entry.role);
+        break;
+      case "tool":
+        if (entry.toolResult?.isError === true) failed = true;
+        break;
+      case "assistant":
+        if (entry.toolCalls !== undefined && entry.toolCalls.length > 0) break;
+        if (
+          isNoSend(entry.text) &&
+          !failed &&
+          inputs.length > 0 &&
+          inputs.every((role) => role === "scheduled")
+        ) {
+          quiet.add(entry.id);
+        }
+        inputs = [];
+        failed = false;
+        break;
+      case "compaction":
+      case "reset":
+        // What came before is summarised or gone; judge only what follows.
+        inputs = [];
+        failed = false;
+        break;
+      case "system":
+      case "event":
+        break;
+      default: {
+        const _: never = entry.role;
+        return _;
+      }
+    }
+  }
+  return quiet;
 }
 
 function correlateToolResults(entries: readonly TranscriptEntry[]): {

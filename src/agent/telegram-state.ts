@@ -35,6 +35,8 @@ export type TelegramChannelState = {
    * build from before it ignores the field (and the messages waiting in it, on a rollback).
    */
   staged?: StagedWindow[];
+  /** The private chat that wrote last (M6): where a notice goes when nothing else names a chat. */
+  lastChat?: number;
 };
 
 /** The document's kind, which commit observers match on. */

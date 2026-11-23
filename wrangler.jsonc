@@ -32,6 +32,8 @@
     "MIPI_TIMEZONE": "America/Chicago",
     // Tool profile new web and Telegram conversations start on (default, empty, pidu).
     "MIPI_PROFILE": "default",
+    // Model rounds scheduled runs may use per Chicago day; "0" pauses them. Interactive chat never counts.
+    "MIPI_DAILY_RUN_CAP": "50",
   },
   "observability": {
     "enabled": true,
@@ -58,6 +60,7 @@
         "MIPI_MODEL": "deepseek-v4.1-flash",
         "MIPI_TIMEZONE": "America/Chicago",
         "MIPI_PROFILE": "default",
+        "MIPI_DAILY_RUN_CAP": "50",
       },
     },
   },

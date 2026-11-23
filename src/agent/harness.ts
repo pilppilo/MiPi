@@ -19,9 +19,15 @@ import { DEFAULT_PROFILE, type ProfileName, profileTools, toolsFor } from "./pro
 import { ScheduledReminder } from "../tools/reminder-task.ts";
 import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
 import { conversationSearchExtension } from "../tools/search.ts";
+import { proactiveExtension, RecordRun, RoundBudget } from "./proactive.ts";
 
 /** MiPi's own durable task definitions, for the startup guard's version check. */
-export const APP_TASKS = [DeliverScheduledInstruction, ScheduledReminder] as const;
+export const APP_TASKS = [
+  DeliverScheduledInstruction,
+  ScheduledReminder,
+  RecordRun,
+  RoundBudget,
+] as const;
 
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
@@ -67,6 +73,7 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
   const registry = createRegistry();
   registry.install(chatExtension);
   registry.install(conversationSearchExtension);
+  registry.install(proactiveExtension);
   const defaultAgent = {
     model: config.model ?? {
       provider: MODEL_PROVIDER,
@@ -81,7 +88,8 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
     models: config.models ?? createGoModels(config.readEnv ?? (() => undefined)),
     registry,
     settings: {
-      extensions: [chatExtension],
+      // `proactive` hooks every run; its tasks act only on runs that answer a reminder.
+      extensions: [chatExtension, proactiveExtension],
       compaction: compactionSettings(goModels()),
       stream: { cacheRetention: CACHE_RETENTION },
       // Every input queued behind a running turn joins the next turn together, whichever door it came through, so a

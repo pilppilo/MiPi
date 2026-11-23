@@ -58,6 +58,10 @@ export type OutboxReply = {
   chatId: number;
   createdAt: number;
   chunks: OutboxChunk[];
+  /** A reminder's own answer (M6): confirmed, it joins the recent proactive sends. Never on notices. */
+  proactive?: { reminderId: string };
+  /** Set once this reply joined the recent sends, so later chunks and splits don't add it again. */
+  proactiveRecorded?: boolean;
 };
 
 export type OutboxState = {
@@ -90,8 +94,10 @@ const TERMINAL: ReadonlySet<ChunkStatus> = new Set([
 export const isFinished = (reply: OutboxReply): boolean =>
   reply.chunks.every((chunk) => TERMINAL.has(chunk.status));
 
+export const OUTBOX_DOC_KIND = "app.telegram-outbox";
+
 export const TelegramOutbox = defineDoc<OutboxState>({
-  kind: "app.telegram-outbox",
+  kind: OUTBOX_DOC_KIND,
   version: 1,
   scope: "session",
   initial: () => ({ replies: [], pacedUntil: {} }),
@@ -155,7 +161,12 @@ const EMPTY_REPLY = "(No text in the answer.)";
  */
 export function enqueueReply(
   state: OutboxState,
-  reply: { readonly id: string; readonly chatId: number; readonly text: string },
+  reply: {
+    readonly id: string;
+    readonly chatId: number;
+    readonly text: string;
+    readonly proactive?: { readonly reminderId: string };
+  },
   now: number,
 ): boolean {
   if (state.replies.some(({ id }) => id === reply.id)) return false;
@@ -164,6 +175,9 @@ export function enqueueReply(
     id: reply.id,
     chatId: reply.chatId,
     createdAt: now,
+    ...(reply.proactive === undefined
+      ? {}
+      : { proactive: { reminderId: reply.proactive.reminderId } }),
     chunks: (texts.length === 0 ? [EMPTY_REPLY] : texts).map((text, index) =>
       newChunk(`${reply.id}#${index}`, text, 0, "html"),
     ),

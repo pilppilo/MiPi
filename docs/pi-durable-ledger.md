@@ -65,6 +65,13 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Upstream:** pi-ai 1.6.0's OpenCode Go compat for Claude, Qwen and MiniMax has no long-retention flag, so `cacheRetention: "long"` falls back to the default 5-minute `cache_control`.
 - **MiPi:** asks for `long` once, in `CACHE_RETENTION`. Nothing to change on MiPi's side; it takes effect when pi-ai adds the flag.
 
+### L7 · Daily cap counts model rounds, not retries
+
+- **Kind:** workaround
+- **Since:** 0.1.0-alpha.8
+- **Upstream:** Pi Durable 1.6.0's `beforeRequest` hook gets a read-only `HookApi`, so nothing can count a model request as it starts. The first hook that can run a task (and write) is `afterTools`, after each tool round.
+- **MiPi:** counts a reminder run's first round when the reminder is admitted (`reminder-task.ts`), and each later round in `RoundBudget`'s `afterTools` task (`proactive.ts`), which ends the run with `terminate` at the cap. Provider retries inside one round don't count. Drop the admission count and count in `beforeRequest` once a hook there can write or stop the request.
+
 ## Closed
 
 None yet.
