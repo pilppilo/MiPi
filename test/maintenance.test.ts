@@ -287,6 +287,29 @@ describe("export and restore", () => {
     socket.webSocket!.close(1000, "done");
   });
 
+  it("reopens after exports and a restore with each wake source registered once", async () => {
+    // A source registered twice throws (`WakeSources.register`), so a reopen that added them again would stay closed.
+    const owner = "reopen-sources";
+    const { call } = forOwner(owner);
+    await seed(owner, "hello");
+    let exported = await exportAll(call);
+    exported = await exportAll(call);
+    expect(exported.consistent).toBe(true);
+    expect((await call<AdminStatus>("GET", "/api/admin/status")).state).toEqual({ kind: "open" });
+    await call("POST", "/api/admin/restore/begin", {
+      header: exported.header,
+      confirm: MIPI_VERSION,
+    });
+    await call("POST", "/api/admin/restore/rows", { rows: exported.rows });
+    const after = await call<AdminStatus>("POST", "/api/admin/restore/end", {
+      rows: countsOf(exported.rows),
+    });
+    expect(after.state).toEqual({ kind: "open" });
+    // And the alarm still runs every source without a failure.
+    await runDurableObjectAlarm(env.AGENT.getByName(owner));
+    expect((await call<AdminStatus>("GET", "/api/admin/status")).state).toEqual({ kind: "open" });
+  });
+
   it("fails an export that something wrote during", async () => {
     const owner = "export-write";
     const { call } = forOwner(owner);

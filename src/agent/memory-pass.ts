@@ -29,9 +29,22 @@ import {
   UserEntry,
 } from "./pi/durable.ts";
 import { ConversationMeta, profileOf } from "./conversations.ts";
-import { addLesson, MAX_LESSON, MAX_LESSONS, MemoryDoc, REMEMBER_TOOL_NAME } from "./memory.ts";
-import { afterNextChicagoMidnight, chicagoDay, Proactive } from "./proactive.ts";
-import { holdOf, measureSpend, Spend } from "./spend.ts";
+import {
+  addLesson,
+  MAX_LESSON,
+  MAX_LESSONS,
+  MEMORY_DOC_KIND,
+  MemoryDoc,
+  REMEMBER_TOOL_NAME,
+} from "./memory.ts";
+import {
+  afterNextChicagoMidnight,
+  chicagoDay,
+  Proactive,
+  PROACTIVE_DOC_KIND,
+} from "./proactive.ts";
+import { holdOf, measureSpend, Spend, SPEND_DOC_KIND } from "./spend.ts";
+import type { CommitChanges } from "./wake-sources.ts";
 import { PROFILES } from "./profiles.ts";
 import { providerSession, recordUsage } from "./titles.ts";
 import { touchesWebFetch } from "../tools/memory.ts";
@@ -348,6 +361,22 @@ export interface MemoryPassOptions {
   readonly onWakeChange: () => void;
   readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
   readonly now?: () => number;
+}
+
+/**
+ * Whether a commit can move the memory pass's next wake: new entries move a conversation's idle time, and memory, the
+ * run cap and the spend cap decide whether a pass can run at all (forgetting a lesson, resuming the runs or a new day
+ * brings it back).
+ */
+export function isMemoryPassChange(publication: CommitChanges): boolean {
+  return publication.changes.some(
+    (change) =>
+      change.type === "entry" ||
+      (change.type === "document" &&
+        (change.record?.kind === MEMORY_DOC_KIND ||
+          change.record?.kind === PROACTIVE_DOC_KIND ||
+          change.record?.kind === SPEND_DOC_KIND)),
+  );
 }
 
 export type MemoryPassWake = { readonly at?: number; readonly active: false };

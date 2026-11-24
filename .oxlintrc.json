@@ -20,6 +20,34 @@
       "rules": {
         "no-restricted-imports": "off"
       }
+    },
+    {
+      "files": ["src/agent/alarm.ts", "src/agent/wake-sources.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              },
+              {
+                "group": [
+                  "./telegram*",
+                  "./relay*",
+                  "**/telegram*",
+                  "**/relay*",
+                  "**/doors/**",
+                  "**/tools/**",
+                  "**/extensions/**"
+                ],
+                "message": "The alarm and the wake sources are core (COD-207, COD-208): they import no door, tool or extension. A part that needs the alarm registers a WakeSource in agent-do.ts."
+              }
+            ]
+          }
+        ]
+      }
     }
   ]
 }
