@@ -1,6 +1,6 @@
 /** The markdown parse shared by the web and Telegram doors (COD-190): blocks for the web, inline nodes for both. */
 import { describe, expect, it } from "vitest";
-import { parseInline, parseMarkdown } from "../src/lib/markdown.ts";
+import { MAX_QUOTE_DEPTH, parseInline, parseMarkdown } from "../src/lib/markdown.ts";
 
 describe("inline markdown", () => {
   it("reads code, links and emphasis, and leaves unmatched markers and other schemes as text", () => {
@@ -92,5 +92,28 @@ describe("markdown blocks", () => {
     expect(parseMarkdown('<script>alert("x")</script>')).toEqual([
       { type: "paragraph", lines: [[{ type: "text", text: '<script>alert("x")</script>' }]] },
     ]);
+  });
+});
+
+describe("markdown edge cases", () => {
+  it("keeps a heading's own # and drops only a closing run after a space", () => {
+    expect(parseMarkdown("## C#")).toEqual([
+      { type: "heading", level: 2, children: [{ type: "text", text: "C#" }] },
+    ]);
+    expect(parseMarkdown("### F# notes ###")).toEqual([
+      { type: "heading", level: 3, children: [{ type: "text", text: "F# notes" }] },
+    ]);
+  });
+
+  it("reads quotes nested past the limit as text", () => {
+    const deep = parseMarkdown(`${"> ".repeat(MAX_QUOTE_DEPTH + 4)}deep`);
+    let block = deep[0]!;
+    let depth = 0;
+    while (block.type === "quote") {
+      depth += 1;
+      block = block.blocks[0]!;
+    }
+    expect(depth).toBe(MAX_QUOTE_DEPTH);
+    expect(block).toMatchObject({ type: "paragraph" });
   });
 });

@@ -264,7 +264,7 @@ describe("tool output (COD-190)", () => {
         callId: "f1",
         name: "web_fetch",
         isError,
-        ...(details === undefined ? {} : { details: details as never }),
+        ...(details === undefined ? {} : { details }),
       },
     });
 
@@ -277,6 +277,11 @@ describe("tool output (COD-190)", () => {
       `<details class="tool-output"><summary>https://example.com/ · ${fetched.length.toLocaleString("en-US")} characters</summary>`,
     );
     expect(html).not.toMatch(/<details class="tool-output" open/);
+  });
+
+  it("names blank output, or output with an empty URL, by a word instead of nothing", () => {
+    const html = render([call, result(" \n".repeat(20), false, { url: "  " })], []);
+    expect(html).toContain("<summary>Output · 40 characters</summary>");
   });
 
   it("keeps a short result and a failed one open", () => {

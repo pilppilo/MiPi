@@ -436,6 +436,8 @@ body:has(.session-workspace) {
   display: grid;
   gap: 0.5rem;
   min-inline-size: 0;
+  /* A long unbroken word or code span wraps in every block, so it can't widen the transcript. */
+  overflow-wrap: anywhere;
 }
 
 .markdown > *,
@@ -484,6 +486,8 @@ body:has(.session-workspace) {
 .markdown pre {
   max-inline-size: 100%;
   overflow-x: auto;
+  /* Code keeps its lines: it scrolls instead of wrapping. */
+  overflow-wrap: normal;
   padding: 0.625rem;
   background: color-mix(in srgb, currentColor 5%, transparent);
 }
@@ -499,10 +503,6 @@ body:has(.session-workspace) {
   margin: 0;
   padding-inline-start: 0.75rem;
   border-inline-start: 3px solid color-mix(in srgb, currentColor 25%, transparent);
-}
-
-.markdown a {
-  overflow-wrap: anywhere;
 }
 
 .markdown hr {

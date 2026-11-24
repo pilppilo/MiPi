@@ -319,15 +319,18 @@ export function ToolOutput({
     typeof details === "object" &&
     details !== null &&
     "url" in details &&
-    typeof details.url === "string"
-      ? details.url
+    typeof details.url === "string" &&
+    details.url.trim().length > 0
+      ? details.url.trim()
       : undefined;
   const firstLine = (text.split("\n").find((line) => line.trim().length > 0) ?? "").trim();
   const subject = url ?? (firstLine.length > 80 ? `${firstLine.slice(0, 79)}…` : firstLine);
   return (
     <details className="tool-output">
       <summary>
-        {subject} · {text.length.toLocaleString("en-US")} characters
+        {/* Blank output (all whitespace) has no line to name it by. */}
+        {subject.length === 0 ? "Output" : subject} · {text.length.toLocaleString("en-US")}{" "}
+        characters
       </summary>
       <MessageText text={text} />
     </details>

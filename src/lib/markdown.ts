@@ -155,18 +155,22 @@ export type Block =
     }
   | { readonly type: "rule" };
 
-const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/;
+/** A closing run of `#` is dropped only after a space (CommonMark), so `## C#` keeps its `#`. */
+const HEADING = /^\s{0,3}(#{1,6})\s+(.+?)(?:\s+#+)?\s*$/;
 const RULE = /^\s{0,3}([-*_])(\s*\1){2,}\s*$/;
 const BULLET = /^\s*[-*+]\s+(.*)$/;
 const NUMBERED = /^\s*(\d{1,9})[.)]\s+(.*)$/;
 const QUOTE = /^\s{0,3}>\s?(.*)$/;
+
+/** Block quotes nested deeper than this are read as text, so `> > > …` can't recurse without end. */
+export const MAX_QUOTE_DEPTH = 8;
 
 /**
  * A reply's markdown as blocks: fenced code, headings, rules, block quotes, bullet and numbered lists (flat: an
  * indented item joins the list), and paragraphs. A fence still open at the end (a reply still streaming) runs to the
  * end as code.
  */
-export function parseMarkdown(markdown: string): Block[] {
+export function parseMarkdown(markdown: string, depth = 0): Block[] {
   const lines = markdown.replaceAll("\r\n", "\n").split("\n");
   const blocks: Block[] = [];
   let index = 0;
@@ -204,13 +208,13 @@ export function parseMarkdown(markdown: string): Block[] {
       index += 1;
       continue;
     }
-    if (QUOTE.test(line)) {
+    if (depth < MAX_QUOTE_DEPTH && QUOTE.test(line)) {
       const quoted: string[] = [];
       while (index < lines.length && QUOTE.test(lines[index]!)) {
         quoted.push(QUOTE.exec(lines[index]!)![1]!);
         index += 1;
       }
-      blocks.push({ type: "quote", blocks: parseMarkdown(quoted.join("\n")) });
+      blocks.push({ type: "quote", blocks: parseMarkdown(quoted.join("\n"), depth + 1) });
       continue;
     }
     const bullet = BULLET.exec(line);
@@ -241,7 +245,7 @@ export function parseMarkdown(markdown: string): Block[] {
         OPEN_FENCE.test(next) ||
         HEADING.test(next) ||
         RULE.test(next) ||
-        QUOTE.test(next) ||
+        (depth < MAX_QUOTE_DEPTH && QUOTE.test(next)) ||
         BULLET.test(next) ||
         NUMBERED.test(next)
       ) {
