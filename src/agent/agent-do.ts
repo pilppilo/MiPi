@@ -34,8 +34,9 @@ import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
-import { holdOf, measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
-import { isPausedNow } from "./gates.ts";
+import { measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
+import { bindLimitRecorder } from "./limits.ts";
+import { type Hold, holdNow, isPausedNow } from "./gates.ts";
 import { AnswerSettlement } from "./answers.ts";
 import { readUsage, usageText } from "./usage.ts";
 import { ProviderUsageCache } from "./providers.ts";
@@ -648,12 +649,9 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   /** Why work nobody asked for right now (a title written by the model) may not start, with today's spend measured. */
-  #hold(): Promise<"paused" | "spend-cap" | undefined> {
+  #hold(): Promise<Hold | undefined> {
     const now = Date.now();
-    return this.#harness.commit(
-      async (tx) => holdOf(await measureSpend(tx, now), now),
-      BACKGROUND_CONTEXT,
-    );
+    return this.#harness.commit((tx) => holdNow(tx, now), BACKGROUND_CONTEXT);
   }
 
   #readUsage(): Promise<UsageReadout> {
@@ -696,6 +694,12 @@ export class MipiAgent extends DurableObject<Env> {
     let activity: WatchHandle<TaskGraph> | undefined;
     try {
       this.#harness = harness;
+      bindLimitRecorder(
+        composition.limitExtension,
+        harness,
+        composition.providers,
+        this.#providerUsage,
+      );
       // Tasks (scheduled deliveries) read the owner's time zone from the session, not from module state.
       const timeZone = ownerTimeZone(this.env.MIPI_TIMEZONE);
       await harness.commit(async (tx) => {
@@ -761,6 +765,7 @@ export class MipiAgent extends DurableObject<Env> {
       const answers = new AnswerSettlement({
         harness,
         connectors: composition.connectors,
+        providers: composition.providers,
         // Telegram sends what was queued now, rather than at the next alarm.
         onQueued: () => telegram.refresh(),
         onWakeChange: () =>
@@ -804,6 +809,7 @@ export class MipiAgent extends DurableObject<Env> {
       }
       this.#relay = new RelayRuntime({
         harness,
+        providers: composition.providers,
         timeZone: this.env.MIPI_TIMEZONE,
         profile: startingProfile("relay", profileOrDefault(this.env.MIPI_PROFILE)),
         profiles,

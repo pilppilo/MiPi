@@ -32,6 +32,7 @@ import {
   type DoorRegistration,
 } from "./connectors.ts";
 import { createProviders, type Providers } from "./providers.ts";
+import { providerLimitsExtension } from "./limits.ts";
 
 export interface HarnessConfig {
   /** The model id for new conversations (`MIPI_MODEL`), at the model seam's provider. */
@@ -74,7 +75,7 @@ export function createCoreExtension(): Extension {
  * Never replaced, never switched off. `chat` keeps its name from before COD-209, when it held every tool too.
  */
 export function coreExtensions(): readonly Extension[] {
-  return [createCoreExtension(), proactiveExtension];
+  return [createCoreExtension(), proactiveExtension, providerLimitsExtension()];
 }
 
 /** The agent as composed: Pi Durable's options, plus what the Durable Object and the doors need from it. */
@@ -86,6 +87,7 @@ export interface AgentComposition {
   readonly connectors: Connectors;
   /** The provider pieces (usage readers, model lists) the extensions in use registered. */
   readonly providers: Providers;
+  readonly limitExtension: Extension;
   /** Every durable task of the installed extensions: the startup guard's version check (`APP_TASKS` before COD-209). */
   readonly tasks: ReturnType<typeof collectTasks>;
   /**
@@ -169,6 +171,7 @@ export function composeAgent(config: HarnessConfig): AgentComposition {
     profiles,
     connectors,
     providers,
+    limitExtension: core[2]!,
     tasks: collectTasks(extensions.installed),
     switchOff: async (tx, conversationId, names) => {
       const off = names.map((name) => {

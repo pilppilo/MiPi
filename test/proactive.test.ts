@@ -22,6 +22,7 @@ import {
   RUN_ROUND_LIMIT,
   takeRound,
 } from "../src/agent/proactive.ts";
+import { ProviderLimits } from "../src/agent/limits.ts";
 import { BATCH_WINDOW_MS } from "../src/doors/telegram/channel.ts";
 import { isNoSend, visibleAnswer } from "../src/lib/proactive-text.ts";
 import { formatReminder, parseScheduledInstruction } from "../src/protocol.ts";
@@ -406,6 +407,95 @@ describe("proactive runs", () => {
         });
         await agent.advance(60_000);
         expect(sentTexts(agent)).toEqual(["Hi.", CAP_NOTICE]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("keeps the transient cooldown for the next scheduled occurrence after restart", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      let agent = await openAgent(
+        storage,
+        [
+          async () => {
+            started.resolve();
+            await release.promise;
+            return fauxAssistantMessage([], {
+              stopReason: "error",
+              errorMessage: "429 Too Many Requests",
+            });
+          },
+        ],
+        undefined,
+        true,
+      );
+      try {
+        await remind(agent.harness, "reminder:cooldown", "Check the oven", telegram, {
+          minutes: 10,
+        });
+        clock.now = NOON + 60_000;
+        agent.harness.resume();
+        await started.promise;
+        clock.now = NOON + 11 * 60_000 - 1;
+        release.resolve();
+        await agent.settle();
+        expect((await agent.harness.snapshot(ProviderLimits, ctx))?.entries).toEqual({});
+        expect(sentTexts(agent)).toEqual([expect.stringContaining("Try again in a minute.")]);
+
+        agent = await agent.restart(said("Oven checked"));
+        await agent.advance(1);
+        expect((await reminders(agent.harness))[0]?.checkpoint).toMatchObject({
+          at: NOON + 21 * 60_000,
+          sent: 1,
+        });
+        expect(agent.sent).toEqual([]);
+        await agent.advance(10 * 60_000);
+        expect(sentTexts(agent)).toEqual(["Oven checked"]);
+      } finally {
+        release.resolve();
+        await agent.close();
+      }
+    }));
+
+  it("holds background reminders, tells the owner once, and accepts an owner message during the hold", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage, said("Owner answer", "Web reminder answer"));
+      try {
+        const root = await agent.harness.root(ctx);
+        const resetAt = NOON + 60 * 60_000;
+        await agent.harness.commit(async (tx) => {
+          (await tx.doc(ProviderLimits)).entries = {
+            faux: { label: "OpenCode Go", at: NOON, resetAt },
+          };
+        }, ctx);
+        await remind(agent.harness, "reminder:once", "Take pills", telegram);
+        await remind(agent.harness, "reminder:repeat", "Drink water", telegram, { minutes: 10 });
+        await remind(agent.harness, "reminder:web", "Water plants", {
+          kind: "web",
+          conversationId: root.id,
+        });
+        await agent.advance(60_000);
+        expect(sentTexts(agent)).toEqual([
+          expect.stringMatching(/^OpenCode Go's usage limit is reached\. It resets at /),
+          "Reminder: Take pills (sent without MiPi: the provider's usage limit is reached).",
+        ]);
+        expect(
+          (await reminders(agent.harness)).find(({ input }) => input.id === "reminder:web")
+            ?.checkpoint,
+        ).toMatchObject({ at: resetAt });
+        await agent.channel.admit(text(1, "Hello"));
+        await agent.advance(BATCH_WINDOW_MS);
+        expect(sentTexts(agent).at(-1)).toBe("Owner answer");
+        await agent.advance(10 * 60_000);
+        expect(sentTexts(agent).filter((line) => line.startsWith("OpenCode Go"))).toHaveLength(1);
+        await agent.advance(resetAt - clock.now);
+        expect(
+          (await userTexts(agent.harness, root.id)).some((line) => line.includes("Water plants")),
+        ).toBe(true);
       } finally {
         await agent.close();
       }

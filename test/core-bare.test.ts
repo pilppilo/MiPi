@@ -34,7 +34,11 @@ describe("bare core", () => {
       models,
       model: { provider: "faux", modelId: "faux-1" },
     });
-    expect(composition.extensions.selection.map(({ name }) => name)).toEqual(["chat", "proactive"]);
+    expect(composition.extensions.selection.map(({ name }) => name)).toEqual([
+      "chat",
+      "proactive",
+      "provider-limits",
+    ]);
     expect(composition.profiles.toolsFor("default")).toEqual([]);
     expect(composition.tasks.map(({ definition }) => definition.name).sort()).toEqual([
       "app.proactive-record-run",

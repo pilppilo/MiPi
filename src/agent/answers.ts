@@ -9,6 +9,7 @@
  */
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import { type Harness, type SubmissionId, type Tx } from "./pi/durable.ts";
+import type { Providers } from "./providers.ts";
 import type { Connectors } from "./connectors.ts";
 import { pendingSubmissions, PROACTIVE_DOC_KIND, reconcileAnswers } from "./proactive.ts";
 import type { CommitChanges, SourceWake, WakeSource } from "./wake-sources.ts";
@@ -19,6 +20,7 @@ const context = BACKGROUND_CONTEXT;
 export interface AnswerSettlementOptions {
   readonly harness: Harness;
   readonly connectors: Connectors;
+  readonly providers?: Providers;
   /** Messages were enqueued: the doors may send them now rather than at the next alarm. */
   readonly onQueued?: () => void;
   /** The settlement's `wake()` changed. */
@@ -108,7 +110,7 @@ export class AnswerSettlement implements WakeSource {
     return this.#queue.run("reconcile", async () => {
       if (this.#closed) return;
       const queued = await this.#commit((tx) =>
-        reconcileAnswers(tx, this.#now(), this.#options.connectors),
+        reconcileAnswers(tx, this.#now(), this.#options.connectors, this.#options.providers),
       );
       if (queued && !this.#closed) this.#options.onQueued?.();
     });

@@ -12,18 +12,19 @@
  * the last one is still queued, late times move to the next).
  */
 import { type ConversationId, defineTask } from "../../../agent/pi/durable.ts";
+import { isTransientModelFailure, TRANSIENT_REMINDER_COOLDOWN_MS } from "../../../agent/limits.ts";
 import { connectorsOf } from "../../../agent/connectors.ts";
 import type { DeliveryDestination } from "../../../agent/delivery.ts";
 import {
   expectProactive,
+  heldUntil,
   measureToday,
   proactiveHold,
   type ProactiveHold,
   tellHeld,
 } from "../../../agent/gates.ts";
-import { recentProactiveSends } from "../../../agent/proactive.ts";
+import { recentProactiveSends, transientReminderUntil } from "../../../agent/proactive.ts";
 import { localTime } from "../../../agent/stamp.ts";
-import { afterNextChicagoMidnight } from "../../../lib/cap-day.ts";
 import { describeRepeat, nextRepeat, type Repeat } from "../../../lib/when.ts";
 import { formatReminder } from "../../../protocol.ts";
 import { reminderRequest } from "./requests.ts";
@@ -62,12 +63,15 @@ type ReminderProgress = {
   skippedCap?: number;
   /** Repeat times skipped while MiPi was paused (`MIPI_PAUSED`, M9). */
   skippedPaused?: number;
+  /** Last submission whose cooldown was checked, including when settlement had not observed it yet. */
+  cooldownChecked?: number;
 };
 
 /** What a held one-time reminder says where its destination can push, sent as it is without the model. */
 const HELD_REASON: Readonly<Record<ProactiveHold, string>> = {
   "run-cap": "daily limit reached",
   "spend-cap": "daily spend cap reached",
+  "provider-limit": "the provider's usage limit is reached",
   paused: "MiPi is paused",
 };
 
@@ -148,6 +152,26 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
                 conversation.id,
                 reminderRequest(input.id, state.sent - 1),
               );
+        const cooldownChecked = state.cooldownChecked;
+        if (
+          input.every !== undefined &&
+          previous !== undefined &&
+          previous.id !== cooldownChecked &&
+          isTransientModelFailure(previous)
+        ) {
+          const until =
+            (await transientReminderUntil(tx, previous.id)) ?? now + TRANSIENT_REMINDER_COOLDOWN_MS;
+          if (until > now) {
+            const at =
+              state.at >= until
+                ? state.at
+                : nextOccurrence(input.every, state.at, until - 1, input.zone);
+            return {
+              status: "running",
+              checkpoint: { ...state, phase: "wait", at, cooldownChecked: previous.id },
+            };
+          }
+        }
         const decision = decideOccurrence({
           repeating: input.every !== undefined,
           at: state.at,
@@ -186,7 +210,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             // still paused).
             return {
               status: "running",
-              checkpoint: { ...state, phase: "wait", at: afterNextChicagoMidnight(now) },
+              checkpoint: { ...state, phase: "wait", at: await heldUntil(tx, held, now, true) },
             };
           }
         } else if (decision === "send") {
@@ -218,6 +242,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
                 instruction: input.instruction,
                 conversationId: conversation.id,
                 destination: input.destination,
+                ...(input.every === undefined ? {} : { repeating: true }),
               },
               now,
             );
@@ -233,10 +258,12 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             phase: "wait",
             at: nextOccurrence(input.every, state.at, now, input.zone),
             sent,
+            ...(cooldownChecked === undefined ? {} : { cooldownChecked }),
             skippedBusy: state.skippedBusy + (decision === "skip-busy" ? 1 : 0),
             skippedLate: state.skippedLate + (decision === "skip-late" ? 1 : 0),
             skippedCap:
-              (state.skippedCap ?? 0) + (held === "run-cap" || held === "spend-cap" ? 1 : 0),
+              (state.skippedCap ?? 0) +
+              (held === "run-cap" || held === "spend-cap" || held === "provider-limit" ? 1 : 0),
             ...(held === "paused" || state.skippedPaused !== undefined
               ? { skippedPaused: (state.skippedPaused ?? 0) + (held === "paused" ? 1 : 0) }
               : {}),

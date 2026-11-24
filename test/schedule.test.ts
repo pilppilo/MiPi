@@ -213,6 +213,7 @@ describe("scheduled instructions", () => {
         instruction: "Check the oven",
         runAt: expect.any(Number),
         recurrence,
+        previousRequestId: "schedule:recurring",
       });
       expect(next.runAt).toBeGreaterThanOrEqual(now + 59_000);
       expect(next.runAt).toBeLessThanOrEqual(Date.now() + 60_000);

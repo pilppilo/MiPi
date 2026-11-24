@@ -37,6 +37,14 @@ import type { Delivery, DeliveryDestination, DeliveryMessage } from "./delivery.
 import { isNoSend, visibleAnswer } from "../lib/proactive-text.ts";
 import { chicagoDay } from "../lib/cap-day.ts";
 import { holdOf, measureSpend, noticeSpend, Spend } from "./spend.ts";
+import {
+  ProviderLimits,
+  providerHeldUntil,
+  settledLimit,
+  tellProviderLimit,
+  TRANSIENT_REMINDER_COOLDOWN_MS,
+} from "./limits.ts";
+import type { Providers } from "./providers.ts";
 
 export { afterNextChicagoMidnight, CAP_ZONE, chicagoDay } from "../lib/cap-day.ts";
 
@@ -55,7 +63,7 @@ export const CAP_NOTICE = "Daily limit for scheduled runs reached; they resume t
 export const MIXED_FALLBACK = "I didn't produce an answer for your message; send it again.";
 
 /** Why `RoundBudget` ended a run. An older build reads `spend-cap` and `paused` as `run-limit`. */
-export type StopReason = "daily-cap" | "run-limit" | "spend-cap" | "paused";
+export type StopReason = "daily-cap" | "run-limit" | "spend-cap" | "paused" | "provider-limit";
 
 export type ProactiveState = {
   /** Proactive inputs (reminder occurrences) admitted and not settled yet. `reminderId` is the opaque source id. */
@@ -65,7 +73,10 @@ export type ProactiveState = {
     instruction: string;
     conversationId: number;
     destination: DeliveryDestination;
+    repeating?: true;
   }>;
+  /** Recently settled transient failures, used to keep a recurring schedule from readmitting immediately. */
+  transientFailures?: Array<{ submissionId: number; reminderId: string; until: number }>;
   /** The inputs of each run that answered with a reminder among them, by answer entry. */
   runs: Array<{ answer: number; inputs: Array<{ submissionId: number; requestId?: string }> }>;
   /** Inputs whose run `RoundBudget` ended, and why. */
@@ -141,6 +152,16 @@ export async function noticeCap(
   }
 }
 
+/** The transient retry deadline, if settlement already observed this occurrence. */
+export async function transientReminderUntil(
+  tx: Tx,
+  submissionId: number,
+): Promise<number | undefined> {
+  return (await tx.doc(Proactive)).transientFailures?.find(
+    (entry) => entry.submissionId === submissionId,
+  )?.until;
+}
+
 /** The last confirmed proactive messages, oldest first, for the next reminder to see (copies). */
 export async function recentProactiveSends(
   tx: Tx,
@@ -160,6 +181,7 @@ export async function expectProactive(
     readonly instruction: string;
     readonly conversationId: number;
     readonly destination: DeliveryDestination;
+    readonly repeating?: true;
   },
   now: number,
 ): Promise<void> {
@@ -173,6 +195,7 @@ export async function expectProactive(
       instruction: expectation.instruction,
       conversationId: expectation.conversationId,
       destination: { ...expectation.destination },
+      ...(expectation.repeating ? { repeating: true } : {}),
     },
   ];
 }
@@ -260,7 +283,11 @@ export const RoundBudget = defineTask<
         // pi-ledger L7. Rounds are counted here, after each tool round, because `beforeRequest` can't write. The spend
         // cap and a pause are checked here too, with today's spend measured first (M9).
         const now = runtime.now();
-        const hold = holdOf(await measureSpend(tx, now), now);
+        const hold =
+          holdOf(await measureSpend(tx, now), now) ??
+          (providerHeldUntil(await tx.doc(ProviderLimits), now) === undefined
+            ? undefined
+            : "provider-limit");
         // The run's own limit first: a round it won't take is never charged to the day.
         const reason: StopReason | undefined =
           (run?.turns ?? 0) >= RUN_ROUND_LIMIT
@@ -344,7 +371,7 @@ type Settled =
 
 type SettledRecord =
   | { readonly status: "done"; readonly answer: number }
-  | { readonly status: "unanswered"; readonly reason: string };
+  | { readonly status: "unanswered"; readonly reason: string; readonly detail?: string };
 
 async function settledRecord(tx: Tx, submissionId: number): Promise<SettledRecord | "open"> {
   const stored = await tx.submission(submissionId as SubmissionId);
@@ -357,7 +384,11 @@ async function settledRecord(tx: Tx, submissionId: number): Promise<SettledRecor
     case "done":
       return { status: "done", answer: record.answer };
     case "unanswered":
-      return { status: "unanswered", reason: record.reason };
+      return {
+        status: "unanswered",
+        reason: record.reason,
+        ...(typeof record.detail === "string" ? { detail: record.detail } : {}),
+      };
     default: {
       const _: never = record;
       throw new Error("Unknown submission status");
@@ -396,6 +427,7 @@ export async function reconcileAnswers(
   tx: Tx,
   now: number,
   connectors: Connectors,
+  providers?: Providers,
 ): Promise<boolean> {
   const { delivery, origins } = connectors;
   const sources: Array<{
@@ -454,6 +486,9 @@ export async function reconcileAnswers(
         return;
       case "spend-cap":
         await noticeSpend(tx, spend, delivery, prefer, now);
+        return;
+      case "provider-limit":
+        await tellProviderLimit(tx, delivery, prefer, now);
         return;
       case "paused":
         // The owner paused MiPi: the run stops without a word.
@@ -553,7 +588,13 @@ export async function reconcileAnswers(
   // Unanswered: a stopped reminder's notice, or one failure notice per destination and conversation.
   const failures = new Map<
     string,
-    { destination: DeliveryDestination; first: number; reason: string; reminder?: string }
+    {
+      destination: DeliveryDestination;
+      first: number;
+      reason: string;
+      notice?: string;
+      reminder?: string;
+    }
   >();
   for (const item of unanswered) {
     const stop = item.source === "proactive" ? stopOf.get(item.input.submissionId) : undefined;
@@ -562,7 +603,33 @@ export async function reconcileAnswers(
       continue;
     }
     const destination = pushable(item.input.destination);
+    const notice =
+      item.record.reason === "model_error"
+        ? await settledLimit(tx, providers, item.record.detail, now)
+        : undefined;
+    if (item.source === "proactive" && item.input.repeating) {
+      if (notice?.limit.kind === "rate") {
+        const { reminderId, submissionId } = item.input;
+        proactive.transientFailures = bounded([
+          ...(proactive.transientFailures ?? []).filter(
+            (failure) => failure.reminderId !== reminderId,
+          ),
+          { reminderId, submissionId, until: now + TRANSIENT_REMINDER_COOLDOWN_MS },
+        ]);
+      }
+      if (notice?.limit.kind === "usage") {
+        await tellProviderLimit(tx, delivery, destination, now, notice.limit.provider);
+        continue;
+      }
+    }
     if (destination === undefined) continue;
+    if (item.source === "proactive" && notice?.limit.kind === "usage") {
+      await send(destination, {
+        id: `reminder-limit:${item.input.submissionId}`,
+        text: `Reminder: ${item.input.instruction} (sent without MiPi: ${notice.text.replace(/\.$/, "")}).`,
+      });
+      continue;
+    }
     const key = `${delivery.identity(destination)}:${item.input.conversationId}`;
     const group = failures.get(key);
     if (group === undefined || item.input.submissionId < group.first) {
@@ -570,17 +637,19 @@ export async function reconcileAnswers(
         destination,
         first: item.input.submissionId,
         reason: item.record.reason,
+        ...(notice === undefined ? {} : { notice: notice.text }),
         ...(item.source === "proactive" ? { reminder: item.input.instruction } : {}),
       });
     }
   }
-  for (const { destination, first, reason, reminder } of failures.values()) {
+  for (const { destination, first, reason, notice, reminder } of failures.values()) {
     await send(destination, {
       id: `unanswered:${first}:${keyOf(destination)}`,
       text:
-        reminder === undefined
+        notice ??
+        (reminder === undefined
           ? `I couldn't answer that (${reason}). Send it again to retry.`
-          : `The reminder "${reminderLabel(reminder)}" couldn't run (${reason}).`,
+          : `The reminder "${reminderLabel(reminder)}" couldn't run (${reason}).`),
     });
   }
 

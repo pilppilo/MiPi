@@ -14,14 +14,33 @@ import {
   Proactive,
   PROACTIVE_DOC_KIND,
 } from "./proactive.ts";
-import { type Hold, holdOf, measureSpend, noticeSpend, Spend, SPEND_DOC_KIND } from "./spend.ts";
-import { chicagoDay } from "../lib/cap-day.ts";
+import {
+  type Hold as SpendHold,
+  holdOf,
+  measureSpend,
+  noticeSpend,
+  Spend,
+  SPEND_DOC_KIND,
+} from "./spend.ts";
+import {
+  PROVIDER_LIMIT_DOC_KIND,
+  ProviderLimits,
+  providerHeldUntil,
+  tellProviderLimit,
+} from "./limits.ts";
+import { afterNextChicagoMidnight, chicagoDay } from "../lib/cap-day.ts";
 
-export { type Hold, PAUSED_REPLY, warnOwnerOverCap } from "./spend.ts";
+export { PAUSED_REPLY, warnOwnerOverCap } from "./spend.ts";
 export { expectProactive } from "./proactive.ts";
 
 /** The documents the gates read: a commit that changes one may open or close a gate. */
-export const GATE_DOC_KINDS: readonly string[] = [PROACTIVE_DOC_KIND, SPEND_DOC_KIND];
+export const GATE_DOC_KINDS: readonly string[] = [
+  PROACTIVE_DOC_KIND,
+  SPEND_DOC_KIND,
+  PROVIDER_LIMIT_DOC_KIND,
+];
+
+export type Hold = SpendHold | "provider-limit";
 
 /** Why a proactive run may not start: a hold, or today's run cap. */
 export type ProactiveHold = Hold | "run-cap";
@@ -43,18 +62,58 @@ export async function measureToday(tx: Tx, now: number): Promise<void> {
 
 /** Whether work nobody asked for at that moment is held, as of the last measure. Changes nothing. */
 export async function heldAsMeasured(tx: Tx, now: number): Promise<Hold | undefined> {
-  return holdOf(await tx.doc(Spend), now);
+  return (
+    holdOf(await tx.doc(Spend), now) ??
+    ((await providerHoldUntil(tx, now)) === undefined ? undefined : "provider-limit")
+  );
 }
 
-/** `heldAsMeasured` outside a commit. */
-export async function heldAsMeasuredNow(harness: Harness, now: number): Promise<Hold | undefined> {
+/** Takes a read-only view of the background gate for the alarm planner. */
+export async function backgroundHoldNow(harness: Harness, now: number) {
   const spend = await harness.snapshot(Spend, BACKGROUND_CONTEXT);
-  return spend === undefined ? undefined : holdOf(spend, now);
+  const cap = spend === undefined ? undefined : holdOf(spend, now);
+  const provider = providerHeldUntil(
+    await harness.snapshot(ProviderLimits, BACKGROUND_CONTEXT),
+    now,
+  );
+  return {
+    paused: cap === "paused",
+    until: maxDeadline(cap === "spend-cap" ? afterNextChicagoMidnight(now) : undefined, provider),
+  };
+}
+
+const maxDeadline = (cap: number | undefined, provider: number | undefined) =>
+  cap === undefined ? provider : Math.max(cap, provider ?? cap);
+
+export async function providerHoldUntil(tx: Tx, now: number) {
+  return providerHeldUntil(await tx.doc(ProviderLimits), now);
+}
+
+/** The next time to check a timed hold, considering all applicable caps and provider deadlines. */
+export async function heldUntil(
+  tx: Tx,
+  hold: ProactiveHold,
+  now: number,
+  proactive = false,
+): Promise<number> {
+  if (hold === "paused") return afterNextChicagoMidnight(now);
+  const cap =
+    hold === "spend-cap" ||
+    hold === "run-cap" ||
+    holdOf(await tx.doc(Spend), now) === "spend-cap" ||
+    (proactive && !hasRound(await tx.doc(Proactive), now));
+  return (
+    maxDeadline(
+      cap ? afterNextChicagoMidnight(now) : undefined,
+      await providerHoldUntil(tx, now),
+    ) ?? now
+  );
 }
 
 /** Whether work nobody asked for at that moment is held, with today's spend measured first. */
 export async function holdNow(tx: Tx, now: number): Promise<Hold | undefined> {
-  return holdOf(await measureSpend(tx, now), now);
+  await measureSpend(tx, now);
+  return heldAsMeasured(tx, now);
 }
 
 /**
@@ -104,6 +163,9 @@ export async function tellHeld(
       return;
     case "spend-cap":
       await noticeSpend(tx, await tx.doc(Spend), delivery, prefer, now);
+      return;
+    case "provider-limit":
+      await tellProviderLimit(tx, delivery, prefer, now);
       return;
     case "paused":
       return;

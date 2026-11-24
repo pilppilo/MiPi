@@ -71,16 +71,20 @@ export async function openAgent(
   responses: readonly FauxResponseStep[] = [],
   /** The Telegram door's `/usage` readout (M9); unset, as in a door without one. */
   usage?: () => Promise<string>,
+  disableRetry = false,
 ): Promise<Agent> {
   const faux = fauxProvider();
   faux.setResponses([...responses]);
   const models = createModels();
   models.setProvider(faux.provider);
   const composition = composeMipi({ models, model: { provider: "faux", modelId: "faux-1" } });
+  const baseSettings = composition.options.settings;
+  const settings = typeof baseSettings === "function" ? baseSettings() : baseSettings;
   const harness = await Harness.open(
     await storage(),
     {
       ...composition.options,
+      ...(disableRetry ? { settings: { ...settings, retry: { enabled: false } } } : {}),
       now: () => clock.now,
       // The alarm's job here is the test's: no timers.
       onWake: () => {},
@@ -170,7 +174,7 @@ export async function openAgent(
     },
     restart: async (next = []) => {
       await agent.close();
-      return openAgent(storage, next, usage);
+      return openAgent(storage, next, usage, disableRetry);
     },
     close: async () => {
       sources.close();

@@ -71,7 +71,13 @@ function UsageLine({ usage }: { readonly usage: UsageReadout }) {
     }
   });
   const held =
-    usage.held === "paused" ? "paused" : usage.held === "spend-cap" ? "over the cap" : undefined;
+    usage.held === "paused"
+      ? "paused"
+      : usage.held === "spend-cap"
+        ? "over the cap"
+        : usage.held === "provider-limit"
+          ? "provider limit"
+          : undefined;
   const details = usage.providers.flatMap((provider) => {
     switch (provider.status) {
       case "unavailable":
@@ -329,6 +335,11 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             {statusLabel[session.status]}
           </p>
           {session.usage === undefined ? null : <UsageLine usage={session.usage} />}
+          {session.usage?.limits?.map((limit) => (
+            <p key={limit.provider} className="usage-line usage-line--held" role="status">
+              {limit.text}
+            </p>
+          ))}
         </header>
 
         {session.error === undefined ? null : (
