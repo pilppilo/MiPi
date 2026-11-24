@@ -31,8 +31,8 @@
                 "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
               },
               {
-                "group": ["**/extensions/**", "**/tools/**", "**/doors/**"],
-                "message": "Core imports no door, extension or tool (COD-208, COD-210): only the composition root (agent-do.ts, composition.ts) names them. Reach a feature through a connector."
+                "group": ["**/extensions/**", "**/doors/**"],
+                "message": "Core imports no door or extension (COD-208, COD-210): only the composition root (agent-do.ts, composition.ts) names them. Reach a feature through a connector."
               }
             ]
           }
@@ -77,10 +77,9 @@
                   "**/telegram*",
                   "**/relay*",
                   "**/doors/**",
-                  "**/tools/**",
                   "**/extensions/**"
                 ],
-                "message": "The alarm and the wake sources are core (COD-207, COD-208): they import no door, tool or extension. A part that needs the alarm registers a WakeSource in agent-do.ts."
+                "message": "The alarm and the wake sources are core (COD-207, COD-208): they import no door or extension. A part that needs the alarm registers a WakeSource in agent-do.ts."
               }
             ]
           }
@@ -138,7 +137,6 @@
               {
                 "group": [
                   "**/extensions/**",
-                  "**/tools/**",
                   "**/agent/agent-do*",
                   "**/agent/composition*",
                   "**/client/**",
@@ -165,7 +163,6 @@
               {
                 "group": [
                   "**/extensions/**",
-                  "**/tools/**",
                   "**/agent/agent-do*",
                   "**/agent/composition*",
                   "**/client/**",

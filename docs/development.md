@@ -19,9 +19,9 @@ How to work on the MiPi code. Running and deploying MiPi is in [Deployment and o
 | `src/agent/connectors.ts`        | What doors and extensions register with core: origin (`origin.ts`), delivery (`delivery.ts`) and the inputs waiting for an answer                            |
 | `src/agent/answers.ts`           | Core's one answer settlement: settled inputs of every door and every reminder, judged once (`proactive.ts`) and delivered                                    |
 | `src/agent/gates.ts`             | The run cap, the spend cap and the pause, read-only for doors and extensions                                                                                 |
+| `src/agent/visibility.ts`        | Which conversations are the owner's, for history search and the memory pass                                                                                  |
 | `src/doors/`                     | The doors (`telegram/`, `relay/`, `web/`): their registrations with core and their runtimes                                                                  |
 | `src/agent/pi/`                  | The only code that imports `@earendil-works/*` (lint-enforced): `durable.ts` for the server, `shared.ts` for the browser, `storage.ts` for the upgrade guard |
-| `src/tools/`                     | History search's code, until COD-211 moves it into its extension                                                                                             |
 | `src/lib/`                       | Small helpers with no Pi imports                                                                                                                             |
 | `src/protocol.ts`, `src/client/` | WebSocket protocol and the React web client                                                                                                                  |
 

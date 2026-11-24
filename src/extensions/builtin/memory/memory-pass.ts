@@ -46,6 +46,7 @@ import {
   runsOffNow,
 } from "../../../agent/gates.ts";
 import { recordUsage, sideCall } from "../../../agent/side-calls.ts";
+import { listVisible, OWNER_SCOPE, visiblePage } from "../../../agent/visibility.ts";
 import { afterNextChicagoMidnight, chicagoDay } from "../../../lib/cap-day.ts";
 import { entryTouches } from "../../../agent/untrusted.ts";
 import type { CommitChanges } from "../../../agent/wake-sources.ts";
@@ -411,18 +412,12 @@ export class MemoryPassRuntime {
     this.#closed = true;
   }
 
-  /** The conversations a pass may run on: ownerless ones (subagents' conversations belong to their tool). */
+  /** The conversations a pass may run on: the owner's visible ones (`visibility.ts`). */
   async #conversations(): Promise<ConversationId[]> {
-    return this.#options.harness.commit(async (tx) => {
-      const ids: ConversationId[] = [];
-      let cursor: Cursor | undefined;
-      do {
-        const page = await tx.scanConversations({}, 100, cursor);
-        for (const record of page.items) if (record.owner === undefined) ids.push(record.id);
-        cursor = page.next;
-      } while (cursor !== undefined);
-      return ids;
-    }, context);
+    return this.#options.harness.commit(
+      async (tx) => (await listVisible(tx, OWNER_SCOPE)).map(({ id }) => id),
+      context,
+    );
   }
 
   /**
@@ -491,11 +486,10 @@ export class MemoryPassRuntime {
       const found: Array<{ id: ConversationId; entry: number; at: number }> = [];
       let cursor: Cursor | undefined;
       do {
-        const page = await tx.scanConversations({}, 100, cursor);
+        // No conversation documents here (the profile included): see above. Visibility answers from the records.
+        const page = await visiblePage(tx, OWNER_SCOPE, 100, cursor, { recordsOnly: true });
         for (const record of page.items) {
-          if (record.owner !== undefined) continue;
-          // No conversation documents here (the profile included): see above. A conversation without `remember`
-          // may get a wake; its pass then moves the mark without asking the model.
+          // A conversation without `remember` may get a wake; its pass then moves the mark without asking the model.
           const activity = await newestActivity(tx, record.id);
           if (activity !== undefined) found.push({ id: record.id, ...activity });
         }

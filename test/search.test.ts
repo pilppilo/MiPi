@@ -21,7 +21,7 @@ import {
   searchHistoryTool,
   searchConversations,
   searchConversationsTool,
-} from "../src/tools/search.ts";
+} from "../src/extensions/builtin/history-search/search.ts";
 
 const context = BACKGROUND_CONTEXT;
 const model = { provider: "faux", modelId: "faux-1" };
