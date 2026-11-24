@@ -130,6 +130,9 @@ describe("settings", () => {
     expect(parseSpendCap("1")).toEqual({ cap: 1 });
     expect(parseSpendCap("0.25")).toEqual({ cap: 0.25 });
     expect(parseSpendCap("0")).toEqual({ cap: 0 });
+    // `off` turns a cap from wrangler.jsonc off for a lane.
+    expect(parseSpendCap("off")).toEqual({});
+    expect(parseSpendCap(" None ")).toEqual({});
     expect(parseSpendCap("$1")).toEqual({ invalid: "$1" });
     expect(parseSpendCap("-1")).toEqual({ invalid: "-1" });
   });
@@ -154,6 +157,19 @@ describe("settings", () => {
 });
 
 describe("measuring", () => {
+  it("starts today's count when the agent first opens, with the cap from its settings", () =>
+    inObject(async (storage) => {
+      // MiPi's own agent opened this object first; this harness reads what its start wrote.
+      const agent = await openAgent(storage);
+      try {
+        const spend = await agent.harness.snapshot(Spend, ctx);
+        expect(spend).toMatchObject({ spent: 0, lastTotal: 0, limit: 1 });
+        expect(spend?.paused).toBeUndefined();
+      } finally {
+        await agent.close();
+      }
+    }));
+
   it("counts every conversation's spend once, subagents' and tools' too, and never gives it back", () =>
     inObject(async (storage) => {
       clock.now = NOON;
@@ -180,7 +196,11 @@ describe("measuring", () => {
         }, ctx);
         expect(child.owner).toBeDefined();
 
-        // Spend before the first measure is nobody's today.
+        // Spend before the first measure is nobody's today. (The agent's start measured once; start over.)
+        await harness.commit(async (tx) => {
+          const state = await tx.doc(Spend);
+          delete state.lastTotal;
+        }, ctx);
         await spendOn(harness, root.id, 3);
         expect(await measure(harness)).toMatchObject({
           day: chicagoDay(NOON),
@@ -262,6 +282,26 @@ describe("the spend cap", () => {
         await agent.channel.admit(text(2, "And again?"));
         await agent.advance(BATCH_WINDOW_MS);
         expect(sentTexts(agent).filter((sent) => sent.startsWith("Heads up"))).toHaveLength(1);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("doesn't warn about the cap when Telegram sends an earlier message again", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage, said("Hi."));
+      try {
+        const root = await agent.harness.root(ctx);
+        await measure(agent.harness);
+        await agent.channel.admit(text(1, "Hello"));
+        await agent.advance(BATCH_WINDOW_MS);
+        // The cap is crossed after that message, then Telegram delivers it again.
+        await spendOn(agent.harness, root.id, 0.5);
+        await setSpend(agent.harness, { limit: 0.4 });
+        await agent.channel.admit(text(1, "Hello"));
+        await agent.settle();
+        expect(sentTexts(agent)).toEqual(["Hi."]);
       } finally {
         await agent.close();
       }
@@ -356,6 +396,40 @@ describe("pause", () => {
       }
     }));
 
+  it("refuses a window staged before the pause, when it comes due and on /new", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      // No model response: a run would fail the test.
+      const agent = await openAgent(storage);
+      try {
+        await agent.channel.admit(text(1, "Staged before the pause"));
+        await setSpend(agent.harness, { paused: true });
+        await agent.advance(BATCH_WINDOW_MS);
+        expect(sentTexts(agent)).toEqual([PAUSED_REPLY]);
+
+        await setSpend(agent.harness, { paused: false });
+        await agent.channel.admit(text(2, "Staged again"));
+        await setSpend(agent.harness, { paused: true });
+        await agent.channel.admit({
+          kind: "command",
+          updateId: 3,
+          chatId: CHAT,
+          command: "new",
+          argument: "",
+        });
+        await agent.settle();
+        expect(sentTexts(agent)).toEqual([
+          PAUSED_REPLY,
+          PAUSED_REPLY,
+          "Started a new conversation.",
+        ]);
+        const root = await agent.harness.root(ctx);
+        expect(await userTexts(agent.harness, root.id)).toEqual([]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
   it("holds every reminder kind without the model and without a notice", () =>
     inObject(async (storage) => {
       clock.now = NOON;
@@ -381,6 +455,36 @@ describe("pause", () => {
           sent: 0,
           skippedPaused: 1,
         });
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("tells the chat that wrote last once when the spend cap holds an older delivery", () =>
+    inObject(async (storage) => {
+      clock.now = NOON;
+      const agent = await openAgent(storage, said("Hi."));
+      try {
+        await agent.channel.admit(text(1, "Hello"));
+        await agent.advance(BATCH_WINDOW_MS);
+        await setSpend(agent.harness, { limit: 0 });
+        const root = await agent.harness.root(ctx);
+        await root.commit(
+          (tx) =>
+            tx.createTask(
+              DeliverScheduledInstruction,
+              {
+                id: "schedule:once",
+                conversationId: root.id,
+                instruction: "Call mom",
+                runAt: clock.now + 60_000,
+              },
+              { ownership: { kind: "conversation" }, background: true },
+            ),
+          ctx,
+        );
+        await agent.advance(60_000);
+        expect(sentTexts(agent)).toEqual(["Hi.", SPEND_NOTICE]);
       } finally {
         await agent.close();
       }

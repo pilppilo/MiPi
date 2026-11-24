@@ -53,22 +53,40 @@ function UsageLine({ usage }: { readonly usage: UsageReadout }) {
       ? `Today ~${dollars(usage.spent)}`
       : `Today ~${dollars(usage.spent)} of ${dollars(usage.cap)}`;
   const providers = usage.providers.map((provider) => {
-    if (provider.status === "unavailable") return `${provider.label}: unavailable`;
-    const busiest = [...provider.windows].sort((left, right) => right.percent - left.percent)[0];
-    return busiest === undefined
-      ? provider.label
-      : `${provider.label} ${Math.round(busiest.percent)}% ${busiest.name}`;
+    switch (provider.status) {
+      case "unavailable":
+        return `${provider.label}: unavailable`;
+      case "ok": {
+        const busiest = [...provider.windows].sort(
+          (left, right) => right.percent - left.percent,
+        )[0];
+        return busiest === undefined
+          ? provider.label
+          : `${provider.label} ${Math.round(busiest.percent)}% ${busiest.name}`;
+      }
+      default: {
+        const _: never = provider;
+        throw new Error("Unknown provider usage");
+      }
+    }
   });
   const held =
     usage.held === "paused" ? "paused" : usage.held === "spend-cap" ? "over the cap" : undefined;
-  const details = usage.providers.flatMap((provider) =>
-    provider.status === "unavailable"
-      ? [`${provider.label}: ${provider.reason}`]
-      : provider.windows.map(
+  const details = usage.providers.flatMap((provider) => {
+    switch (provider.status) {
+      case "unavailable":
+        return [`${provider.label}: ${provider.reason}`];
+      case "ok":
+        return provider.windows.map(
           (window) =>
             `${provider.label} ${window.name}: ${Math.round(window.percent)}%${window.limited ? " (limit reached)" : ""}, resets ${new Date(window.resetsAt).toLocaleString()}`,
-        ),
-  );
+        );
+      default: {
+        const _: never = provider;
+        throw new Error("Unknown provider usage");
+      }
+    }
+  });
   return (
     <p
       className={`usage-line${held === undefined ? "" : " usage-line--held"}`}

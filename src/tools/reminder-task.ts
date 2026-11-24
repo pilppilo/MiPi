@@ -176,7 +176,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             if (chat !== undefined) {
               // A reminder asked for is never dropped: sent as it is, without the model.
               enqueueReply(
-                await tx.doc(TelegramOutbox),
+                outbox,
                 {
                   id: `reminder-capped:${input.id}`,
                   chatId: chat,

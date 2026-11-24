@@ -230,7 +230,7 @@ export interface AdminStatus {
   };
   readonly bookmark?: string;
   readonly rows: Readonly<Record<string, number>>;
-  /** The usage readout (M9), while the agent is open, with only providers' cached figures; absent if it failed. */
+  /** The usage readout (M9) as last measured, with providers' cached figures, while open; absent if it failed. */
   readonly usage?: UsageReadout;
 }
 
@@ -259,8 +259,6 @@ export class MipiAgent extends DurableObject<Env> {
   #memoryPass: MemoryPassRuntime | undefined;
   /** Each provider's own usage figures for the readout (M9), cached in memory only. */
   #providerUsage = new ProviderUsageCache([]);
-  /** `MIPI_PAUSED` as this instance started with it (M9): every door refuses new messages while it is on. */
-  #paused = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -373,7 +371,7 @@ export class MipiAgent extends DurableObject<Env> {
     let usage: UsageReadout | undefined;
     if (this.#state.kind === "open") {
       try {
-        // No provider is asked here: a deploy's checks mustn't wait on one.
+        // As stored: no provider is asked and nothing is written, so a deploy's checks never wait or write.
         usage = await readUsage(this.#harness, this.#providerUsage, Date.now(), { fresh: false });
       } catch (error) {
         reportError("Reading the usage for the admin status failed", error);
@@ -592,9 +590,10 @@ export class MipiAgent extends DurableObject<Env> {
         using: "paused",
       });
     }
-    this.#paused = pause.paused;
     await harness.commit(async (tx) => {
       const state = await tx.doc(Spend);
+      // The first start with the cap: today's count starts now, not at the first reminder or message to come.
+      if (state.lastTotal === undefined) await measureSpend(tx, Date.now());
       if (cap === undefined) {
         if (state.limit !== undefined) delete state.limit;
       } else if (state.limit !== cap) {
@@ -1170,7 +1169,9 @@ export class MipiAgent extends DurableObject<Env> {
         }
         // Paused (`MIPI_PAUSED`, M9): a new message is refused with a clear reason, nothing admitted. A retry of one
         // admitted before still gets its answer above.
-        if (this.#paused) throw new Error(PAUSED_REPLY);
+        if ((await this.#harness.snapshot(Spend, BACKGROUND_CONTEXT))?.paused === true) {
+          throw new Error(PAUSED_REPLY);
+        }
         // Arm before admitting work: `onWake` runs after the commit, so an instance that dies in between is
         // still woken. An early alarm is harmless; a missing one strands the turn.
         await this.#alarm.schedule({ ...this.#harness.wake(), active: true });

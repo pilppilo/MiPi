@@ -65,8 +65,12 @@ export function parseGoUsage(body: unknown): UsageWindow[] {
  * `OPENCODE_ORG_ID`, when set, names the workspace, as OpenCode's own client does. No key: no reader.
  */
 export function goUsageSource(readEnv: ReadEnv): UsageSource | undefined {
-  // An empty secret counts as unset.
-  const setting = (name: string) => readEnv(name)?.trim() || undefined;
+  // An empty secret counts as unset, and so does `off`: the deploy writes it when the Environment has no usage key,
+  // since a deploy only adds secrets and would otherwise keep a removed one.
+  const setting = (name: string) => {
+    const value = readEnv(name)?.trim();
+    return value === undefined || value === "" || value === "off" ? undefined : value;
+  };
   const key = setting("OPENCODE_USAGE_KEY") ?? setting("OPENCODE_API_KEY");
   if (key === undefined) return undefined;
   const org = setting("OPENCODE_ORG_ID");
@@ -89,10 +93,14 @@ export function goUsageSource(readEnv: ReadEnv): UsageSource | undefined {
         },
         signal: AbortSignal.timeout(READ_TIMEOUT_MS),
       });
-      if (response.status === 401) return unavailable("the key has no usage permission");
-      // OpenCode reads a 403 as a workspace with no Go plan: nothing to show, not a failure.
-      if (response.status === 403) return unavailable("no Go plan for this key");
-      if (!response.ok) return unavailable(`it answered ${response.status}`);
+      if (!response.ok) {
+        // Unread, so the connection is let go.
+        await response.body?.cancel().catch(() => undefined);
+        if (response.status === 401) return unavailable("the key has no usage permission");
+        // OpenCode reads a 403 as a workspace with no Go plan: nothing to show, not a failure.
+        if (response.status === 403) return unavailable("no Go plan for this key");
+        return unavailable(`it answered ${response.status}`);
+      }
       return {
         provider: MODEL_PROVIDER,
         label,
@@ -115,6 +123,8 @@ export class ProviderUsageCache {
   readonly #sources: readonly UsageSource[];
   readonly #fetcher: FetchLike;
   readonly #cached = new Map<string, { readonly at: number; readonly usage: ProviderUsage }>();
+  /** Reads in flight, by provider: callers at the same moment share one. */
+  readonly #reading = new Map<string, Promise<ProviderUsage>>();
 
   constructor(sources: readonly UsageSource[], fetcher: FetchLike = fetch) {
     this.#sources = sources;
@@ -134,19 +144,25 @@ export class ProviderUsageCache {
       this.#sources.map(async (source) => {
         const cached = this.#cached.get(source.provider);
         if (cached !== undefined && now - cached.at < USAGE_CACHE_MS) return cached.usage;
-        let usage: ProviderUsage;
-        try {
-          usage = await source.read(this.#fetcher);
-        } catch (error) {
-          usage = {
-            provider: source.provider,
-            label: source.label,
-            status: "unavailable",
-            reason: error instanceof Error ? error.message : String(error),
-          };
-        }
-        this.#cached.set(source.provider, { at: now, usage });
-        return usage;
+        const reading = this.#reading.get(source.provider);
+        if (reading !== undefined) return reading;
+        const read = (async (): Promise<ProviderUsage> => {
+          let usage: ProviderUsage;
+          try {
+            usage = await source.read(this.#fetcher);
+          } catch (error) {
+            usage = {
+              provider: source.provider,
+              label: source.label,
+              status: "unavailable",
+              reason: error instanceof Error ? error.message : String(error),
+            };
+          }
+          this.#cached.set(source.provider, { at: now, usage });
+          return usage;
+        })().finally(() => this.#reading.delete(source.provider));
+        this.#reading.set(source.provider, read);
+        return read;
       }),
     );
   }

@@ -490,8 +490,6 @@ export class MemoryPassRuntime {
     if (this.#closed || this.#running) return;
     this.#running = true;
     try {
-      // Today's spend first, so every plan below sees the spend cap as it stands (M9).
-      await this.#options.harness.commit((tx) => measureSpend(tx, this.#now()), context);
       let passes = 0;
       for (const id of await this.#conversations()) {
         if (this.#closed || passes >= PASSES_PER_ALARM) break;
@@ -518,6 +516,8 @@ export class MemoryPassRuntime {
   async #pass(conversationId: ConversationId): Promise<boolean> {
     const { harness } = this.#options;
     const now = this.#now();
+    // Today's spend first, in every pass: an earlier pass of the same alarm may have crossed the spend cap (M9).
+    await harness.commit((tx) => measureSpend(tx, now), context);
     const plan = await harness.commit((tx) => planPass(tx, conversationId, now), context);
     switch (plan.kind) {
       case "skip":

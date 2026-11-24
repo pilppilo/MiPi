@@ -155,13 +155,14 @@ jobs:
             --arg usage_key "$OPENCODE_USAGE_KEY" \
             '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}
               + (if $bot == "" then {} else {TELEGRAM_BOT_TOKEN: $bot, TELEGRAM_WEBHOOK_SECRET: $hook} end)
-              + (if $usage_key == "" then {} else {OPENCODE_USAGE_KEY: $usage_key} end)
+              + {OPENCODE_USAGE_KEY: (if $usage_key == "" then "off" else $usage_key end)}
               + {RELAY_TOKEN: (if $relay == "" then "off" else $relay end),
                  RELAY_TOKEN_PREVIOUS: (if $relay_previous == "" then "off" else $relay_previous end)}' > "$secrets"
           # Secrets ship with the version itself, so no deployed version ever runs without its key.
           # --secrets-file only adds: a secret left out keeps its old value. So both relay tokens are always written, and
           # an unset one as "off", which is under 24 characters and accepted by nothing: removing RELAY_TOKEN turns the
-          # relay off, and removing RELAY_TOKEN_PREVIOUS after a rotation stops the old token working.
+          # relay off, and removing RELAY_TOKEN_PREVIOUS after a rotation stops the old token working. OPENCODE_USAGE_KEY
+          # is written the same way, so removing it stops the readout using it.
           # Access settings ride with the version as vars (they're not secret); unset, Access stays off.
           access_vars=()
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then

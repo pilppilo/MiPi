@@ -2,7 +2,9 @@ import { type ConversationId, defineDoc, defineTask } from "../agent/pi/durable.
 import { formatScheduledInstruction } from "../protocol.ts";
 import { AgentSettings } from "../agent/settings.ts";
 import { localTime } from "../agent/stamp.ts";
-import { holdOf, measureSpend } from "../agent/spend.ts";
+import { holdOf, measureSpend, noticeSpend, Spend } from "../agent/spend.ts";
+import { TelegramChannel } from "../agent/telegram-state.ts";
+import { TelegramOutbox } from "../agent/telegram-outbox.ts";
 import { afterNextChicagoMidnight } from "../lib/cap-day.ts";
 
 export type ScheduleCadence = {
@@ -252,8 +254,20 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
           return undefined;
         }
         const spend = await measureSpend(tx, now);
-        if (holdOf(spend, now) === undefined) return undefined;
+        const hold = holdOf(spend, now);
+        if (hold === undefined) return undefined;
         held = true;
+        // At the spend cap, today's one notice, as for reminders; a pause tells nothing. This older kind has no chat of
+        // its own, so the notice goes to the private chat that last wrote.
+        if (hold === "spend-cap") {
+          noticeSpend(
+            await tx.doc(Spend),
+            await tx.doc(TelegramChannel),
+            await tx.doc(TelegramOutbox),
+            undefined,
+            now,
+          );
+        }
         const runAt =
           task.input.recurrence === undefined
             ? afterNextChicagoMidnight(now)

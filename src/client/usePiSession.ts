@@ -39,8 +39,12 @@ type PendingPage = {
 
 const terminalProtocolClose = (code: number): boolean => code === 1002 || code === 1009;
 
-/** How often the header's usage line is read again while connected. */
-const USAGE_REFRESH_MS = 60_000;
+/**
+ * The header's usage line is read again at most this often, and only when the agent is awake anyway: the session
+ * opening, the owner's own message, work running (`session.activity`), or the tab coming back into view. Never on a
+ * timer of its own, which would wake a hibernated agent every minute for every open tab.
+ */
+const USAGE_REFRESH_MS = 30_000;
 
 export interface PiSession {
   readonly status: ConnectionStatus;
@@ -51,7 +55,7 @@ export interface PiSession {
   readonly error: string | undefined;
   /** The models and profiles the pickers offer; undefined until the server sent them. */
   readonly options: Options | undefined;
-  /** Today's spend and usage (M9); undefined until the server sent it. Refreshed every minute while connected. */
+  /** Today's spend and usage (M9); undefined until the server sent it. Refreshed when the agent is awake anyway. */
   readonly usage: UsageReadout | undefined;
   /** Switches a conversation's model or tool profile from its next request. */
   configureConversation(
@@ -149,8 +153,21 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
       shouldReconnectOnClose: (event) => !terminal && !terminalProtocolClose(event.code),
     });
     socketRef.current = socket;
-    const requestUsage = () => {
+    let usageReadAt = 0;
+    let usageLater: number | undefined;
+    /** Reads the usage now, or once `USAGE_REFRESH_MS` has passed since the last read (`force`: now regardless). */
+    const requestUsage = (force = false) => {
       if (socket.readyState !== socket.OPEN) return;
+      const wait = usageReadAt + USAGE_REFRESH_MS - Date.now();
+      if (!force && wait > 0) {
+        // One trailing read, so the line catches up with the work that just ran.
+        usageLater ??= window.setTimeout(() => {
+          usageLater = undefined;
+          requestUsage();
+        }, wait);
+        return;
+      }
+      usageReadAt = Date.now();
       socket.send(
         JSON.stringify({
           type: "usage.read",
@@ -158,7 +175,10 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         } satisfies ClientCommand),
       );
     };
-    const usageTimer = window.setInterval(requestUsage, USAGE_REFRESH_MS);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") requestUsage();
+    };
+    document.addEventListener("visibilitychange", onVisible);
 
     socket.addEventListener("open", () => {
       conversationOpened = false;
@@ -192,6 +212,13 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         const view = viewsRef.current.get(parsed.conversationId);
         if (view !== undefined) showView(parsed.conversationId, applyImmutable(view, parsed.ops));
         return;
+      }
+      // Work ran, or the owner's message was admitted: the agent is awake, so the usage line can catch up.
+      if (
+        parsed.type === "session.activity" ||
+        (parsed.type === "command.result" && parsed.command === "prompt.submit" && parsed.ok)
+      ) {
+        requestUsage();
       }
       if (parsed.type === "command.result" && parsed.command === "usage.read") {
         // A readout that couldn't be read leaves the last one; the line is a glance, not a control.
@@ -230,7 +257,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
             requestId: crypto.randomUUID(),
           } satisfies ClientCommand),
         );
-        requestUsage();
+        requestUsage(true);
         const desiredConversationId = selectedConversationRef.current;
         const selectedStillExists = parsed.session.conversations.some(
           ({ id }) => id === desiredConversationId,
@@ -295,7 +322,8 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
 
     return () => {
       disposed = true;
-      window.clearInterval(usageTimer);
+      if (usageLater !== undefined) window.clearTimeout(usageLater);
+      document.removeEventListener("visibilitychange", onVisible);
       outbox.clear();
       socket.close(1000, "Session view closed");
       if (socketRef.current === socket) socketRef.current = null;

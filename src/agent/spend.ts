@@ -58,11 +58,15 @@ export const PAUSED_REPLY = "MiPi is paused, so it can't answer right now.";
 export const SPEND_NOTICE =
   "Daily spend cap reached; scheduled runs and background work resume tomorrow.";
 
-/** `MIPI_DAILY_SPEND_CAP`: dollars, 0 or more. Unset or empty: no cap. Anything else is reported and means no cap. */
+/**
+ * `MIPI_DAILY_SPEND_CAP`: dollars, 0 or more. Unset, empty, `off` or `none`: no cap (`off` lets a lane's Environment
+ * variable turn off `wrangler.jsonc`'s cap). Anything else is reported and means no cap.
+ */
 export function parseSpendCap(value: string | undefined): { cap?: number; invalid?: string } {
-  if (value === undefined || value.trim() === "") return {};
-  const cap = Number(value.trim());
-  return Number.isFinite(cap) && cap >= 0 ? { cap } : { invalid: value };
+  const word = (value ?? "").trim().toLowerCase();
+  if (word === "" || word === "off" || word === "none") return {};
+  const cap = Number(word);
+  return Number.isFinite(cap) && cap >= 0 ? { cap } : { invalid: value ?? "" };
 }
 
 const ON = new Set(["1", "true", "yes", "on"]);

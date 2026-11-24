@@ -91,6 +91,12 @@ describe("OpenCode Go's usage", () => {
   it("has no reader without a key, and prefers the usage key, with the workspace when set", async () => {
     expect(goUsageSource(env({}))).toBeUndefined();
     expect(goUsageSource(env({ OPENCODE_API_KEY: "  " }))).toBeUndefined();
+    // `off` is what the deploy writes when a lane has no usage key: the model key is used.
+    const off = fakeFetch(200, goBody());
+    await goUsageSource(env({ OPENCODE_API_KEY: "model-key", OPENCODE_USAGE_KEY: "off" }))!.read(
+      off.fetcher,
+    );
+    expect(off.calls[0]!.headers.Authorization).toBe("Bearer model-key");
     expect(usageSources(env({}))).toEqual([]);
     const { calls, fetcher } = fakeFetch(200, goBody());
     const source = goUsageSource(
@@ -138,6 +144,28 @@ describe("OpenCode Go's usage", () => {
 });
 
 describe("the provider cache", () => {
+  it("shares one read between callers at the same moment", async () => {
+    let reads = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const source: UsageSource = {
+      provider: "p",
+      label: "P",
+      read: async () => {
+        reads += 1;
+        await gate;
+        return { provider: "p", label: "P", status: "ok", windows: [] };
+      },
+    };
+    const cache = new ProviderUsageCache([source]);
+    const both = Promise.all([cache.read(0), cache.read(0)]);
+    release();
+    await both;
+    expect(reads).toBe(1);
+  });
+
   it("reads each source at most every five minutes, a failure too", async () => {
     let reads = 0;
     let fail = true;
@@ -216,6 +244,17 @@ describe("the readout", () => {
       expect(readout.spent).toBeCloseTo(0.123, 10);
       expect(readout.held).toBeUndefined();
       expect(parseUsageReadout(JSON.parse(JSON.stringify(readout)))).toEqual(readout);
+
+      // The admin status's readout writes nothing and asks no provider: more spend shows only after a measure.
+      await harness.commit(async (tx) => {
+        const ledger = await tx.doc(UsageDoc, root.id);
+        ledger.models["faux/faux-1"]!.cost.total += 1;
+      }, ctx);
+      const before = await harness.snapshot(Spend, ctx);
+      const stored = await readUsage(harness, providers, NOON, { fresh: false });
+      expect(stored.spent).toBeCloseTo(0.123, 10);
+      expect(stored.providers).toEqual(readout.providers);
+      expect(await harness.snapshot(Spend, ctx)).toEqual(before);
 
       const text = usageText(readout, "America/Chicago").split("\n");
       expect(text[0]).toBe(

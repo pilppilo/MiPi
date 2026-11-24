@@ -43,7 +43,7 @@ import {
   passRequest,
 } from "../src/agent/memory-pass.ts";
 import { afterNextChicagoMidnight, chicagoDay, Proactive } from "../src/agent/proactive.ts";
-import { Spend } from "../src/agent/spend.ts";
+import { measureSpend, Spend } from "../src/agent/spend.ts";
 import { formatScheduledInstruction } from "../src/protocol.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -547,6 +547,44 @@ describe("the memory pass", () => {
       await agent.pass.run();
       expect(agent.pass.wake().at).toBe(afterNextChicagoMidnight(agent.clock.now));
       expect(agent.requests).toHaveLength(1);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("measures before every pass, so one that crosses the spend cap holds the next (M9)", async () => {
+    let harness: Harness | undefined;
+    let elsewhere: number | undefined;
+    // The faux provider reports no cost: the first pass's request spends elsewhere instead.
+    const costly: FauxResponseStep = async () => {
+      await harness!.commit(async (tx) => {
+        (await tx.doc(UsageDoc, elsewhere as never)).models["faux/faux-1"] = {
+          input: 1,
+          output: 1,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 2,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.5 },
+        };
+      }, ctx);
+      return lessons("Likes tea");
+    };
+    const agent = await openAgent([say("Noted."), say("Noted too."), costly, lessons("Never")]);
+    harness = agent.harness;
+    try {
+      await chat(agent, "I like tea.", "web:1");
+      await chat(agent, "I like coffee.", "web:2");
+      elsewhere = (
+        await agent.harness.createConversation({ ownership: { kind: "ownerless" } }, ctx)
+      ).id;
+      await agent.harness.commit((tx) => measureSpend(tx, agent.clock.now), ctx);
+      await agent.harness.commit(async (tx) => {
+        (await tx.doc(Spend)).limit = 0.4;
+      }, ctx);
+      idle(agent);
+      await agent.pass.run();
+      // Two chat replies and one pass: the second pass saw the cap.
+      expect(agent.requests).toHaveLength(3);
     } finally {
       await agent.close();
     }

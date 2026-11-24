@@ -6,15 +6,16 @@
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import type { Harness } from "./pi/durable.ts";
 import { DEFAULT_DAILY_RUN_CAP, Proactive } from "./proactive.ts";
-import { dollars, holdOf, measureSpend } from "./spend.ts";
+import { dollars, holdOf, measureSpend, Spend, spentToday } from "./spend.ts";
 import { localTime } from "./stamp.ts";
 import type { ProviderUsageCache } from "./usage-sources.ts";
 import { chicagoDay } from "../lib/cap-day.ts";
 import type { UsageReadout } from "../protocol.ts";
 
 /**
- * Today's readout. `fresh: false` reads no provider, showing only what was read in the last five minutes: the admin
- * status uses it, so a deploy's checks never wait on a provider.
+ * Today's readout, with today's spend measured first. `fresh: false` measures nothing and asks no provider: it shows
+ * the spend as last measured and what providers said in the last five minutes. The admin status uses it, so a GET
+ * writes nothing and a deploy's checks never wait on a provider.
  */
 export async function readUsage(
   harness: Harness,
@@ -24,12 +25,12 @@ export async function readUsage(
 ): Promise<UsageReadout> {
   const day = chicagoDay(now);
   const own = await harness.commit(async (tx) => {
-    const spend = await measureSpend(tx, now);
+    const spend = options.fresh === false ? await tx.doc(Spend) : await measureSpend(tx, now);
     const proactive = await tx.doc(Proactive);
     const held = holdOf(spend, now);
     return {
       day,
-      spent: spend.spent,
+      spent: spentToday(spend, now),
       ...(spend.limit === undefined ? {} : { cap: spend.limit }),
       ...(held === undefined ? {} : { held }),
       runs: {
@@ -57,15 +58,23 @@ export function usageText(readout: UsageReadout, timeZone: string | undefined): 
     lines.push("Over the spend cap: scheduled runs and background work wait until tomorrow.");
   }
   for (const provider of readout.providers) {
-    if (provider.status === "unavailable") {
-      lines.push(`${provider.label}: usage unavailable (${provider.reason}).`);
-      continue;
+    switch (provider.status) {
+      case "unavailable":
+        lines.push(`${provider.label}: usage unavailable (${provider.reason}).`);
+        break;
+      case "ok": {
+        const windows = provider.windows.map(
+          (window) =>
+            `${window.name} ${Math.round(window.percent)}%${window.limited ? ", limit reached" : ""} (resets ${localTime(window.resetsAt, timeZone)})`,
+        );
+        lines.push(`${provider.label}: ${windows.join("; ")}.`);
+        break;
+      }
+      default: {
+        const _: never = provider;
+        throw new Error("Unknown provider usage");
+      }
     }
-    const windows = provider.windows.map(
-      (window) =>
-        `${window.name} ${Math.round(window.percent)}%${window.limited ? ", limit reached" : ""} (resets ${localTime(window.resetsAt, timeZone)})`,
-    );
-    lines.push(`${provider.label}: ${windows.join("; ")}.`);
   }
   return lines.join("\n");
 }
