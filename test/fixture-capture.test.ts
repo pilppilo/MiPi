@@ -23,15 +23,16 @@ import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { boundConversation, startingProfile } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { composeMipi } from "../src/agent/composition.ts";
+import { AnswerSettlement } from "../src/agent/answers.ts";
 import { PROFILES } from "./mipi.ts";
 import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { Proactive } from "../src/agent/proactive.ts";
 import { Spend } from "../src/agent/spend.ts";
-import { RelayRuntime } from "../src/agent/relay.ts";
+import { RelayRuntime } from "../src/doors/relay/relay.ts";
 import { AgentSettings, withOwnHost } from "../src/agent/settings.ts";
-import { TelegramChannelRuntime } from "../src/agent/telegram.ts";
+import { TelegramChannelRuntime } from "../src/doors/telegram/channel.ts";
 import { stampInput } from "../src/agent/stamp.ts";
 import type { ExportHeader, ExportPage, ExportRow } from "../src/agent/maintenance.ts";
 import worker from "../src/worker/index.ts";
@@ -102,10 +103,11 @@ async function seed(): Promise<void> {
     models.setProvider(faux.provider);
     // Pi Durable's clock, fixed on a Monday evening long before any replay: the reminder's times are all in the past.
     const harnessClock = Date.UTC(2026, 0, 5, 23, 0);
+    const composition = composeMipi({ models, model: { provider: "faux", modelId: "faux-1" } });
     const harness = await Harness.open(
       await openDurableObjectSqliteStorage(state.storage),
       {
-        ...createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+        ...composition.options,
         now: () => harnessClock,
       },
       ctx,
@@ -120,7 +122,18 @@ async function seed(): Promise<void> {
       version: MIPI_VERSION,
       modelList: new ModelList(async () => ["deepseek-v4.1-flash"]),
       send: async () => ({ kind: "sent", messageId: 1 }),
+      delivery: composition.connectors.delivery,
       armAlarm: async () => {},
+      onWakeChange: () => {},
+      report: (message, error) => {
+        throw new Error(`${message}: ${String(error)}`);
+      },
+      now: () => clock.now,
+    });
+    // Core's answer settlement, run by hand below as the alarm would run it before the door.
+    const answers = new AnswerSettlement({
+      harness,
+      connectors: composition.connectors,
       onWakeChange: () => {},
       report: (message, error) => {
         throw new Error(`${message}: ${String(error)}`);
@@ -196,6 +209,7 @@ async function seed(): Promise<void> {
       clock.now += 3_000;
       await telegram.flushDue();
       await harness.waitForIdle(ctx);
+      await answers.reconcile();
       await telegram.recover();
 
       expect(await relay.admit("fixture-relay", "Hello from PiDu")).toEqual({
@@ -208,6 +222,7 @@ async function seed(): Promise<void> {
       await harness.waitForIdle(ctx);
     } finally {
       pass.close();
+      answers.close();
       telegram.close();
       relay.close();
       await harness.close(ctx);

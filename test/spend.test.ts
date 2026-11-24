@@ -22,16 +22,19 @@ import {
   SPEND_NOTICE,
   spentToday,
 } from "../src/agent/spend.ts";
-import { BATCH_WINDOW_MS } from "../src/agent/telegram.ts";
-import { TelegramChannel } from "../src/agent/telegram-state.ts";
+import { BATCH_WINDOW_MS } from "../src/doors/telegram/channel.ts";
+import { TelegramChannel } from "../src/doors/telegram/state.ts";
 import { recordUsage } from "../src/agent/side-calls.ts";
 import { chicagoDay } from "../src/lib/cap-day.ts";
-import { type ReminderInput, ScheduledReminder } from "../src/tools/reminder-task.ts";
+import {
+  type ReminderInput,
+  ScheduledReminder,
+} from "../src/extensions/builtin/reminders/reminder-task.ts";
 import {
   DeliverScheduledInstruction,
   heldSuccessor,
   type ScheduledInstruction,
-} from "../src/tools/schedule-task.ts";
+} from "../src/extensions/builtin/reminders/schedule-task.ts";
 import {
   type Agent,
   CHAT,

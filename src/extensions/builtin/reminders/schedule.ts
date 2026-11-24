@@ -1,10 +1,11 @@
-import { int, obj, opt, str } from "../agent/pi/schema.ts";
+import { int, obj, opt, str } from "../../../agent/pi/schema.ts";
 import {
   type ConversationId,
   defineDoc,
-  LiveDoc,
   type ToolRegistration,
-} from "../agent/pi/durable.ts";
+  type Tx,
+} from "../../../agent/pi/durable.ts";
+import { type Connectors, connectorsOf } from "../../../agent/connectors.ts";
 import {
   DeliverScheduledInstruction,
   nextRecurrenceRunAt,
@@ -12,11 +13,16 @@ import {
   type ScheduledInstruction,
   ScheduleDeliveries,
 } from "./schedule-task.ts";
-import { MAX_PROMPT_CHARACTERS } from "../protocol.ts";
-import { AgentSettings } from "../agent/settings.ts";
-import { DEFAULT_TIME_ZONE } from "../agent/stamp.ts";
-import { TelegramChannel } from "../agent/telegram-state.ts";
-import { describeMoment, describeRepeat, parseWhen, type Repeat, WHEN_HELP } from "../lib/when.ts";
+import { MAX_PROMPT_CHARACTERS } from "../../../protocol.ts";
+import { AgentSettings } from "../../../agent/settings.ts";
+import { DEFAULT_TIME_ZONE } from "../../../agent/stamp.ts";
+import {
+  describeMoment,
+  describeRepeat,
+  parseWhen,
+  type Repeat,
+  WHEN_HELP,
+} from "../../../lib/when.ts";
 import {
   MAX_ACTIVE_REMINDERS,
   type ReminderDestination,
@@ -98,9 +104,8 @@ function copyScheduledInstruction(scheduled: ScheduledInstruction): ScheduledIns
   };
 }
 
-const reminderResult = (reminder: ReminderInput, now: number) => {
-  const where =
-    reminder.destination.kind === "telegram" ? "this Telegram chat" : "this conversation";
+const reminderResult = (reminder: ReminderInput, now: number, connectors: Connectors) => {
+  const where = connectors.delivery.describe(reminder.destination);
   const when =
     reminder.every === undefined
       ? describeMoment(reminder.first, reminder.zone, now)
@@ -123,29 +128,21 @@ const reminderResult = (reminder: ReminderInput, now: number) => {
 };
 
 /**
- * What the run calling `schedule` is answering, read in the tool's commit: the inputs it placed (`pi.live`), and for
- * each whether it is a reminder's occurrence (`sched:`) and which Telegram chat it came from (the door's pending
- * inputs). Inputs queued behind the run don't count: the run isn't answering them yet.
+ * What the run calling `schedule` is answering, read in the tool's commit through origin: whether every input it placed
+ * is automated (a reminder's own run), and where a reply goes, from the first input whose door names a place (the
+ * Telegram chat it came from), else the conversation itself. Inputs queued behind the run don't count: the run isn't
+ * answering them yet.
  */
 async function runInputs(
-  tx: ScanTx,
+  tx: Tx,
+  connectors: Connectors,
   conversationId: ConversationId,
-): Promise<{ readonly reminderOnly: boolean; readonly telegramChat?: number }> {
-  const placed = (await tx.doc(LiveDoc, conversationId)).run?.inputs ?? [];
-  const pending = (await tx.doc(TelegramChannel)).inputs;
-  let reminders = 0;
-  let telegramChat: number | undefined;
-  for (const id of placed) {
-    const record = await tx.submission(id);
-    if (record?.requestId?.startsWith("sched:") === true) reminders += 1;
-    const telegram = pending.find(
-      (input) => input.submissionId === id && input.updateId !== undefined,
-    );
-    telegramChat ??= telegram?.chatId;
-  }
+): Promise<{ readonly reminderOnly: boolean; readonly destination: ReminderDestination }> {
   return {
-    reminderOnly: placed.length > 0 && reminders === placed.length,
-    ...(telegramChat === undefined ? {} : { telegramChat }),
+    reminderOnly: await connectors.origins.runAutomatedOnly(tx, conversationId),
+    destination:
+      (await connectors.origins.replyTo(tx, conversationId)) ??
+      connectors.delivery.transcriptOf(conversationId),
   };
 }
 
@@ -212,8 +209,10 @@ export const scheduleTool: ToolRegistration = {
   }),
   replay: "safe",
   execute: async (args: ScheduleArguments, api, context) => {
+    const connectors = connectorsOf(api.registry);
     const intent = await api.snapshot(ScheduleIntent, api.taskId, context);
-    if (intent?.reminder !== undefined) return reminderResult(intent.reminder, api.now());
+    if (intent?.reminder !== undefined)
+      return reminderResult(intent.reminder, api.now(), connectors);
     if (intent?.scheduled !== undefined) return scheduleResult(intent.scheduled, api.now());
 
     // Deadlines are stored on the Harness clock, which the sleeping delivery task wakes on.
@@ -278,16 +277,13 @@ export const scheduleTool: ToolRegistration = {
         if (intent.reminder !== undefined) return intent.reminder;
         // A reminder's own turn makes no reminders: a repeat already schedules itself, and a reminder that makes
         // reminders could multiply. A turn that also answers someone's message may.
-        const run = await runInputs(tx, api.conversationId);
+        const run = await runInputs(tx, connectors, api.conversationId);
         if (run.reminderOnly) {
           throw new Error(
             "schedule can't run while carrying out a reminder: a repeating reminder already schedules itself",
           );
         }
-        const destination: ReminderDestination =
-          run.telegramChat === undefined
-            ? { kind: "web", conversationId: api.conversationId }
-            : { kind: "telegram", chatId: run.telegramChat };
+        const { destination } = run;
         const requested: ReminderInput = {
           id: `reminder:${api.taskId}`,
           conversationId: api.conversationId,
@@ -310,16 +306,14 @@ export const scheduleTool: ToolRegistration = {
         });
         return requested;
       }, context);
-      return reminderResult(reminder, now);
+      return reminderResult(reminder, now, connectors);
     }
     return scheduleResult(persisted, now);
   },
 };
 
-type ScanTx = Parameters<Parameters<Parameters<ToolRegistration["execute"]>[1]["commit"]>[0]>[0];
-
 /** Schedules not yet finished: reminders, and legacy deliveries still in storage. Stops counting at the cap. */
-async function activeReminders(tx: ScanTx): Promise<number> {
+async function activeReminders(tx: Tx): Promise<number> {
   let count = 0;
   for (const kind of [
     ScheduledReminder.definition.name,

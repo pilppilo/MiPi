@@ -15,7 +15,6 @@ import {
 } from "./pi/durable.ts";
 import { openDurableObjectSqliteStorage } from "./pi/sqlite.ts";
 import { normalizeUsername } from "../lib/identity.ts";
-import { webRequest } from "../lib/requests.ts";
 import type { MutableModels } from "./pi/ai.ts";
 import type { AgentComposition } from "./harness.ts";
 import { composeMipi } from "./composition.ts";
@@ -36,6 +35,8 @@ import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
 import { holdOf, measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
+import { isPausedNow } from "./gates.ts";
+import { AnswerSettlement } from "./answers.ts";
 import { readUsage, usageText } from "./usage.ts";
 import { ProviderUsageCache, usageSources } from "./usage-sources.ts";
 import {
@@ -73,13 +74,14 @@ import {
   type UsageReadout,
 } from "../protocol.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
-import type { TelegramInbound } from "../lib/telegram-update.ts";
+import type { TelegramInbound } from "../doors/telegram/update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
 import { AlarmScheduler, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
 import { WakeSources } from "./wake-sources.ts";
-import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
-import { botApiSender } from "./telegram-outbox.ts";
-import { RelayRuntime, type RelayResult } from "./relay.ts";
+import { isTelegramChange, TelegramChannelRuntime } from "../doors/telegram/channel.ts";
+import { botApiSender } from "../doors/telegram/bot-api.ts";
+import { RelayRuntime, type RelayResult } from "../doors/relay/relay.ts";
+import { webRequest } from "../doors/web/index.ts";
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
   Response.json(body, { status, headers });
@@ -743,6 +745,7 @@ export class MipiAgent extends DurableObject<Env> {
         version: MIPI_VERSION,
         modelList: this.#modelList,
         send: botApiSender(this.#setting("TELEGRAM_BOT_TOKEN")),
+        delivery: composition.connectors.delivery,
         armAlarm: () => this.#alarm.schedule({ ...harness.wake(), active: true }),
         onWakeChange: () =>
           void this.#alarm
@@ -753,13 +756,27 @@ export class MipiAgent extends DurableObject<Env> {
         report: reportError,
       });
       this.#telegram = telegram;
-      // Each part that needs the alarm, once. The alarm runs them in this order, after Pi Durable's resume.
+      // Core's answer settlement: every door's inputs and every reminder, judged once and delivered through the doors.
+      const answers = new AnswerSettlement({
+        harness,
+        connectors: composition.connectors,
+        // Telegram sends what was queued now, rather than at the next alarm.
+        onQueued: () => telegram.refresh(),
+        onWakeChange: () =>
+          void this.#alarm
+            .schedule(harness.wake())
+            .catch(() => this.ctx.abort("Alarm write failed")),
+        report: reportError,
+      });
+      // Each part that needs the alarm, once. The alarm runs them in this order, after Pi Durable's resume: answers
+      // first, so what they queue drains in the same alarm.
+      this.#wakeSources.register(answers);
       this.#wakeSources.register({
         name: "Telegram door",
         wake: () => telegram.wake(),
         // Telegram windows, replies, deferred commands and sends that are due.
         run: () => telegram.recover(),
-        // A reminder (M6) records its Telegram answers in the door's document from inside its own task.
+        // Core's settlement, a reminder or a notice queues Telegram messages in the door's outbox.
         observes: isTelegramChange,
         refresh: () => telegram.refresh(),
         close: () => telegram.close(),
@@ -800,7 +817,10 @@ export class MipiAgent extends DurableObject<Env> {
       await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
       harness.resume();
-      // Replies and sends a lost instance left; not awaited, so opening never waits on Telegram.
+      // Answers and sends a lost instance left; not awaited, so opening never waits on Telegram.
+      void answers
+        .start()
+        .catch((error) => reportError("Starting the answer settlement failed", error));
       void telegram
         .start()
         .catch((error) => reportError("Starting the Telegram door failed", error));
@@ -1218,7 +1238,7 @@ export class MipiAgent extends DurableObject<Env> {
         }
         // Paused (`MIPI_PAUSED`, M9): a new message is refused with a clear reason, nothing admitted. A retry of one
         // admitted before still gets its answer above.
-        if ((await this.#harness.snapshot(Spend, BACKGROUND_CONTEXT))?.paused === true) {
+        if (await isPausedNow(this.#harness)) {
           throw new Error(PAUSED_REPLY);
         }
         // Arm before admitting work: `onWake` runs after the commit, so an instance that dies in between is

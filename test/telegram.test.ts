@@ -1,8 +1,8 @@
 /** The Telegram door's pure parts: chunking, update parsing, outbox transitions, the Bot API sender, and the webhook. */
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { botApiSender } from "../src/doors/telegram/bot-api.ts";
 import {
-  botApiSender,
   AMBIGUOUS_RETRY_MS,
   enqueueReply,
   FINISHED_REPLIES_KEPT,
@@ -15,13 +15,13 @@ import {
   pickSend,
   recordSend,
   type SendResult,
-} from "../src/agent/telegram-outbox.ts";
-import { splitForTelegram, TELEGRAM_TEXT_LIMIT } from "../src/lib/telegram-text.ts";
+} from "../src/doors/telegram/outbox.ts";
+import { splitForTelegram, TELEGRAM_TEXT_LIMIT } from "../src/doors/telegram/text.ts";
 import {
   parseAllowedUserIds,
   parseTelegramUpdate,
   type TelegramInbound,
-} from "../src/lib/telegram-update.ts";
+} from "../src/doors/telegram/update.ts";
 import {
   handleTelegramWebhook,
   MAX_UPDATE_BYTES,

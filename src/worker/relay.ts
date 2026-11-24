@@ -10,8 +10,8 @@
  */
 import { constantTimeEqual } from "./auth.ts";
 import { readBounded } from "./body.ts";
-import { RELAY_MAX_TEXT_BYTES, type RelayResult } from "../agent/relay.ts";
-import { isRelayKey } from "../lib/requests.ts";
+import { RELAY_MAX_TEXT_BYTES, type RelayResult } from "../doors/relay/relay.ts";
+import { isRelayKey } from "../doors/relay/requests.ts";
 
 /** The shortest token accepted, as for `ADMIN_TOKEN`: a shorter one leaves the relay off. */
 export const RELAY_TOKEN_MIN_LENGTH = 24;

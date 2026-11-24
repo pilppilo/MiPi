@@ -12,10 +12,14 @@ import {
   Harness,
   MemoryStorage,
 } from "@earendil-works/pi-durable";
+import { connectedCore } from "./mipi.ts";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSettings } from "../src/agent/settings.ts";
-import { DeliverScheduledInstruction, ScheduleDeliveries } from "../src/tools/schedule-task.ts";
-import { scheduleTool } from "../src/tools/schedule.ts";
+import {
+  DeliverScheduledInstruction,
+  ScheduleDeliveries,
+} from "../src/extensions/builtin/reminders/schedule-task.ts";
+import { scheduleTool } from "../src/extensions/builtin/reminders/schedule.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -33,6 +37,7 @@ describe("scheduled instructions", () => {
     const models = createModels();
     models.setProvider(faux.provider);
     const registry = createRegistry();
+    registry.install(connectedCore());
     registry.install(
       defineExtension({
         name: "schedule",
@@ -159,6 +164,7 @@ describe("scheduled instructions", () => {
     const models = createModels();
     models.setProvider(faux.provider);
     const registry = createRegistry();
+    registry.install(connectedCore());
     registry.install(
       defineExtension({
         name: "schedule",
@@ -306,6 +312,7 @@ describe("scheduled instructions", () => {
       const models = createModels();
       models.setProvider(faux.provider);
       const registry = createRegistry();
+      registry.install(connectedCore());
       registry.install(
         defineExtension({
           name: "schedule",

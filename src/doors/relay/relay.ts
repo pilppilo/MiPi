@@ -7,25 +7,23 @@
  * a conflict. Every message counts against a sliding hourly cap; a duplicate or a conflict doesn't. Inputs queued
  * behind a running turn are answered together (`followUpMode: "all"`), so every key in that turn gets the same answer.
  */
-import { BACKGROUND_CONTEXT } from "./pi/context.ts";
+import { BACKGROUND_CONTEXT } from "../../agent/pi/context.ts";
 import {
-  configure,
   type ConversationId,
   defineDoc,
   type Harness,
   type SubmissionId,
-} from "./pi/durable.ts";
-import { boundConversation, ChannelBindings } from "./conversations.ts";
-import { answerText } from "./proactive.ts";
-import { Spend } from "./spend.ts";
-import type { ProfileName, Profiles } from "./profiles.ts";
-import { stampInput } from "./stamp.ts";
-import { defang } from "../lib/fence.ts";
-import { isRelayKey, relayRequest } from "../lib/requests.ts";
+  type Tx,
+} from "../../agent/pi/durable.ts";
+import { boundConversation, ChannelBindings } from "../../agent/conversations.ts";
+import { isPaused } from "../../agent/gates.ts";
+import { answerText } from "../../agent/proactive.ts";
+import type { ProfileName, Profiles } from "../../agent/profiles.ts";
+import { stampInput } from "../../agent/stamp.ts";
+import { defang } from "../../lib/fence.ts";
+import { isRelayKey, relayRequest } from "./requests.ts";
 
 const context = BACKGROUND_CONTEXT;
-
-type Tx = Parameters<typeof configure>[0];
 
 /** The channel key the relay's conversation is bound under (`conversations.ts`). */
 export const RELAY_BINDING = "relay:pidu";
@@ -240,7 +238,7 @@ export class RelayRuntime {
       if (existing !== undefined) return { kind: "existing", submissionId: existing.id };
       // Paused (`MIPI_PAUSED`, M9): nothing new is admitted, so nothing waits to run later. A key admitted before still
       // gets its answer above.
-      if ((await tx.doc(Spend)).paused === true) {
+      if (await isPaused(tx)) {
         return { kind: "refused", result: { kind: "paused" } };
       }
       const recent = recentAdmissions(state.admitted, now);

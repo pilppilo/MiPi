@@ -1,7 +1,7 @@
 /** The PiDu relay's HTTP door (M7 slice 2): authentication, request checks, and how results map to responses. */
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { RELAY_MAX_TEXT_BYTES, type RelayResult } from "../src/agent/relay.ts";
+import { RELAY_MAX_TEXT_BYTES, type RelayResult } from "../src/doors/relay/relay.ts";
 import {
   handleRelay,
   IDEMPOTENCY_HEADER,

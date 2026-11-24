@@ -9,15 +9,15 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
-import { BATCH_WINDOW_MS } from "../src/agent/telegram.ts";
+import { BATCH_WINDOW_MS } from "../src/doors/telegram/channel.ts";
 import {
   decideOccurrence,
   LATE_WINDOW_MS,
   MAX_ACTIVE_REMINDERS,
   nextOccurrence,
   ScheduledReminder,
-} from "../src/tools/reminder-task.ts";
-import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
+} from "../src/extensions/builtin/reminders/reminder-task.ts";
+import { DeliverScheduledInstruction } from "../src/extensions/builtin/reminders/schedule-task.ts";
 import {
   boundId,
   CHAT,

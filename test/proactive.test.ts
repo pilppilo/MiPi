@@ -22,10 +22,13 @@ import {
   RUN_ROUND_LIMIT,
   takeRound,
 } from "../src/agent/proactive.ts";
-import { BATCH_WINDOW_MS } from "../src/agent/telegram.ts";
+import { BATCH_WINDOW_MS } from "../src/doors/telegram/channel.ts";
 import { isNoSend, visibleAnswer } from "../src/lib/proactive-text.ts";
 import { formatReminder, parseScheduledInstruction } from "../src/protocol.ts";
-import { type ReminderInput, ScheduledReminder } from "../src/tools/reminder-task.ts";
+import {
+  type ReminderInput,
+  ScheduledReminder,
+} from "../src/extensions/builtin/reminders/reminder-task.ts";
 import {
   type Agent,
   boundId,

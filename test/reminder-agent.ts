@@ -17,12 +17,17 @@ import {
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { ChannelBindings } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { composeMipi } from "../src/agent/composition.ts";
+import { AnswerSettlement } from "../src/agent/answers.ts";
+import { WakeSources } from "../src/agent/wake-sources.ts";
 import { PROFILES } from "./mipi.ts";
 import { ModelList } from "../src/agent/model-list.ts";
-import { isTelegramChange, TelegramChannelRuntime } from "../src/agent/telegram.ts";
-import { type ReminderInput, ScheduledReminder } from "../src/tools/reminder-task.ts";
-import type { TelegramInbound } from "../src/lib/telegram-update.ts";
+import { isTelegramChange, TelegramChannelRuntime } from "../src/doors/telegram/channel.ts";
+import {
+  type ReminderInput,
+  ScheduledReminder,
+} from "../src/extensions/builtin/reminders/reminder-task.ts";
+import type { TelegramInbound } from "../src/doors/telegram/update.ts";
 
 export const ctx = BACKGROUND_CONTEXT;
 export const CHAT = 4242;
@@ -43,9 +48,16 @@ export const inObject = (test: (storage: () => Promise<Storage>) => Promise<void
 
 export const clock = { now: Date.now() };
 
+/** The Telegram door as the alarm runs it: core's answer settlement first, then the door (`agent-do.ts`). */
+export interface TestDoor {
+  admit: TelegramChannelRuntime["admit"];
+  /** What the alarm runs: settled answers, then the door's windows, commands and outbox. */
+  recover(): Promise<void>;
+}
+
 export interface Agent {
   readonly harness: Harness;
-  readonly channel: TelegramChannelRuntime;
+  readonly channel: TestDoor;
   readonly sent: Array<{ chatId: number; text: string }>;
   /** Moves the clock, then does what the alarm does: resume, wait for turns, run the door. */
   advance(ms: number): Promise<void>;
@@ -64,10 +76,11 @@ export async function openAgent(
   faux.setResponses([...responses]);
   const models = createModels();
   models.setProvider(faux.provider);
+  const composition = composeMipi({ models, model: { provider: "faux", modelId: "faux-1" } });
   const harness = await Harness.open(
     await storage(),
     {
-      ...createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+      ...composition.options,
       now: () => clock.now,
       // The alarm's job here is the test's: no timers.
       onWake: () => {},
@@ -78,7 +91,10 @@ export async function openAgent(
   /** What the door reported: `settle()` fails on any. */
   const reports: string[] = [];
   let calls = 0;
-  const channel = new TelegramChannelRuntime({
+  const report = (message: string, error: unknown) => {
+    reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
+  };
+  const door = new TelegramChannelRuntime({
     harness,
     owner: "jerome",
     timeZone: ZONE,
@@ -90,23 +106,46 @@ export async function openAgent(
       sent.push({ chatId, text: message.text });
       return { kind: "sent", messageId: ++calls };
     },
+    delivery: composition.connectors.delivery,
     armAlarm: async () => {},
     onWakeChange: () => {},
     ...(usage === undefined ? {} : { usage }),
-    report: (message, error) => {
-      reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
-    },
+    report,
     now: () => clock.now,
   });
-  // As the Durable Object does: a reminder records Telegram answers in the door's document.
+  const answers = new AnswerSettlement({
+    harness,
+    connectors: composition.connectors,
+    onQueued: () => door.refresh(),
+    onWakeChange: () => {},
+    report,
+    now: () => clock.now,
+  });
+  // As the Durable Object does: answers first, then the door, and each looks again after the commits it observes.
+  const sources = new WakeSources(report);
+  sources.register(answers);
+  sources.register({
+    name: "Telegram door",
+    wake: () => door.wake(),
+    run: () => door.recover(),
+    observes: isTelegramChange,
+    refresh: () => door.refresh(),
+    close: () => door.close(),
+  });
   harness.observeCommits({
-    advance: (publication) => {
-      if (isTelegramChange(publication)) channel.refresh();
-    },
+    advance: (publication) => sources.observe(publication),
     end: () => {},
   });
+  const channel: TestDoor = {
+    admit: (update) => door.admit(update),
+    recover: async () => {
+      await answers.reconcile();
+      await door.recover();
+    },
+  };
   harness.resume();
-  await channel.start();
+  await answers.start();
+  await door.start();
   const agent: Agent = {
     harness,
     channel,
@@ -115,7 +154,7 @@ export async function openAgent(
       for (let rounds = 0; rounds < 50; rounds++) {
         await harness.waitForIdle(ctx);
         await channel.recover();
-        const wake = channel.wake();
+        const wake = sources.wake();
         if (wake.at !== undefined) clock.now = Math.max(clock.now, wake.at);
         else if (!wake.active) break;
         // Let a reminder's commit reach the door before looking again.
@@ -134,7 +173,7 @@ export async function openAgent(
       return openAgent(storage, next, usage);
     },
     close: async () => {
-      channel.close();
+      sources.close();
       await harness.close(ctx);
     },
   };

@@ -4,35 +4,37 @@
  * repeating reminder no longer depends on the model scheduling a successor (the legacy `schedule-task.ts` way, kept
  * for schedules made before this).
  *
- * Where the answer goes was decided when the reminder was made and is stored with it: a reminder made from Telegram
- * answers in that private chat, whether or not a browser is open and even after `/new` rebinds the chat; one made on
- * the web stays in its conversation. Each occurrence has its own request id (`sched:<reminder>:<n>`), so a retried
+ * Where the answer goes was decided when the reminder was made and is stored with it, as a delivery destination: a
+ * reminder made from Telegram answers in that private chat, whether or not a browser is open and even after `/new`
+ * rebinds the chat; one made on the web stays in its conversation. Core judges and delivers the answer (`proactive.ts`,
+ * `delivery.ts`); this task only admits the occurrence and asks the gates first. Each occurrence has its own request id (`sched:<reminder>:<n>`), so a retried
  * admission admits nothing twice. Pattern from pi-pocket src/server/schedules.ts @ 2f060f2 (wait → send, skip while
  * the last one is still queued, late times move to the next).
  */
-import { type ConversationId, defineTask } from "../agent/pi/durable.ts";
-import { localTime } from "../agent/stamp.ts";
+import { type ConversationId, defineTask } from "../../../agent/pi/durable.ts";
+import { connectorsOf } from "../../../agent/connectors.ts";
+import type { DeliveryDestination } from "../../../agent/delivery.ts";
 import {
-  afterNextChicagoMidnight,
-  hasRound,
-  noticeCap,
-  Proactive,
-  type ReminderDestination,
-  takeRound,
-} from "../agent/proactive.ts";
-import { holdOf, measureSpend, noticeSpend, Spend } from "../agent/spend.ts";
-import { TelegramChannel } from "../agent/telegram-state.ts";
-import { enqueueReply, TelegramOutbox } from "../agent/telegram-outbox.ts";
-import { reminderRequest } from "../lib/requests.ts";
-import { describeRepeat, nextRepeat, type Repeat } from "../lib/when.ts";
-import { formatReminder } from "../protocol.ts";
+  expectProactive,
+  measureToday,
+  proactiveHold,
+  type ProactiveHold,
+  tellHeld,
+} from "../../../agent/gates.ts";
+import { recentProactiveSends } from "../../../agent/proactive.ts";
+import { localTime } from "../../../agent/stamp.ts";
+import { afterNextChicagoMidnight } from "../../../lib/cap-day.ts";
+import { describeRepeat, nextRepeat, type Repeat } from "../../../lib/when.ts";
+import { formatReminder } from "../../../protocol.ts";
+import { reminderRequest } from "./requests.ts";
 
 /** A repeat time this late is skipped: past a maintenance pause or a slow alarm, but not hours late. */
 export const LATE_WINDOW_MS = 15 * 60_000;
 /** Reminders of this agent that may be waiting at once, legacy schedules included. */
 export const MAX_ACTIVE_REMINDERS = 25;
 
-export type { ReminderDestination } from "../agent/proactive.ts";
+/** Where a reminder's answer goes: a delivery destination, opaque here (`delivery.ts`). */
+export type ReminderDestination = DeliveryDestination;
 
 export type ReminderInput = {
   readonly id: string;
@@ -62,11 +64,8 @@ type ReminderProgress = {
   skippedPaused?: number;
 };
 
-/** Why a due occurrence goes out without the model, or waits: the run cap, the spend cap, or a pause. */
-type Held = "run-cap" | "spend-cap" | "paused";
-
-/** What a held one-time Telegram reminder says, sent as it is without the model. */
-const HELD_REASON: Readonly<Record<Held, string>> = {
+/** What a held one-time reminder says where its destination can push, sent as it is without the model. */
+const HELD_REASON: Readonly<Record<ProactiveHold, string>> = {
   "run-cap": "daily limit reached",
   "spend-cap": "daily spend cap reached",
   paused: "MiPi is paused",
@@ -135,7 +134,11 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
       }
       const now = runtime.now();
       // Today's spend first, in a commit of its own: the next one submits, and its submit must be its first write.
-      await runtime.commit((tx) => measureSpend(tx, now).then(() => undefined), context);
+      await runtime.commit(async (tx) => {
+        await measureToday(tx, now);
+        return undefined;
+      }, context);
+      const { delivery } = connectorsOf(runtime.registry);
       await runtime.commit(async (tx) => {
         // Reads first; the submit is this commit's first table write. Documents may change before it.
         const previous =
@@ -151,7 +154,6 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
           now,
           previousBusy: previous?.status === "queued" || previous?.status === "placed",
         });
-        const proactive = await tx.doc(Proactive);
         const requestId = reminderRequest(input.id, state.sent);
         const existing =
           decision === "send"
@@ -160,33 +162,28 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
         let sent = state.sent;
         // pi-ledger L7. The run's first model round is checked here, and counted after the submit. A pause or the
         // spend cap holds it as the run cap does (M9).
-        const spend = await tx.doc(Spend);
-        const held: Held | undefined =
-          decision !== "send" || existing !== undefined
-            ? undefined
-            : (holdOf(spend, now) ?? (hasRound(proactive, now) ? undefined : "run-cap"));
+        const held: ProactiveHold | undefined =
+          decision !== "send" || existing !== undefined ? undefined : await proactiveHold(tx, now);
         if (held !== undefined) {
-          const chat = input.destination.kind === "telegram" ? input.destination.chatId : undefined;
+          const pushable = delivery.canPush(input.destination) ? input.destination : undefined;
           // The owner paused MiPi: no notice. A cap tells once a day.
-          const channel = await tx.doc(TelegramChannel);
-          const outbox = await tx.doc(TelegramOutbox);
-          if (held === "run-cap") noticeCap(proactive, channel, outbox, chat, now);
-          else if (held === "spend-cap") noticeSpend(spend, channel, outbox, chat, now);
+          await tellHeld(tx, delivery, held, pushable, now);
           if (input.every === undefined) {
-            if (chat !== undefined) {
+            if (pushable !== undefined) {
               // A reminder asked for is never dropped: sent as it is, without the model.
-              enqueueReply(
-                outbox,
+              await delivery.send(
+                tx,
+                pushable,
                 {
                   id: `reminder-capped:${input.id}`,
-                  chatId: chat,
                   text: `Reminder: ${input.instruction} (sent without MiPi: ${HELD_REASON[held]}).`,
                 },
                 now,
               );
               return { status: "terminal", outcome: { status: "completed", result: null } };
             }
-            // On the web: it runs once the caps reset, past Chicago midnight (or looks again then, if still paused).
+            // Nowhere to push (the web): it runs once the caps reset, past Chicago midnight (or looks again then, if
+            // still paused).
             return {
               status: "running",
               checkpoint: { ...state, phase: "wait", at: afterNextChicagoMidnight(now) },
@@ -197,7 +194,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             input,
             localTime(now, input.zone),
             input.every === undefined ? undefined : describeRepeat(input.every),
-            proactive.recentSends.map(({ sentAt, snippet }) => ({
+            (await recentProactiveSends(tx)).map(({ sentAt, snippet }) => ({
               at: localTime(sentAt, input.zone),
               snippet,
             })),
@@ -212,22 +209,18 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
               whenBusy: "followUp",
             }));
           if (existing === undefined) {
-            // Its answer is judged and delivered when it settles (`proactive.ts`).
-            const pending = await tx.doc(Proactive);
-            takeRound(pending, now);
-            pending.pending = [
-              ...pending.pending,
+            // Its answer is judged and delivered when it settles, and its first round is charged now (core).
+            await expectProactive(
+              tx,
               {
                 submissionId,
-                reminderId: input.id,
+                sourceId: input.id,
                 instruction: input.instruction,
                 conversationId: conversation.id,
-                destination:
-                  input.destination.kind === "telegram"
-                    ? { kind: "telegram", chatId: input.destination.chatId }
-                    : { kind: "web", conversationId: input.destination.conversationId },
+                destination: input.destination,
               },
-            ];
+              now,
+            );
           }
           sent += 1;
         }

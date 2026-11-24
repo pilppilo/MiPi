@@ -25,6 +25,12 @@ import {
 import { DEFAULT_PROFILE, type ProfileName, Profiles, type ProfileTable } from "./profiles.ts";
 import { proactiveExtension } from "./proactive.ts";
 import { bindUntrustedTools, CORE_EXTENSION_NAME } from "./untrusted.ts";
+import {
+  bindConnectors,
+  type Connectors,
+  createConnectors,
+  type DoorRegistration,
+} from "./connectors.ts";
 
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
@@ -38,6 +44,8 @@ export interface HarnessConfig {
   readonly model?: { readonly provider: string; readonly modelId: string };
   /** The built-in and optional extensions, from the composition root (`composition.ts`). */
   readonly extensions: readonly MipiExtension[];
+  /** The doors' registrations (origin, delivery, pending inputs), from the composition root. */
+  readonly doors: readonly DoorRegistration[];
   /** Which tools each profile offers, from the composition root. */
   readonly profiles: ProfileTable;
 }
@@ -73,6 +81,8 @@ export interface AgentComposition {
   readonly options: HarnessOptions;
   readonly extensions: ResolvedExtensions;
   readonly profiles: Profiles;
+  /** Origin, delivery and the doors' pending inputs, as the doors and extensions registered them. */
+  readonly connectors: Connectors;
   /** Every durable task of the installed extensions: the startup guard's version check (`APP_TASKS` before COD-209). */
   readonly tasks: ReturnType<typeof collectTasks>;
   /**
@@ -99,6 +109,11 @@ export function composeAgent(config: HarnessConfig): AgentComposition {
   const core = coreExtensions();
   const extensions = resolveExtensions(core, config.extensions);
   bindUntrustedTools(core[0]!, extensions.untrustedTools);
+  const connectors = createConnectors(
+    config.doors,
+    config.extensions.flatMap((extension) => extension.origins ?? []),
+  );
+  bindConnectors(core[0]!, connectors);
   const profiles = new Profiles(config.profiles, extensions.tools);
   const profile = config.profile ?? DEFAULT_PROFILE;
   const registry = createRegistry();
@@ -141,6 +156,7 @@ export function composeAgent(config: HarnessConfig): AgentComposition {
     options,
     extensions,
     profiles,
+    connectors,
     tasks: collectTasks(extensions.installed),
     switchOff: async (tx, conversationId, names) => {
       const off = names.map((name) => {

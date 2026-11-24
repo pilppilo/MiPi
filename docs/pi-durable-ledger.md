@@ -70,7 +70,7 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Kind:** workaround
 - **Since:** 0.1.0-alpha.8
 - **Upstream:** Pi Durable 1.6.0's `beforeRequest` hook gets a read-only `HookApi`, so nothing can count a model request as it starts. The first hook that can run a task (and write) is `afterTools`, after each tool round.
-- **MiPi:** counts a reminder run's first round when the reminder is admitted (`reminder-task.ts`), and each later round in `RoundBudget`'s `afterTools` task (`proactive.ts`), which ends the run with `terminate` at the cap. Provider retries inside one round don't count. The spend cap and `MIPI_PAUSED` (0.1.0-beta.2, `spend.ts`) are checked at the same two places, with today's spend measured first, so a run can overshoot the spend cap by the one round in flight. Drop the admission checks and check in `beforeRequest` once a hook there can write or stop the request.
+- **MiPi:** counts a reminder run's first round when the reminder is admitted (`expectProactive`, from the reminders' `reminder-task.ts`), and each later round in `RoundBudget`'s `afterTools` task (`proactive.ts`), which ends the run with `terminate` at the cap. Provider retries inside one round don't count. The spend cap and `MIPI_PAUSED` (0.1.0-beta.2, `spend.ts`) are checked at the same two places, with today's spend measured first, so a run can overshoot the spend cap by the one round in flight. Drop the admission checks and check in `beforeRequest` once a hook there can write or stop the request.
 
 ## Closed
 

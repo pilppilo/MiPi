@@ -12,7 +12,7 @@ import {
   parseAllowedUserIds,
   parseTelegramUpdate,
   type TelegramInbound,
-} from "../lib/telegram-update.ts";
+} from "../doors/telegram/update.ts";
 
 export const TELEGRAM_SECRET_HEADER = "X-Telegram-Bot-Api-Secret-Token";
 /** Updates are small (a message is at most 4,096 characters); anything much larger is not one. */

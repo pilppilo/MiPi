@@ -15,14 +15,16 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
-import { originOf, UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
+import { UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
+import { composeMipi } from "../src/agent/composition.ts";
 import type { AdminStatus, MipiAgent } from "../src/agent/agent-do.ts";
 import { ChannelBindings } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
-import { ScheduledReminder } from "../src/tools/reminder-task.ts";
+import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
 import worker from "../src/worker/index.ts";
 import type { Fixture } from "./fixture-capture.test.ts";
+import { clock, openAgent, said } from "./reminder-agent.ts";
 import { withSpikeToken } from "./spike.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -46,8 +48,8 @@ describe("fixture databases", () => {
   for (const [path, fixture] of Object.entries(fixtures)) {
     const version = fixture.header.meta.app_version ?? path;
 
-    it(`opens and works after restoring ${version}`, async () => {
-      const owner = `fixture-${version}`.replace(/[^\w-]/g, "-");
+    /** Restores the fixture into a fresh agent named `owner` through the admin API, as a real restore would. */
+    const restoreInto = async (owner: string): Promise<AdminStatus> => {
       const ownerEnv = { ...env, MIPI_OWNER: owner } as unknown as Env;
       const call = async <T>(method: string, route: string, payload?: unknown): Promise<T> => {
         const response = await worker.fetch(
@@ -65,7 +67,6 @@ describe("fixture databases", () => {
         if (!response.ok) throw new Error(`${method} ${route}: ${response.status} ${result.error}`);
         return result;
       };
-
       await call("POST", "/api/admin/restore/begin", {
         header: fixture.header,
         confirm: fixture.header.meta.app_version,
@@ -75,9 +76,15 @@ describe("fixture databases", () => {
           rows: fixture.rows.slice(index, index + 50),
         });
       }
-      const status = await call<AdminStatus>("POST", "/api/admin/restore/end", {
+      return call<AdminStatus>("POST", "/api/admin/restore/end", {
         rows: countsOf(fixture.rows),
       });
+    };
+
+    it(`opens and works after restoring ${version}`, async () => {
+      const owner = `fixture-${version}`.replace(/[^\w-]/g, "-");
+      const ownerEnv = { ...env, MIPI_OWNER: owner } as unknown as Env;
+      const status = await restoreInto(owner);
       // The startup guard read it and Pi Durable opened it.
       expect(status.state).toEqual({ kind: "open" });
 
@@ -127,7 +134,9 @@ describe("fixture databases", () => {
       // What each door stored reads back as this build's documents and tasks.
       await runInDurableObject(stub, async (_instance, state) => {
         await state.blockConcurrencyWhile(async () => {});
-        // Every stored input's origin reads from its request id, as it was stored then (COD-209).
+        // Every stored input's origin reads from its request id, as it was stored then (COD-209), through the prefixes
+        // the doors and the reminders register (COD-210).
+        const { originOf } = composeMipi().connectors.origins;
         const origins = state.storage.sql
           .exec<{ record: string }>("SELECT record FROM submissions")
           .toArray()
@@ -169,6 +178,48 @@ describe("fixture databases", () => {
           expect(reminders[0]!.record.input).toMatchObject({ every: expect.anything() });
         } finally {
           await harness.close(ctx);
+        }
+      });
+      await evictDurableObject(stub);
+    }, 30_000);
+
+    it(`wakes and runs the reminder sleeping in ${version}, now a task of the reminders extension`, async () => {
+      const owner = `fixture-run-${version}`.replace(/[^\w-]/g, "-");
+      expect((await restoreInto(owner)).state).toEqual({ kind: "open" });
+      const stub = env.AGENT.getByName(owner);
+      // The restored agent closes its harness (as an export does), so a test agent with a faux model and a test
+      // clock opens the same data beside nothing.
+      await runInDurableObject(stub, (instance: MipiAgent) => instance.exportBegin());
+      await runInDurableObject(stub, async (_instance, state) => {
+        const [row] = state.storage.sql
+          .exec<{ record: string }>(`SELECT record FROM tasks WHERE kind = '"app.reminder"'`)
+          .toArray();
+        const record = JSON.parse(row!.record) as {
+          input: { instruction: string; destination: { kind: string; chatId?: number } };
+          state: { status: string; checkpoint: { at: number; sent: number } };
+        };
+        expect(record.state.status).toBe("sleeping");
+        expect(record.input.destination).toMatchObject({ kind: "telegram" });
+        // A minute after its next time: due, and not late.
+        clock.now = record.state.checkpoint.at + 60_000;
+        const agent = await openAgent(
+          () => openDurableObjectSqliteStorage(state.storage),
+          said("Time to renew the passport."),
+        );
+        try {
+          await agent.settle();
+          expect(agent.sent).toEqual([
+            { chatId: record.input.destination.chatId, text: "Time to renew the passport." },
+          ]);
+          const reminders = (await agent.harness.inspect(ctx)).tasks.filter(
+            ({ record: task }) => task.kind === ScheduledReminder.definition.name,
+          );
+          expect(reminders).toHaveLength(1);
+          expect(
+            (reminders[0]!.record.state as { checkpoint?: { sent?: number } }).checkpoint?.sent,
+          ).toBe(record.state.checkpoint.sent + 1);
+        } finally {
+          await agent.close();
         }
       });
       await evictDurableObject(stub);

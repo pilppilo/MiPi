@@ -30,10 +30,10 @@ import {
   relayContent,
   RelayRuntime,
   type RelayState,
-} from "../src/agent/relay.ts";
+} from "../src/doors/relay/relay.ts";
 import { Spend } from "../src/agent/spend.ts";
 import { attribute, clip, defang, quoted } from "../src/lib/fence.ts";
-import { isRelayKey, relayRequest } from "../src/lib/requests.ts";
+import { isRelayKey, relayRequest } from "../src/doors/relay/requests.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 

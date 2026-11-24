@@ -1,8 +1,9 @@
 /**
- * The Telegram door's session document, on its own so the scheduling tools can record where a reminder's answer goes
- * without importing the door (`telegram.ts` imports the profiles, which import the tools).
+ * The Telegram door's session document (`app.telegram`). Only the door reads or writes it (lint-enforced): core reaches
+ * the inputs waiting for an answer through the door's pending-input source, and the chat a reply goes to through its
+ * origin and delivery registrations (`index.ts`).
  */
-import { defineDoc } from "./pi/durable.ts";
+import { defineDoc } from "../../agent/pi/durable.ts";
 
 /** Messages of one idle chat waiting for their window to end. */
 export type StagedWindow = {

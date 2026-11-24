@@ -5,7 +5,7 @@
  */
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import type { Harness } from "./pi/durable.ts";
-import { DEFAULT_DAILY_RUN_CAP, Proactive } from "./proactive.ts";
+import { runCap } from "./gates.ts";
 import { dollars, holdOf, measureSpend, Spend, spentToday } from "./spend.ts";
 import { localTime } from "./stamp.ts";
 import type { ProviderUsageCache } from "./usage-sources.ts";
@@ -26,17 +26,13 @@ export async function readUsage(
   const day = chicagoDay(now);
   const own = await harness.commit(async (tx) => {
     const spend = options.fresh === false ? await tx.doc(Spend) : await measureSpend(tx, now);
-    const proactive = await tx.doc(Proactive);
     const held = holdOf(spend, now);
     return {
       day,
       spent: spentToday(spend, now),
       ...(spend.limit === undefined ? {} : { cap: spend.limit }),
       ...(held === undefined ? {} : { held }),
-      runs: {
-        used: proactive.cap?.day === day ? proactive.cap.count : 0,
-        cap: proactive.limit ?? DEFAULT_DAILY_RUN_CAP,
-      },
+      runs: await runCap(tx, now),
     };
   }, BACKGROUND_CONTEXT);
   return {

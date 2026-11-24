@@ -17,7 +17,9 @@ import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { composeMipi } from "../src/agent/composition.ts";
+import { AnswerSettlement } from "../src/agent/answers.ts";
+import { earliestWake } from "../src/agent/wake-sources.ts";
 import { PROFILES } from "./mipi.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import {
@@ -29,17 +31,15 @@ import {
   RECEIPT_WINDOW_MS,
   RECEIPTS_KEPT,
   BATCH_WINDOW_MS,
+  isTelegramChange,
   TelegramChannel,
   TelegramChannelRuntime,
   type TelegramChannelState,
   addReceipt,
-} from "../src/agent/telegram.ts";
-import {
-  type SendResult,
-  type TelegramMessage,
-  TelegramOutbox,
-} from "../src/agent/telegram-outbox.ts";
-import type { TelegramInbound } from "../src/lib/telegram-update.ts";
+} from "../src/doors/telegram/channel.ts";
+import { type SendResult, TelegramOutbox } from "../src/doors/telegram/outbox.ts";
+import type { TelegramMessage } from "../src/doors/telegram/bot-api.ts";
+import type { TelegramInbound } from "../src/doors/telegram/update.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const CHAT = 4242;
@@ -59,6 +59,8 @@ const delivered: SendBehaviour = async (_chatId, _text, call) => ({
 interface Agent {
   readonly harness: Harness;
   readonly channel: TelegramChannelRuntime;
+  /** Core's answer settlement, which turns the door's settled inputs into replies (`answers.ts`). */
+  readonly answers: AnswerSettlement;
   readonly sent: Sent[];
   /** Waits for every turn, then runs what the alarm would. */
   settle(): Promise<void>;
@@ -97,11 +99,8 @@ async function openAgent(
   faux.setResponses([...(options.responses ?? [])]);
   const models = createModels();
   models.setProvider(faux.provider);
-  const harness = await Harness.open(
-    await storage(),
-    createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
-    ctx,
-  );
+  const composition = composeMipi({ models, model: { provider: "faux", modelId: "faux-1" } });
+  const harness = await Harness.open(await storage(), composition.options, ctx);
   const sent: Sent[] = [];
   /** What this agent's channel reported: `settle()` fails on anything but a refused send. */
   const reports: string[] = [];
@@ -121,6 +120,7 @@ async function openAgent(
       if (result.kind === "sent") sent.push({ chatId, text: message.text });
       return result;
     },
+    delivery: composition.connectors.delivery,
     armAlarm: async () => {},
     ...(options.onSubmitted === undefined ? {} : { onSubmitted: options.onSubmitted }),
     onWakeChange: () => {},
@@ -129,17 +129,38 @@ async function openAgent(
     },
     now: () => clock.now,
   });
+  const answers = new AnswerSettlement({
+    harness,
+    connectors: composition.connectors,
+    onQueued: () => channel.refresh(),
+    onWakeChange: () => {},
+    report: (message, error) => {
+      reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
+    },
+    now: () => clock.now,
+  });
+  // As the Durable Object does: each looks again after the commits it observes.
+  harness.observeCommits({
+    advance: (publication) => {
+      if (answers.observes(publication)) answers.refresh();
+      if (isTelegramChange(publication)) channel.refresh();
+    },
+    end: () => {},
+  });
+  await answers.start();
   await channel.start();
   const agent: Agent = {
     harness,
     channel,
+    answers,
     sent,
     settle: async () => {
       // Turns, then what the alarm would do; let window deadlines, pacing and retry waits pass on the test clock.
       for (let rounds = 0; rounds < 100; rounds++) {
         await harness.waitForIdle(ctx);
+        await answers.reconcile();
         await channel.recover();
-        const wake = channel.wake();
+        const wake = earliestWake(answers.wake(), channel.wake());
         if (wake.at !== undefined) clock.now = Math.max(clock.now, wake.at);
         else if (!wake.active) break;
       }
@@ -154,6 +175,7 @@ async function openAgent(
       return openAgent(storage, next);
     },
     close: async () => {
+      answers.close();
       channel.close();
       await harness.close(ctx);
     },
@@ -308,6 +330,7 @@ describe("Telegram admission", () => {
         await agent.channel.admit(text(1, "Hi"));
         await endWindow(agent);
         // The instance dies right after the answer commits: nothing turned it into a reply yet.
+        agent.answers.close();
         agent.channel.close();
         await agent.harness.waitForIdle(ctx);
         expect((await outbox(agent.harness)).replies).toEqual([]);
@@ -488,7 +511,7 @@ describe("Telegram replies", () => {
         await agent.channel.admit(text(1, "Two parts"));
         await endWindow(agent);
         await agent.harness.waitForIdle(ctx);
-        await agent.channel.reconcile();
+        await agent.answers.reconcile();
         void agent.channel.drain();
         await new Promise((resolve) => setTimeout(resolve, 20));
         agent = await agent.restart();
@@ -516,7 +539,7 @@ describe("Telegram replies", () => {
         await agent.channel.admit(text(1, "Two parts"));
         await endWindow(agent);
         await agent.harness.waitForIdle(ctx);
-        await agent.channel.reconcile();
+        await agent.answers.reconcile();
         void agent.channel.drain();
         await new Promise((resolve) => setTimeout(resolve, 20));
         // Restarted, and its one retry is cut off as well.
@@ -555,7 +578,7 @@ describe("Telegram replies", () => {
         await agent.channel.admit(text(1, "Hi"));
         await endWindow(agent);
         await agent.harness.waitForIdle(ctx);
-        await agent.channel.reconcile();
+        await agent.answers.reconcile();
         const first = agent.channel.drain();
         const second = agent.channel.drain();
         // An overlapping alarm, too, while the first request is out.
@@ -970,6 +993,7 @@ describe("Telegram bursts (COD-174)", () => {
         await endWindow(agent);
         // No watcher turns either failure into a notice: both settle first, and one reconcile after the restart
         // sees them together.
+        agent.answers.close();
         agent.channel.close();
         await agent.harness.waitForIdle(ctx);
         agent = await agent.restart();

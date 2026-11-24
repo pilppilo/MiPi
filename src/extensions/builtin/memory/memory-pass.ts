@@ -38,13 +38,15 @@ import {
   REMEMBER_TOOL_NAME,
 } from "./memory.ts";
 import {
-  afterNextChicagoMidnight,
-  chicagoDay,
-  Proactive,
-  PROACTIVE_DOC_KIND,
-} from "../../../agent/proactive.ts";
+  GATE_DOC_KINDS,
+  heldAsMeasured,
+  heldAsMeasuredNow,
+  measureToday,
+  runsOff,
+  runsOffNow,
+} from "../../../agent/gates.ts";
 import { recordUsage, sideCall } from "../../../agent/side-calls.ts";
-import { holdOf, measureSpend, Spend, SPEND_DOC_KIND } from "../../../agent/spend.ts";
+import { afterNextChicagoMidnight, chicagoDay } from "../../../lib/cap-day.ts";
 import { entryTouches } from "../../../agent/untrusted.ts";
 import type { CommitChanges } from "../../../agent/wake-sources.ts";
 import { defang } from "../../../lib/fence.ts";
@@ -323,9 +325,9 @@ export async function planPass(
   // Full, or the scheduled runs paused (the pass is unasked-for spend too): nothing is written, and the wake leaves the
   // pass out until a lesson is forgotten or the runs resume (`#earliest`), so it never wakes just to wait again.
   if (memory.lessons.length >= MAX_LESSONS) return { kind: "skip", reason: "memory full" };
-  if ((await tx.doc(Proactive)).limit === 0) return { kind: "skip", reason: "paused" };
+  if (await runsOff(tx)) return { kind: "skip", reason: "paused" };
   // Paused (`MIPI_PAUSED`): as above. Over the spend cap: the range waits for Chicago midnight (M9).
-  const hold = holdOf(await tx.doc(Spend), now);
+  const hold = await heldAsMeasured(tx, now);
   if (hold === "paused") return { kind: "skip", reason: "paused" };
   if (hold === "spend-cap") return wait(afterNextChicagoMidnight(now), "spend cap");
   // Today's passes used: the range waits for Chicago midnight, so the alarm doesn't come straight back for it.
@@ -376,9 +378,8 @@ export function isMemoryPassChange(publication: CommitChanges): boolean {
     (change) =>
       change.type === "entry" ||
       (change.type === "document" &&
-        (change.record?.kind === MEMORY_DOC_KIND ||
-          change.record?.kind === PROACTIVE_DOC_KIND ||
-          change.record?.kind === SPEND_DOC_KIND)),
+        change.record !== undefined &&
+        (change.record.kind === MEMORY_DOC_KIND || GATE_DOC_KINDS.includes(change.record.kind))),
   );
 }
 
@@ -478,10 +479,9 @@ export class MemoryPassRuntime {
     const { harness } = this.#options;
     const memory = await harness.snapshot(MemoryDoc, context);
     if ((memory?.lessons.length ?? 0) >= MAX_LESSONS) return undefined;
-    if ((await harness.snapshot(Proactive, context))?.limit === 0) return undefined;
+    if (await runsOffNow(harness)) return undefined;
     // Paused: no wake until the agent starts again unpaused. Over the spend cap: nothing before Chicago midnight (M9).
-    const spend = await harness.snapshot(Spend, context);
-    const hold = spend === undefined ? undefined : holdOf(spend, this.#now());
+    const hold = await heldAsMeasuredNow(harness, this.#now());
     if (hold === "paused") return undefined;
     const notBefore = hold === "spend-cap" ? afterNextChicagoMidnight(this.#now()) : undefined;
     const state = (await harness.snapshot(MemoryPassDoc, context)) ?? { marks: {} };
@@ -549,7 +549,7 @@ export class MemoryPassRuntime {
     const { harness } = this.#options;
     const now = this.#now();
     // Today's spend first, in every pass: an earlier pass of the same alarm may have crossed the spend cap (M9).
-    await harness.commit((tx) => measureSpend(tx, now), context);
+    await harness.commit((tx) => measureToday(tx, now), context);
     // What the conversation is offered, as Pi Durable resolves it: its profile and the extensions it has selected.
     const conversation = await harness.conversation(conversationId, context);
     const offered = (await conversation?.agent(context))?.tools ?? [];

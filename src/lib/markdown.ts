@@ -1,7 +1,7 @@
 /**
  * The markdown the model writes, parsed for the doors that show it formatted: the web transcript renders the tree as
  * React elements (`src/client/Markdown.tsx`), and Telegram renders the inline part as its HTML subset
- * (`telegram-html.ts`). Nothing here produces markup: what a door makes of a node is up to the door, so text can never
+ * (the Telegram door's `html.ts`). Nothing here produces markup: what a door makes of a node is up to the door, so text can never
  * become a tag.
  *
  * Inline: code is read before anything else, so `*` and `_` inside code stay as they are; `_` and `__` are emphasis
