@@ -46,7 +46,7 @@ const commitOf = (kind: string): CommitChanges => ({
 
 describe("WakeSources", () => {
   it("takes the earliest wake, active when any source is", () => {
-    const sources = new WakeSources();
+    const sources = new WakeSources(() => {});
     expect(sources.wake()).toEqual({ active: false });
     const first = fakeSource("first");
     const second = fakeSource("second");
@@ -58,7 +58,7 @@ describe("WakeSources", () => {
   });
 
   it("refuses a second source with the same name", () => {
-    const sources = new WakeSources();
+    const sources = new WakeSources(() => {});
     sources.register(fakeSource("Telegram door").source);
     expect(() => sources.register(fakeSource("Telegram door").source)).toThrow(
       /already registered/,
@@ -66,7 +66,7 @@ describe("WakeSources", () => {
   });
 
   it("refreshes only the sources that observe a commit", () => {
-    const sources = new WakeSources();
+    const sources = new WakeSources(() => {});
     const memory = fakeSource("memory pass", "app.memory");
     const telegram = fakeSource("Telegram door", "app.telegram");
     const quiet = fakeSource("quiet");
@@ -78,7 +78,7 @@ describe("WakeSources", () => {
   });
 
   it("closes every source and empties the list, so a reopen registers each once", () => {
-    const sources = new WakeSources();
+    const sources = new WakeSources(() => {});
     const first = fakeSource("first");
     sources.register(first.source);
     sources.close();
@@ -91,7 +91,7 @@ describe("WakeSources", () => {
 
   it("adds a part to the alarm with one registration: its wake sets it, a commit refreshes it, the alarm runs it", async () => {
     const writes: Array<number | "deleted"> = [];
-    const sources = new WakeSources();
+    const sources = new WakeSources(() => {});
     const scheduler = new AlarmScheduler(
       {
         setAlarm: async (at) => {
@@ -127,9 +127,46 @@ describe("WakeSources", () => {
     expect(heartbeat.calls).toEqual(["refresh", "run"]);
   });
 
+  it("skips a source closed while an earlier consumer ran, as when maintenance takes the object", async () => {
+    const sources = new WakeSources(() => {});
+    const later = fakeSource("later");
+    sources.register(later.source);
+    await runAlarmConsumers(
+      [["Pi Durable resume", () => sources.close()], ...sources.consumers()],
+      () => {},
+      async () => {},
+    );
+    expect(later.calls).toEqual(["close"]);
+  });
+
+  it("keeps closing and observing the other sources when one throws, and reports it", () => {
+    const reports: string[] = [];
+    const sources = new WakeSources((message) => reports.push(message));
+    sources.register({
+      name: "broken",
+      wake: () => ({ active: false }),
+      run: () => {},
+      observes: () => {
+        throw new Error("bad check");
+      },
+      close: () => {
+        throw new Error("bad close");
+      },
+    });
+    const healthy = fakeSource("healthy", "app.memory");
+    sources.register(healthy.source);
+    sources.observe(commitOf("app.memory"));
+    sources.close();
+    expect(healthy.calls).toEqual(["refresh", "close"]);
+    expect(reports).toEqual([
+      "Refreshing the broken after a commit failed",
+      "Closing the broken failed",
+    ]);
+  });
+
   it("runs the sources in registration order, after Pi Durable", async () => {
     const order: string[] = [];
-    const sources = new WakeSources();
+    const sources = new WakeSources(() => {});
     for (const name of ["Telegram door", "memory pass"]) {
       sources.register({ name, wake: () => ({ active: false }), run: () => order.push(name) });
     }

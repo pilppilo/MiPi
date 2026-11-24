@@ -243,7 +243,7 @@ export class MipiAgent extends DurableObject<Env> {
    * The parts that need the alarm besides Pi Durable (`wake-sources.ts`): registered while the harness opens
    * (`#initialize`), cleared when it closes (`#shutdown`).
    */
-  readonly #wakeSources = new WakeSources();
+  readonly #wakeSources = new WakeSources(reportError);
   /** The one alarm, for Pi Durable's sleeps, the wake sources and the heartbeat (`alarm.ts`). */
   readonly #alarm = new AlarmScheduler(this.ctx.storage, () => this.#wakeSources.wake());
   /** The Telegram door's admissions, replies and outbox; present while the harness is open. */
@@ -761,6 +761,8 @@ export class MipiAgent extends DurableObject<Env> {
       // A failed open leaves no source behind for the next one to register again.
       this.#wakeSources.close();
       this.#telegram = undefined;
+      this.#relay?.close();
+      this.#relay = undefined;
       await activity?.stop();
       await harness.close(BACKGROUND_CONTEXT);
       throw error;

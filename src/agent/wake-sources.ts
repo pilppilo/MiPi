@@ -35,12 +35,21 @@ export interface WakeSource {
   close?(): void;
 }
 
+/** Reports a source's failure with the source named, without stopping the others (`reportError` in the agent). */
+export type ReportSourceError = (message: string, error: unknown) => void;
+
 /**
  * The registered sources, in registration order. Registered while the harness opens and cleared when it closes, so a
- * reopen after an export or restore starts from an empty list instead of adding every source twice.
+ * reopen after an export or restore starts from an empty list instead of adding every source twice. One source that
+ * throws never stops the others: each call is isolated and reported.
  */
 export class WakeSources {
+  readonly #report: ReportSourceError;
   #sources: WakeSource[] = [];
+
+  constructor(report: ReportSourceError) {
+    this.#report = report;
+  }
 
   /** Adds a source. A second source with the same name is a wiring mistake, so it throws. */
   register(source: WakeSource): void {
@@ -63,20 +72,36 @@ export class WakeSources {
   /** Refreshes every source that observes the commit. */
   observe(publication: CommitChanges): void {
     for (const source of this.#sources) {
-      if (source.observes?.(publication) === true) source.refresh?.();
+      try {
+        if (source.observes?.(publication) === true) source.refresh?.();
+      } catch (error) {
+        this.#report(`Refreshing the ${source.name} after a commit failed`, error);
+      }
     }
   }
 
-  /** The alarm's consumers for the sources, in registration order (`runAlarmConsumers`). */
+  /**
+   * The alarm's consumers for the sources, in registration order (`runAlarmConsumers`). Each looks the source up when
+   * its turn comes, so a source closed while an earlier consumer ran (maintenance taking the object) doesn't run.
+   */
   consumers(): readonly (readonly [name: string, run: () => unknown])[] {
-    return this.#sources.map((source) => [source.name, () => source.run()] as const);
+    return this.#sources.map(
+      (source) =>
+        [source.name, () => (this.#sources.includes(source) ? source.run() : undefined)] as const,
+    );
   }
 
-  /** Closes every source and empties the list. */
+  /** Closes every source and empties the list. One that throws is reported, and the rest still close. */
   close(): void {
     const sources = this.#sources;
     this.#sources = [];
-    for (const source of sources) source.close?.();
+    for (const source of sources) {
+      try {
+        source.close?.();
+      } catch (error) {
+        this.#report(`Closing the ${source.name} failed`, error);
+      }
+    }
   }
 }
 
