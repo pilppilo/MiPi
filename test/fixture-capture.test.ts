@@ -6,7 +6,7 @@
  *
  * The data is made by MiPi's own composition and doors on a faux model: a web conversation that remembered a lesson,
  * a Telegram chat with a sent reply and a repeating reminder (on a clock fixed in the past, so it never fires on replay), a relay exchange, a background memory pass, and the
- * agent's own settings.
+ * agent's own settings, the spend cap's count among them.
  */
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -27,6 +27,7 @@ import { createHarnessOptions } from "../src/agent/harness.ts";
 import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/agent/memory-pass.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { Proactive } from "../src/agent/proactive.ts";
+import { Spend } from "../src/agent/spend.ts";
 import { RelayRuntime } from "../src/agent/relay.ts";
 import { AgentSettings, withOwnHost } from "../src/agent/settings.ts";
 import { TelegramChannelRuntime } from "../src/agent/telegram.ts";
@@ -148,6 +149,16 @@ async function seed(): Promise<void> {
         settings.timeZone = "America/Chicago";
         settings.ownHosts = withOwnHost(settings.ownHosts, "mipi-staging.example.workers.dev");
         (await tx.doc(Proactive)).limit = 50;
+        // The spend cap's day (M9): measured once, with a cap and the notices' days set.
+        const spend = await tx.doc(Spend);
+        Object.assign(spend, {
+          day: "2026-01-01",
+          spent: 0.25,
+          lastTotal: 0.25,
+          limit: 1,
+          noticeDay: "2026-01-01",
+          ownerNoticeDay: "2026-01-01",
+        });
       }, ctx);
 
       // Bound as the web door binds it, so the fixture holds the `web` channel binding too.

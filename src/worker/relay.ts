@@ -20,6 +20,8 @@ export const MAX_RELAY_BODY_BYTES = 6 * RELAY_MAX_TEXT_BYTES + 1024;
 export const IDEMPOTENCY_HEADER = "Idempotency-Key";
 /** Seconds a client waits before trying again when the agent is unavailable. */
 export const UNAVAILABLE_RETRY_SECONDS = 30;
+/** Seconds a client waits before trying again while MiPi is paused (`MIPI_PAUSED`). */
+export const PAUSED_RETRY_SECONDS = 3600;
 
 export interface RelayAgent {
   /** `host` is the hostname the request came to, which the agent keeps so `web_fetch` refuses it. */
@@ -89,6 +91,9 @@ export function relayResponse(id: string, result: RelayResult): Response {
       return json({ id, error: "Unavailable" }, 503, {
         "Retry-After": String(UNAVAILABLE_RETRY_SECONDS),
       });
+    case "paused":
+      // A pause lasts until the owner redeploys without it: no point retrying within minutes.
+      return json({ id, error: "Paused" }, 503, { "Retry-After": String(PAUSED_RETRY_SECONDS) });
     default: {
       const _: never = result;
       throw new Error("Unknown relay result");

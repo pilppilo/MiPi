@@ -29,7 +29,10 @@ import {
 import { TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
 import { enqueueReply, TelegramOutbox, type OutboxState } from "./telegram-outbox.ts";
 import { isNoSend, visibleAnswer } from "../lib/proactive-text.ts";
-import { zonedMoment } from "../lib/when.ts";
+import { chicagoDay } from "../lib/cap-day.ts";
+import { holdOf, measureSpend, noticeSpend, Spend } from "./spend.ts";
+
+export { afterNextChicagoMidnight, CAP_ZONE, chicagoDay } from "../lib/cap-day.ts";
 
 type Tx = Parameters<typeof configure>[0];
 const context = BACKGROUND_CONTEXT;
@@ -38,8 +41,6 @@ const context = BACKGROUND_CONTEXT;
 export const DEFAULT_DAILY_RUN_CAP = 50;
 /** Tool rounds one proactive run may take. */
 export const RUN_ROUND_LIMIT = 8;
-/** The cap's day is the owner's calendar day. */
-export const CAP_ZONE = "America/Chicago";
 /** Confirmed proactive messages kept, and shown to the next reminder so it doesn't repeat itself. */
 export const RECENT_SENDS_KEPT = 10;
 /** Runs, stops and tool errors kept for reconciliation; far more than are ever waiting at once. */
@@ -52,7 +53,8 @@ export type ReminderDestination =
   | { readonly kind: "telegram"; readonly chatId: number }
   | { readonly kind: "web"; readonly conversationId: number };
 
-export type StopReason = "daily-cap" | "run-limit";
+/** Why `RoundBudget` ended a run. An older build reads `spend-cap` and `paused` as `run-limit`. */
+export type StopReason = "daily-cap" | "run-limit" | "spend-cap" | "paused";
 
 export type ProactiveState = {
   /** Reminder occurrences admitted and not settled yet. */
@@ -96,22 +98,6 @@ export function parseDailyRunCap(value: string | undefined): { cap: number; inva
   return Number.isInteger(cap) && cap >= 0
     ? { cap }
     : { cap: DEFAULT_DAILY_RUN_CAP, invalid: value };
-}
-
-const dayFormat = new Intl.DateTimeFormat("en-CA", {
-  timeZone: CAP_ZONE,
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-});
-
-/** The Chicago calendar day of `now`, as `YYYY-MM-DD`. */
-export const chicagoDay = (now: number): string => dayFormat.format(now);
-
-/** A second past the next Chicago midnight, so a wake right on the boundary is already in the new day. */
-export function afterNextChicagoMidnight(now: number): number {
-  const [year, month, day] = chicagoDay(now).split("-").map(Number) as [number, number, number];
-  return zonedMoment(year, month, day + 1, 0, 0, CAP_ZONE) + 1_000;
 }
 
 /** Today's count, started afresh on a new day. */
@@ -235,15 +221,19 @@ export const RoundBudget = defineTask<
             ),
           ]);
         }
-        // pi-ledger L7. Rounds are counted here, after each tool round, because `beforeRequest` can't write.
+        // pi-ledger L7. Rounds are counted here, after each tool round, because `beforeRequest` can't write. The spend
+        // cap and a pause are checked here too, with today's spend measured first (M9).
         const now = runtime.now();
+        const hold = holdOf(await measureSpend(tx, now), now);
         // The run's own limit first: a round it won't take is never charged to the day.
         const reason: StopReason | undefined =
           (run?.turns ?? 0) >= RUN_ROUND_LIMIT
             ? "run-limit"
-            : !takeRound(state, now)
-              ? "daily-cap"
-              : undefined;
+            : hold !== undefined
+              ? hold
+              : !takeRound(state, now)
+                ? "daily-cap"
+                : undefined;
         if (reason === undefined) {
           return { status: "terminal", outcome: { status: "completed", result: {} } };
         }
@@ -389,16 +379,32 @@ export async function reconcileAnswers(tx: Tx, now: number): Promise<boolean> {
       { id, chatId, text, ...(reminderId === undefined ? {} : { proactive: { reminderId } }) },
       now,
     );
+  const spend = await tx.doc(Spend);
   const stopNotice = (input: ProactiveState["pending"][number], reason: StopReason) => {
     const chat = input.destination.kind === "telegram" ? input.destination.chatId : undefined;
-    if (reason === "daily-cap") {
-      noticeCap(proactive, channel, outbox, chat, now);
-    } else if (chat !== undefined) {
-      send(
-        `run-limit:${input.submissionId}`,
-        chat,
-        `The reminder "${reminderLabel(input.instruction)}" stopped after ${RUN_ROUND_LIMIT} rounds.`,
-      );
+    switch (reason) {
+      case "daily-cap":
+        noticeCap(proactive, channel, outbox, chat, now);
+        return;
+      case "spend-cap":
+        noticeSpend(spend, channel, outbox, chat, now);
+        return;
+      case "paused":
+        // The owner paused MiPi: the run stops without a word.
+        return;
+      case "run-limit":
+        if (chat !== undefined) {
+          send(
+            `run-limit:${input.submissionId}`,
+            chat,
+            `The reminder "${reminderLabel(input.instruction)}" stopped after ${RUN_ROUND_LIMIT} rounds.`,
+          );
+        }
+        return;
+      default: {
+        const _: never = reason;
+        throw new Error("Unknown stop reason");
+      }
     }
   };
 

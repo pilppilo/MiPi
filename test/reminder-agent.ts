@@ -56,6 +56,8 @@ export interface Agent {
 export async function openAgent(
   storage: () => Promise<Storage>,
   responses: readonly FauxResponseStep[] = [],
+  /** The Telegram door's `/usage` readout (M9); unset, as in a door without one. */
+  usage?: () => Promise<string>,
 ): Promise<Agent> {
   const faux = fauxProvider();
   faux.setResponses([...responses]);
@@ -88,6 +90,7 @@ export async function openAgent(
     },
     armAlarm: async () => {},
     onWakeChange: () => {},
+    ...(usage === undefined ? {} : { usage }),
     report: (message, error) => {
       reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
     },
@@ -126,7 +129,7 @@ export async function openAgent(
     },
     restart: async (next = []) => {
       await agent.close();
-      return openAgent(storage, next);
+      return openAgent(storage, next, usage);
     },
     close: async () => {
       channel.close();

@@ -1,4 +1,8 @@
 OPENCODE_API_KEY=
+# Optional (M9): an OpenCode key with usage permission, for the usage readout, when OPENCODE_API_KEY has none. And the
+# OpenCode workspace id, if Go's usage endpoint asks for one.
+OPENCODE_USAGE_KEY=
+OPENCODE_ORG_ID=
 # The M1 spike lock, used until Cloudflare Access is on: a long random string.
 MIPI_SPIKE_TOKEN=
 # Deploy scripts' token for admin routes, used until Cloudflare Access is on.

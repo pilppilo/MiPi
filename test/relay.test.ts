@@ -30,6 +30,7 @@ import {
   RelayRuntime,
   type RelayState,
 } from "../src/agent/relay.ts";
+import { Spend } from "../src/agent/spend.ts";
 import { attribute, clip, defang, quoted } from "../src/lib/fence.ts";
 import { isRelayKey, relayRequest } from "../src/lib/requests.ts";
 
@@ -192,6 +193,25 @@ describe("relay admission", () => {
       expect(await agent.relay.admit("dup", "ping")).toEqual({ kind: "done", answer: "Once" });
       expect(agent.requests).toHaveLength(1);
       expect((await relayState(agent.harness)).admitted).toHaveLength(1);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("admits nothing while paused, but still answers a key admitted before", async () => {
+    const agent = await openRelay(answers("Before the pause"));
+    try {
+      await agent.relay.admit("early", "ping");
+      await agent.harness.commit(async (tx) => {
+        (await tx.doc(Spend)).paused = true;
+      }, ctx);
+      expect(await agent.relay.admit("late", "ping")).toEqual({ kind: "paused" });
+      expect(await agent.relay.admit("early", "ping")).toEqual({
+        kind: "done",
+        answer: "Before the pause",
+      });
+      expect(agent.requests).toHaveLength(1);
+      expect((await relayState(agent.harness)).receipts.map(({ key }) => key)).toEqual(["early"]);
     } finally {
       await agent.close();
     }

@@ -193,6 +193,7 @@ describe("relay responses", () => {
       [{ kind: "too-large", limitBytes: 10 }, 413, { id: "k" }],
       [{ kind: "not-found" }, 404, { id: "k" }],
       [{ kind: "unavailable" }, 503, { id: "k" }, { "Retry-After": "30" }],
+      [{ kind: "paused" }, 503, { id: "k", error: "Paused" }, { "Retry-After": "3600" }],
     ];
     for (const [result, status, body, headers = {}] of cases) {
       const response = relayResponse("k", result);

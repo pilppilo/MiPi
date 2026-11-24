@@ -22,6 +22,7 @@ import {
 import { boundConversation, ConversationMeta, profileOf, setProfile } from "./conversations.ts";
 import type { ModelList } from "./model-list.ts";
 import { isProfileName, PROFILE_NAMES, PROFILES, type ProfileName } from "./profiles.ts";
+import { PAUSED_REPLY, Spend, warnOwnerOverCap } from "./spend.ts";
 import { stampInput } from "./stamp.ts";
 import {
   enqueueReply,
@@ -92,6 +93,7 @@ export const HELP_TEXT =
   "/new starts a new conversation\n" +
   "/profile shows or sets the tool profile\n" +
   "/model shows or sets the model\n" +
+  "/usage shows today's spend and usage\n" +
   "/version shows the version";
 
 export const NON_TEXT_HINT = "I can only read text messages for now.";
@@ -154,6 +156,8 @@ export interface TelegramChannelOptions {
   readonly armAlarm: () => Promise<void>;
   /** The channel's `wake()` may have changed. */
   readonly onWakeChange: () => void;
+  /** The usage readout as text, for `/usage` (M9). Unset: the command says it isn't available. */
+  readonly usage?: () => Promise<string>;
   /** A text message was submitted: the door-independent follow-ups (titles, snapshots). */
   readonly onSubmitted?: (conversationId: ConversationId, text: string) => Promise<void>;
   readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
@@ -272,7 +276,19 @@ export class TelegramChannelRuntime {
     });
     switch (update.kind) {
       case "text":
-        return this.#admitText(update, conversationId);
+        // Paused (`MIPI_PAUSED`, M9): refused before any window opens, so nothing waits to run later.
+        if ((await this.#options.harness.snapshot(Spend, context))?.paused === true) {
+          await this.#reply(update.updateId, update.chatId, () => PAUSED_REPLY);
+          return;
+        }
+        // The owner's first new message over the spend cap each day gets one line saying so; it still goes through.
+        if (
+          (await this.#admitText(update, conversationId)) &&
+          (await this.#commit((tx) => warnOwnerOverCap(tx, update.chatId, this.#now())))
+        ) {
+          this.#kickDrain();
+        }
+        return;
       case "command":
         return this.#admitCommand(update, conversationId);
       case "non-text":
@@ -294,7 +310,7 @@ export class TelegramChannelRuntime {
   async #admitText(
     update: Extract<TelegramInbound, { kind: "text" }>,
     conversationId: ConversationId,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await this.#flushDueNow(update.chatId);
     const window = await this.#commit(async (tx) => {
       const open = (await tx.doc(TelegramChannel)).staged?.find(
@@ -312,10 +328,13 @@ export class TelegramChannelRuntime {
     const message = { updateId: update.updateId, text: update.text, at: this.#now() };
     // As for the web door: arm before admitting work. An early alarm is harmless; a missing one strands the turn.
     await this.#options.armAlarm();
+    // Whether this update is new: a replay Telegram sends again is stored already and accepts nothing.
+    let accepted = false;
     const submitted = await this.#commit(
       async (tx): Promise<{ id: SubmissionId; text: string } | undefined> => {
         const state = await tx.doc(TelegramChannel);
         if (hasReceipt(state, update.updateId)) return undefined;
+        accepted = true;
         const open = state.staged?.find(
           (staged) =>
             staged.chatId === update.chatId && staged.firstUpdateId === window?.firstUpdateId,
@@ -344,6 +363,7 @@ export class TelegramChannelRuntime {
         const existing = await tx.submissionByRequest(target.id, requestId);
         if (existing !== undefined) {
           // Admitted before, and its receipt is gone: it was answered then, so nothing to send again.
+          accepted = false;
           addReceipt(state, update.updateId, this.#now());
           return undefined;
         }
@@ -390,6 +410,7 @@ export class TelegramChannelRuntime {
       },
     );
     if (submitted !== undefined) await this.#submitted(target.id, submitted);
+    return accepted;
   }
 
   async #conversation(id: ConversationId): Promise<Conversation> {
@@ -460,6 +481,7 @@ export class TelegramChannelRuntime {
       if (this.#closed) return;
       const conversation = await this.#conversation(window.conversationId);
       await this.#options.armAlarm();
+      let refused = false;
       const submitted = await this.#commit(async (tx) => {
         const state = await tx.doc(TelegramChannel);
         const open = state.staged?.find(
@@ -467,6 +489,11 @@ export class TelegramChannelRuntime {
             staged.chatId === window.chatId && staged.firstUpdateId === window.firstUpdateId,
         );
         if (open === undefined) return undefined;
+        // Staged before a pause began (a deploy with `MIPI_PAUSED=1` in between): refused, not run (M9).
+        if (await this.#refuseWhilePaused(tx, state, open)) {
+          refused = true;
+          return undefined;
+        }
         const messages = open.messages.map((staged) => ({ ...staged }));
         const id = await this.#submitBatch(tx, conversation, open.firstUpdateId, messages);
         this.#unstage(state, window.chatId, window.firstUpdateId);
@@ -479,8 +506,28 @@ export class TelegramChannelRuntime {
         });
         return { id, text: batchText(messages) };
       });
+      if (refused) this.#kickDrain();
       if (submitted !== undefined) await this.#submitted(conversation.id, submitted);
     }
+  }
+
+  /**
+   * While paused (`MIPI_PAUSED`, M9), a window waiting to go out is dropped with the pause's reply, and nothing is
+   * submitted. Returns whether it was refused.
+   */
+  async #refuseWhilePaused(
+    tx: Tx,
+    state: TelegramChannelState,
+    window: NonNullable<TelegramChannelState["staged"]>[number],
+  ): Promise<boolean> {
+    if ((await tx.doc(Spend)).paused !== true) return false;
+    this.#unstage(state, window.chatId, window.firstUpdateId);
+    enqueueReply(
+      await tx.doc(TelegramOutbox),
+      { id: `paused:${window.firstUpdateId}`, chatId: window.chatId, text: PAUSED_REPLY },
+      this.#now(),
+    );
+    return true;
   }
 
   /**
@@ -508,6 +555,18 @@ export class TelegramChannelRuntime {
       case "version":
         await this.#reply(updateId, chatId, () => `MiPi ${this.#options.version}`);
         return;
+      case "usage": {
+        // Read before the commit: a provider's usage is an outside lookup, short and cached.
+        let text: string;
+        try {
+          text = (await this.#options.usage?.()) ?? "Usage isn't available here.";
+        } catch (error) {
+          this.#options.report("Reading the usage failed", error);
+          text = "I couldn't read the usage just now; try again in a moment.";
+        }
+        await this.#reply(updateId, chatId, () => text);
+        return;
+      }
       case "new": {
         // Messages waiting in the chat's window belong to the old conversation: they go there first, in the same
         // commit, before the chat is rebound (the submit before any table write, the new conversation's included).
@@ -531,7 +590,9 @@ export class TelegramChannelRuntime {
           const open = state.staged?.find(
             (staged) => staged.chatId === chatId && staged.firstUpdateId === window?.firstUpdateId,
           );
-          if (open !== undefined && previous !== undefined) {
+          // Paused: the waiting messages are refused, not sent to the old conversation.
+          const refused = open !== undefined && (await this.#refuseWhilePaused(tx, state, open));
+          if (!refused && open !== undefined && previous !== undefined) {
             const messages = open.messages.map((staged) => ({ ...staged }));
             const id = await this.#submitBatch(tx, previous, open.firstUpdateId, messages);
             this.#unstage(state, open.chatId, open.firstUpdateId);
