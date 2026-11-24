@@ -5,7 +5,7 @@ import { Harness, UsageDoc } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { ConversationMeta } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
 import { nameFromFirstMessage, writeTitle } from "../src/agent/titles.ts";
 import { cleanTitle, firstTitle, wantsTitle } from "../src/lib/titles.ts";
 

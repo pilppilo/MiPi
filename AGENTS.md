@@ -50,9 +50,10 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 ## Layout
 
 - `src/agent/pi/`: the **only** code that imports `@earendil-works/*` (lint-enforced). New Pi imports go here as named re-exports, and `test/contract.test.ts` calls each one.
-- `src/agent/`: the agent: Durable Object (`agent-do.ts`), harness, stamps, startup guard, export and restore.
+- `src/agent/`: core: the Durable Object (`agent-do.ts`), harness, connectors (wake sources, side calls, untrusted content, input origin), stamps, startup guard, export and restore. Core imports no extension or tool (lint-enforced); only the composition root (`agent-do.ts`, `composition.ts`) names them.
+- `src/extensions/`: built-in extensions (`builtin/<name>/`, listed in `builtins.ts`) and the profile table (`profiles.ts`). An extension is a Pi Durable extension plus MiPi registrations (`src/agent/extensions.ts`), imports only core, and never another extension (`scripts/check-boundaries.ts`).
 - `src/worker/`: HTTP routes, Cloudflare Access and fallback authentication, admin API.
-- `src/tools/`: tools, registered only through profiles.
+- `src/tools/`: the reminders' and history search's code, until COD-210 and COD-211 move it into its extensions.
 - `src/lib/`: small helpers with no Pi imports.
 - `src/protocol.ts`: WebSocket command/event protocol and wire validation.
 - `src/client/`: the web door.
@@ -64,7 +65,7 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 - Read files in full before wide-ranging edits, before changing files you haven't inspected, and when auditing. Don't rely on search snippets alone.
 - Before designing a fix, check how sibling modules (other doors, tools, or scripts) handle the same concern and follow that pattern; if you deviate, explain why.
 - Check `node_modules` for external API types (especially `@earendil-works/*`) instead of guessing, then use Pi types through `src/agent/pi/` (never import `@earendil-works/*` directly outside `src/agent/pi/` and `test/`).
-- Top-level imports only in `src/agent/`, `src/worker/`, `src/tools/`, and `scripts/`: no `await import()`, `import("pkg").Type`, or dynamic type imports (in `src/client/`, dynamic imports are allowed only for code-splitting, with a comment).
+- Top-level imports only in `src/agent/`, `src/extensions/`, `src/worker/`, `src/tools/`, and `scripts/`: no `await import()`, `import("pkg").Type`, or dynamic type imports (in `src/client/`, dynamic imports are allowed only for code-splitting, with a comment).
 - No `any` unless unavoidable.
 - Erasable TypeScript only (`erasableSyntaxOnly`; scripts run with Node's type stripping): no parameter properties, `enum`, `namespace`, or `import =`. Use explicit fields assigned in the constructor.
 - Use tagged unions (a discriminant field (`kind` or `type`) plus `switch`) instead of `"field" in x`, and end each new `switch` with an exhaustiveness check (`const _: never = value` in the `default` case) so a new variant fails to compile; existing switches get it when next touched. Existing `type` discriminants on wire or pi-ai shapes stay `type` (don't rename them). Reserve `in` for `unknown` values at trust boundaries, feature detection, or persisted/wire formats that a version bump would have to change (note it in a comment).

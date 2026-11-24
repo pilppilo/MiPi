@@ -17,7 +17,7 @@ import {
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { ChannelBindings } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../src/agent/telegram.ts";
 import { type ReminderInput, ScheduledReminder } from "../src/tools/reminder-task.ts";
@@ -82,6 +82,7 @@ export async function openAgent(
     owner: "jerome",
     timeZone: ZONE,
     profile: "default",
+    profiles: PROFILES,
     version: "0.0.0-test",
     modelList: new ModelList(async () => []),
     send: async (chatId, message) => {

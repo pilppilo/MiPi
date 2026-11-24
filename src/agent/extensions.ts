@@ -1,0 +1,193 @@
+/**
+ * The MiPi extension contract (COD-208, COD-209). A MiPi extension is a Pi Durable extension (`pi`: tools, sections,
+ * hooks, wraps, tasks) plus what Pi Durable doesn't model: its tier, whether a later extension may replace it, its
+ * prompt slot, the tools whose output is untrusted, and the wake sources it runs in the background. There is no second
+ * registry: tools and sections reach the model only through Pi Durable.
+ *
+ * Every extension is always installed, so the tasks and documents it stored keep resolving. What a conversation uses
+ * is its selection: one default list core builds here (core's own extensions first, then the rest by slot and name),
+ * which a conversation edits only with `{ remove }` (`selectExtensions`), so the prompt prefix never depends on order.
+ *
+ * Core code: it names no extension and no door.
+ */
+import type { MutableModels } from "./pi/ai.ts";
+import type { Extension, Harness, ToolRegistration } from "./pi/durable.ts";
+import { declareUntrustedTools } from "./untrusted.ts";
+import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
+
+/** `builtin` ships on by default; `optional` is added at build time (an npm extension is one too, on Workers). */
+export type ExtensionTier = "builtin" | "optional";
+
+/** Where an extension's prompt sections go, after core's: static text, then memory, then what changes most. */
+export type SectionSlot = "static" | "memory" | "dynamic";
+
+const SLOT_ORDER: readonly SectionSlot[] = ["static", "memory", "dynamic"];
+
+/** What an extension's background work gets when the agent opens. */
+export interface BackgroundContext {
+  readonly harness: Harness;
+  readonly models: MutableModels;
+  /** Tools whose output is untrusted, across every installed extension (`untrustedToolNames`). */
+  readonly untrustedTools: ReadonlySet<string>;
+  /** The source's wake changed: the alarm is set again. */
+  readonly onWakeChange: () => void;
+  readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
+}
+
+/**
+ * A wake source an extension runs. `prepare` is awaited while the agent opens, before the alarm is first set, so the
+ * source's first wake is in that write (the memory pass's first look).
+ */
+export interface ExtensionSource extends WakeSource {
+  prepare?(): Promise<void>;
+}
+
+export interface MipiExtension {
+  /** Unique among installed extensions; also the name of `pi`. */
+  readonly name: string;
+  readonly tier: ExtensionTier;
+  /**
+   * Pi-style (`omitReplacedExtensions`): dropped from the default selection when a non-replaceable extension registers
+   * one of its tool names. It stays installed, so its sleeping tasks and documents still resolve.
+   */
+  readonly replaceable?: boolean;
+  /** Where its sections go. Default: `static`. */
+  readonly slot?: SectionSlot;
+  /** The Pi Durable extension: selected by default. */
+  readonly pi: Extension;
+  /** Installed but never selected by default: Pi Durable extensions for its own subagents. */
+  readonly helpers?: readonly Extension[];
+  /** Tools whose results are untrusted (a fetched page): a run that called one can't write memory. */
+  readonly untrustedTools?: readonly string[];
+  /** Background work that needs the alarm. Not started for an extension that was replaced. */
+  readonly wakeSources?: (context: BackgroundContext) => readonly ExtensionSource[];
+}
+
+/** One replacement, for the startup report and the admin status. */
+export type Replacement = {
+  readonly replaced: string;
+  readonly by: string;
+  /** The tool name both register. */
+  readonly tool: string;
+};
+
+/** The extensions as the agent runs them. */
+export interface ResolvedExtensions {
+  /** In use: installed and not replaced, in default order. */
+  readonly active: readonly MipiExtension[];
+  readonly replacements: readonly Replacement[];
+  /** Every Pi Durable extension to install: core's, every extension's (replaced ones too) and their helpers. */
+  readonly installed: readonly Extension[];
+  /** The default selection: core's own first, then the active extensions by slot and name. */
+  readonly selection: readonly Extension[];
+  /** Names a conversation may switch off: the active extensions, never core's own. */
+  readonly switchable: readonly string[];
+  /** Every tool any installed extension registers, by name: the first registration wins, core's first. */
+  readonly tools: ReadonlyMap<string, ToolRegistration>;
+  readonly untrustedTools: ReadonlySet<string>;
+}
+
+const toolNames = (extension: Extension): string[] =>
+  (extension.tools ?? []).map(({ name }) => name);
+
+/**
+ * Applies the contract to `core` (core's own Pi Durable extensions, never replaced or switched off) and `extensions`:
+ * replacement by Pi's rule, then the default order. A name used twice, or a tool two non-replaceable extensions both
+ * register, is a wiring mistake and throws, so the agent refuses to open rather than run half of it.
+ */
+export function resolveExtensions(
+  core: readonly Extension[],
+  extensions: readonly MipiExtension[],
+): ResolvedExtensions {
+  const names = new Set<string>();
+  for (const name of [
+    ...core.map(({ name }) => name),
+    ...extensions.flatMap(({ name, helpers }) => [name, ...(helpers ?? []).map((h) => h.name)]),
+  ]) {
+    if (names.has(name)) throw new Error(`Extension name "${name}" is used twice`);
+    names.add(name);
+  }
+  for (const extension of extensions) {
+    if (extension.pi.name !== extension.name) {
+      throw new Error(
+        `Extension "${extension.name}" wraps a Pi Durable extension named "${extension.pi.name}"`,
+      );
+    }
+  }
+
+  // Who keeps each tool name: core and non-replaceable extensions. Two of them on one name is a conflict.
+  const keepers = new Map<string, string>();
+  const keep = (owner: string, tool: string) => {
+    const other = keepers.get(tool);
+    if (other !== undefined) {
+      throw new Error(`Tool "${tool}" is registered by both "${other}" and "${owner}"`);
+    }
+    keepers.set(tool, owner);
+  };
+  for (const extension of core) for (const tool of toolNames(extension)) keep(extension.name, tool);
+  for (const extension of extensions) {
+    if (extension.replaceable !== true) {
+      for (const tool of toolNames(extension.pi)) keep(extension.name, tool);
+    }
+  }
+
+  // A replaceable extension sharing a tool name with a keeper is dropped whole, whatever the load order.
+  const replacements: Replacement[] = [];
+  const kept: MipiExtension[] = [];
+  for (const extension of extensions) {
+    if (extension.replaceable !== true) {
+      kept.push(extension);
+      continue;
+    }
+    const tool = toolNames(extension.pi).find((name) => keepers.has(name));
+    if (tool === undefined) kept.push(extension);
+    else replacements.push({ replaced: extension.name, by: keepers.get(tool)!, tool });
+  }
+  // Two replaceable extensions left on one tool name: neither replaces the other, so it's a conflict.
+  const replaceableTools = new Map<string, string>();
+  for (const extension of kept) {
+    if (extension.replaceable !== true) continue;
+    for (const tool of toolNames(extension.pi)) {
+      const other = replaceableTools.get(tool);
+      if (other !== undefined) {
+        throw new Error(`Tool "${tool}" is registered by both "${other}" and "${extension.name}"`);
+      }
+      replaceableTools.set(tool, extension.name);
+    }
+  }
+
+  const slotOf = (extension: MipiExtension) => SLOT_ORDER.indexOf(extension.slot ?? "static");
+  const active = [...kept].sort(
+    (a, b) => slotOf(a) - slotOf(b) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0),
+  );
+
+  const installed = [
+    ...core,
+    ...extensions.flatMap((extension) => [extension.pi, ...(extension.helpers ?? [])]),
+  ];
+  const tools = new Map<string, ToolRegistration>();
+  for (const extension of [...core, ...active.map(({ pi }) => pi)]) {
+    for (const tool of extension.tools ?? []) if (!tools.has(tool.name)) tools.set(tool.name, tool);
+  }
+  const untrustedTools = new Set<string>();
+  for (const extension of extensions) {
+    declareUntrustedTools(extension.pi, extension.untrustedTools ?? []);
+    for (const tool of extension.untrustedTools ?? []) untrustedTools.add(tool);
+  }
+  return {
+    active,
+    replacements,
+    installed,
+    selection: [...core, ...active.map(({ pi }) => pi)],
+    switchable: active.map(({ name }) => name),
+    tools,
+    untrustedTools,
+  };
+}
+
+/** Every durable task of the installed extensions: what the startup guard checks stored tasks against. */
+export function collectTasks(installed: readonly Extension[]): NonNullable<Extension["tasks"]> {
+  return installed.flatMap((extension) => extension.tasks ?? []);
+}
+
+export type { ReportSourceError };

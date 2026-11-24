@@ -9,16 +9,11 @@ import {
   type Cursor,
   defineDoc,
   defineDocFamily,
+  type Extension,
   type Harness,
 } from "./pi/durable.ts";
 import { AgentSettings } from "./settings.ts";
-import {
-  DEFAULT_PROFILE,
-  isProfileName,
-  PROFILE_NAMES,
-  type ProfileName,
-  toolsFor,
-} from "./profiles.ts";
+import { DEFAULT_PROFILE, isProfileName, type ProfileName, type Profiles } from "./profiles.ts";
 
 type Tx = Parameters<typeof configure>[0];
 
@@ -61,13 +56,17 @@ export function profileOf(meta: Readonly<ConversationMetaState> | undefined): Pr
   return isProfileName(meta?.profile) ? meta.profile : DEFAULT_PROFILE;
 }
 
-/** Switches a conversation's profile: what it is offered changes from its next request. */
+/**
+ * Switches a conversation's profile: what it is offered changes from its next request. Only the tools change, never the
+ * extensions it has switched off: Pi Durable offers a tool only while its extension is selected.
+ */
 export async function setProfile(
   tx: Tx,
   conversationId: ConversationId,
   profile: ProfileName,
+  profiles: Profiles,
 ): Promise<void> {
-  await configure(tx, conversationId, { tools: toolsFor(profile) });
+  await configure(tx, conversationId, { tools: profiles.toolsFor(profile) });
   (await tx.doc(ConversationMeta, conversationId)).profile = profile;
 }
 
@@ -79,6 +78,7 @@ export async function boundConversation(
   tx: Tx,
   key: string,
   profile: ProfileName,
+  profiles: Profiles,
   options: { readonly rebind?: boolean; readonly existing?: ConversationId } = {},
 ): Promise<ConversationId> {
   const binding = await tx.doc(ChannelBindings, key, null);
@@ -90,12 +90,12 @@ export async function boundConversation(
     // An existing conversation keeps its agent, model included. One older than profiles gets the profile, tools and
     // all: recording only the name left it showing a profile whose tools it didn't offer.
     const meta = await tx.doc(ConversationMeta, options.existing);
-    if (meta.profile === undefined) await setProfile(tx, options.existing, profile);
+    if (meta.profile === undefined) await setProfile(tx, options.existing, profile, profiles);
     binding.conversationId = options.existing;
     return options.existing;
   }
   const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
-  await setProfile(tx, id, profile);
+  await setProfile(tx, id, profile, profiles);
   binding.conversationId = id;
   return id;
 }
@@ -106,11 +106,14 @@ export async function boundConversation(
  * ownerless conversation counts, forks included; a subagent's conversation belongs to the tool that made it. Writes
  * nothing when all match. Returns the conversations it changed.
  */
-export async function syncProfileTools(harness: Harness): Promise<ConversationId[]> {
+export async function syncProfileTools(
+  harness: Harness,
+  profiles: Profiles,
+): Promise<ConversationId[]> {
   const context = BACKGROUND_CONTEXT;
   // Once every conversation has its tools, new ones get them when they're made: the pass is needed again only when a
   // profile's tools change. Steady-state starts stop here, after one read.
-  const digest = profileToolsDigest();
+  const digest = profiles.digest();
   const synced = await harness.commit(
     async (tx) => (await tx.doc(AgentSettings)).profileTools === digest,
     context,
@@ -136,13 +139,20 @@ export async function syncProfileTools(harness: Harness): Promise<ConversationId
   for (const { id, profile } of conversations) {
     const conversation = await harness.conversation(id, context);
     if (conversation === undefined) continue;
-    const offered = (await conversation.agent(context)).tools.map(({ name }) => name).sort();
-    const expected = toolsFor(profile)
+    const agent = await conversation.agent(context);
+    const offered = agent.tools.map(({ name }) => name).sort();
+    // Only what its selected extensions provide: a switched-off extension's tools stay off (COD-209).
+    const provided = new Set(
+      agent.extensions.flatMap(({ tools }) => (tools ?? []).map(({ name }) => name)),
+    );
+    const expected = profiles
+      .toolsFor(profile)
       .map(({ name }) => name)
+      .filter((name) => provided.has(name))
       .sort();
     if (offered.join("\n") === expected.join("\n")) continue;
     // Only the tools and the profile's name: the model and everything else stay as they are.
-    await harness.commit((tx) => setProfile(tx, id, profile), context);
+    await harness.commit((tx) => setProfile(tx, id, profile, profiles), context);
     changed.push(id);
   }
   await harness.commit(async (tx) => {
@@ -151,9 +161,17 @@ export async function syncProfileTools(harness: Harness): Promise<ConversationId
   return changed;
 }
 
-/** Every profile's tool names, in one string: a different one means some conversation may need new tools. */
-export function profileToolsDigest(): string {
-  return JSON.stringify(
-    PROFILE_NAMES.map((name) => [name, toolsFor(name).map((tool) => tool.name)]),
-  );
+/**
+ * Sets which extensions a conversation has switched off: the whole list, as a `{ remove }` edit of the default selection
+ * (never an array, so what stays selected keeps the default's order and the prompt prefix stays cacheable). An empty
+ * list selects the default again. Only extensions the composition says are switchable may be passed (`composeAgent`).
+ */
+export async function setExtensionsOff(
+  tx: Tx,
+  conversationId: ConversationId,
+  off: readonly Extension[],
+): Promise<void> {
+  await configure(tx, conversationId, {
+    extensions: off.length === 0 ? null : { remove: [...off] },
+  });
 }

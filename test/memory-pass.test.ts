@@ -26,9 +26,8 @@ import { obj, str } from "@earendil-works/pi-schema";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { setProfile } from "../src/agent/conversations.ts";
-import { toolsFor } from "../src/agent/profiles.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
-import { addLesson, MAX_LESSONS, MemoryDoc } from "../src/agent/memory.ts";
+import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
+import { addLesson, MAX_LESSONS, MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import {
   MEMORY_IDLE_MS,
   MemoryPassDoc,
@@ -41,7 +40,7 @@ import {
   parsePassReply,
   passLines,
   passRequest,
-} from "../src/agent/memory-pass.ts";
+} from "../src/extensions/builtin/memory/memory-pass.ts";
 import { afterNextChicagoMidnight, chicagoDay, Proactive } from "../src/agent/proactive.ts";
 import { measureSpend, Spend } from "../src/agent/spend.ts";
 import { formatScheduledInstruction } from "../src/protocol.ts";
@@ -170,6 +169,7 @@ async function openAgent(responses: readonly FauxResponseStep[]): Promise<Agent>
   const pass = new MemoryPassRuntime({
     harness,
     models,
+    untrustedTools: new Set(["web_fetch"]),
     onWakeChange: () => {},
     report: (message, error) => reports.push(`${message}: ${String(error)}`),
     now: () => clock.now,
@@ -200,7 +200,9 @@ async function chat(agent: Agent, content: string, requestId: string) {
     (tx) =>
       configure(tx, conversation.id, {
         extensions: { add: [fetchExtension] },
-        tools: toolsFor("default").map((tool) => (tool.name === "web_fetch" ? fakeWebFetch : tool)),
+        tools: PROFILES.toolsFor("default").map((tool) =>
+          tool.name === "web_fetch" ? fakeWebFetch : tool,
+        ),
       }),
     ctx,
   );
@@ -367,7 +369,7 @@ describe("the memory pass", () => {
         { ownership: { kind: "ownerless" } },
         ctx,
       );
-      await agent.harness.commit((tx) => setProfile(tx, plain.id, "empty"), ctx);
+      await agent.harness.commit((tx) => setProfile(tx, plain.id, "empty", PROFILES), ctx);
       await (
         await plain.submit({ type: "input", content: "I like milk.", requestId: "web:4" }, ctx)
       ).wait(ctx);
@@ -422,6 +424,7 @@ describe("the memory pass", () => {
       const pass = new MemoryPassRuntime({
         harness: agent.harness,
         models: createModels(),
+        untrustedTools: new Set(["web_fetch"]),
         onWakeChange: () => changed.resolve(),
         report: () => {},
         now: () => agent.clock.now,

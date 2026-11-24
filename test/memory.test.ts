@@ -23,7 +23,7 @@ import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { obj, str } from "@earendil-works/pi-schema";
 import { describe, expect, it } from "vitest";
 import { setProfile } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
 import {
   addLesson,
   forgetLesson,
@@ -33,8 +33,9 @@ import {
   type MemoryState,
   normalizeLesson,
   renderMemory,
-} from "../src/agent/memory.ts";
-import { forgetTool, rememberTool, WEB_FETCH_TOOL_NAME } from "../src/tools/memory.ts";
+} from "../src/extensions/builtin/memory/memory.ts";
+import { forgetTool, rememberTool } from "../src/extensions/builtin/memory/tools.ts";
+import { WEB_FETCH_TOOL_NAME } from "../src/extensions/builtin/web-fetch/web-fetch.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const from = { source: "web" as const, conversationId: 1 };
@@ -211,7 +212,7 @@ describe("remember and forget", () => {
     ]);
     try {
       const relay = await conversation(agent.harness);
-      await agent.harness.commit((tx) => setProfile(tx, relay.id, "pidu"), ctx);
+      await agent.harness.commit((tx) => setProfile(tx, relay.id, "pidu", PROFILES), ctx);
       await ask(agent.harness, relay.id, "Remember that you file Linear issues.", "relay:k1");
       expect((await memory(agent.harness)).lessons).toMatchObject([
         { text: "PiDu files Linear issues.", from: { source: "relay" } },
@@ -326,7 +327,7 @@ describe("the memory section", () => {
         addLesson(await tx.doc(MemoryDoc), "Likes tea.", from, 1);
       }, ctx);
       const plain = await conversation(agent.harness);
-      await agent.harness.commit((tx) => setProfile(tx, plain.id, "empty"), ctx);
+      await agent.harness.commit((tx) => setProfile(tx, plain.id, "empty", PROFILES), ctx);
       await ask(agent.harness, plain.id, "hi", "web:1");
       expect(agent.sections[0]!["memory"]).toBeUndefined();
     } finally {

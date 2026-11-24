@@ -5,10 +5,11 @@
  * side, since nobody chose that one and it may cost what nobody agreed to. What the title costs counts as the
  * conversation's spend, in `pi.usage`, like Pi Durable's own requests.
  */
-import type { MutableModels, Usage } from "./pi/ai.ts";
+import type { MutableModels } from "./pi/ai.ts";
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
-import { type ConversationId, type Harness, ProviderDoc, UsageDoc } from "./pi/durable.ts";
+import type { ConversationId, Harness } from "./pi/durable.ts";
 import { ConversationMeta } from "./conversations.ts";
+import { recordUsage, sideCall } from "./side-calls.ts";
 import {
   cleanTitle,
   firstTitle,
@@ -18,53 +19,6 @@ import {
 } from "../lib/titles.ts";
 
 const context = BACKGROUND_CONTEXT;
-
-const zeroUsage = (): Usage => ({
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheWrite: 0,
-  totalTokens: 0,
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-});
-
-function addUsage(total: Usage, usage: Usage): void {
-  total.input += usage.input;
-  total.output += usage.output;
-  total.cacheRead += usage.cacheRead;
-  total.cacheWrite += usage.cacheWrite;
-  total.totalTokens += usage.totalTokens;
-  for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"] as const) {
-    total.cost[key] += usage.cost[key];
-  }
-}
-
-/** Adds a request's spend to the conversation's `pi.usage`, in the caller's commit, as Pi Durable's own requests do. */
-export async function recordUsage(
-  tx: Parameters<Parameters<Harness["commit"]>[0]>[0],
-  conversationId: ConversationId,
-  model: { readonly provider: string; readonly id: string },
-  usage: Usage,
-): Promise<void> {
-  const ledger = await tx.doc(UsageDoc, conversationId);
-  const key = `${model.provider}/${model.id}`;
-  ledger.models[key] ??= zeroUsage();
-  addUsage(ledger.models[key] as Usage, usage);
-}
-
-/** The conversation's identity with the provider (OpenCode Go refuses a request without one), given if it has none. */
-export async function providerSession(
-  harness: Harness,
-  conversationId: ConversationId,
-): Promise<string> {
-  return (
-    (await harness.snapshot(ProviderDoc, conversationId, context))?.sessionId ??
-    (await harness.commit(
-      async (tx) => (await tx.doc(ProviderDoc, conversationId)).sessionId,
-      context,
-    ))
-  );
-}
 
 /**
  * Names an untitled conversation after its first message, in the caller's commit. Returns the title it gave when the
@@ -95,31 +49,12 @@ export async function writeTitle(
   report: (error: unknown) => void = () => {},
 ): Promise<boolean> {
   try {
-    const conversation = await harness.conversation(conversationId, context);
-    const ref = (await conversation?.agent(context))?.model;
-    const model = ref === undefined ? undefined : models.getModel(ref.provider, ref.modelId);
-    if (model === undefined) return false;
-    // The conversation's own identity with the provider, as Pi Durable sends with its requests: OpenCode Go refuses a
-    // request without one. A conversation that has none yet gets it, as Pi Durable gives it before its next request.
-    const sessionId = await providerSession(harness, conversationId);
-    const reply = await models.completeSimple(
-      model,
-      {
-        messages: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `${TITLE_PROMPT}\n\n<message>\n${text.slice(0, TITLE_READ_CHARS)}\n</message>`,
-              },
-            ],
-            timestamp: Date.now(),
-          },
-        ],
-      },
-      { maxTokens: 1024, cacheRetention: "none", sessionId },
-    );
+    const call = await sideCall(harness, models, conversationId, {
+      text: `${TITLE_PROMPT}\n\n<message>\n${text.slice(0, TITLE_READ_CHARS)}\n</message>`,
+      maxTokens: 1024,
+    });
+    if (call === undefined) return false;
+    const { model, reply } = call;
     const title = cleanTitle(
       reply.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join(""),
     );

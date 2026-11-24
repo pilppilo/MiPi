@@ -24,7 +24,7 @@ import {
 } from "../src/agent/spend.ts";
 import { BATCH_WINDOW_MS } from "../src/agent/telegram.ts";
 import { TelegramChannel } from "../src/agent/telegram-state.ts";
-import { recordUsage } from "../src/agent/titles.ts";
+import { recordUsage } from "../src/agent/side-calls.ts";
 import { chicagoDay } from "../src/lib/cap-day.ts";
 import { type ReminderInput, ScheduledReminder } from "../src/tools/reminder-task.ts";
 import {

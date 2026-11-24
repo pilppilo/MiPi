@@ -5,16 +5,17 @@
  * `beforeCompact` hook can't write, and compaction seldom runs on a 1M-token model. Codex writes its memories the same
  * way, from idle chats, and leaves out chats that used outside content.
  *
- * A pass never calls the model when there is nothing it could save: a profile without `remember`, a full memory, no new
+ * A pass never calls the model when there is nothing it could save: a conversation not offered `remember` (its
+ * profile has none, or memory is switched off there), a full memory, no new
  * message from a person since the mark, the scheduled runs paused (`MIPI_DAILY_RUN_CAP` 0), or today's
- * `PASS_DAILY_CAP` reached. A busy conversation is put off. A range with a `web_fetch` call or result anywhere is
+ * `PASS_DAILY_CAP` reached. A busy conversation is put off. A range with a call to an untrusted tool (`web_fetch`) or its result anywhere is
  * skipped and its mark moved past it, so a page can't write itself into memory. A failed request keeps the mark, and a
  * range is given up after `PASS_MAX_FAILURES` failures, so a provider outage can't use up the day.
  *
  * The pass reads raw entries, which compaction never changes. Its spend counts in the conversation's `pi.usage`.
  */
-import type { MutableModels } from "./pi/ai.ts";
-import { BACKGROUND_CONTEXT } from "./pi/context.ts";
+import type { MutableModels } from "../../../agent/pi/ai.ts";
+import { BACKGROUND_CONTEXT } from "../../../agent/pi/context.ts";
 import {
   AssistantEntry,
   type configure,
@@ -27,8 +28,7 @@ import {
   InboxDoc,
   LiveDoc,
   UserEntry,
-} from "./pi/durable.ts";
-import { ConversationMeta, profileOf } from "./conversations.ts";
+} from "../../../agent/pi/durable.ts";
 import {
   addLesson,
   MAX_LESSON,
@@ -42,15 +42,14 @@ import {
   chicagoDay,
   Proactive,
   PROACTIVE_DOC_KIND,
-} from "./proactive.ts";
-import { holdOf, measureSpend, Spend, SPEND_DOC_KIND } from "./spend.ts";
-import type { CommitChanges } from "./wake-sources.ts";
-import { PROFILES } from "./profiles.ts";
-import { providerSession, recordUsage } from "./titles.ts";
-import { touchesWebFetch } from "../tools/memory.ts";
-import { defang } from "../lib/fence.ts";
-import { isNoSend, visibleAnswer } from "../lib/proactive-text.ts";
-import { parseScheduledInstruction } from "../protocol.ts";
+} from "../../../agent/proactive.ts";
+import { recordUsage, sideCall } from "../../../agent/side-calls.ts";
+import { holdOf, measureSpend, Spend, SPEND_DOC_KIND } from "../../../agent/spend.ts";
+import { entryTouches } from "../../../agent/untrusted.ts";
+import type { CommitChanges } from "../../../agent/wake-sources.ts";
+import { defang } from "../../../lib/fence.ts";
+import { isNoSend, visibleAnswer } from "../../../lib/proactive-text.ts";
+import { parseScheduledInstruction } from "../../../protocol.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -192,11 +191,6 @@ export function parsePassReply(reply: string): string[] | undefined {
 
 // ---- Deciding and running ----
 
-const offersRemember = async (tx: Tx, conversationId: ConversationId): Promise<boolean> =>
-  PROFILES[profileOf(await tx.doc(ConversationMeta, conversationId))].tools.includes(
-    REMEMBER_TOOL_NAME,
-  );
-
 /**
  * The newest entry of a conversation that it wrote itself, and when (its newest message's time). Undefined until it has
  * a message with a time: a conversation of system entries only has said nothing, and no time to count idle from.
@@ -279,6 +273,11 @@ export async function planPass(
   tx: Tx,
   conversationId: ConversationId,
   now: number,
+  options: {
+    /** Whether the conversation is offered `remember`, as Pi Durable resolves its agent. */
+    readonly offersRemember: boolean;
+    readonly untrustedTools: ReadonlySet<string>;
+  },
 ): Promise<PassPlan> {
   const state = await tx.doc(MemoryPassDoc);
   const mark = markOf(state, conversationId);
@@ -292,8 +291,8 @@ export async function planPass(
     if ((mark?.entry ?? 0) < to) setMark(state, conversationId, { entry: to });
     return { kind: "advance", to, reason };
   };
-  if (!(await offersRemember(tx, conversationId))) {
-    return advance(activity.entry, "profile without remember");
+  if (!options.offersRemember) {
+    return advance(activity.entry, "remember not offered");
   }
   const live = await tx.doc(LiveDoc, conversationId);
   if (live.run !== undefined || (await tx.doc(InboxDoc, conversationId)).items.length > 0) {
@@ -308,7 +307,9 @@ export async function planPass(
   const entries = await entriesAfter(tx, conversationId, from);
   const to = entries.at(-1)?.id ?? activity.entry;
   // Anywhere in the range, not only the part the model would read: an answer may summarize an earlier page.
-  if (entries.some(touchesWebFetch)) return advance(to, "fetched content");
+  if (entries.some((entry) => entryTouches(entry, options.untrustedTools))) {
+    return advance(to, "fetched content");
+  }
   const lines = passLines(entries);
   if (!lines.some(({ speaker }) => speaker === "user")) {
     return advance(to, "no message from a person");
@@ -357,6 +358,8 @@ async function advance(
 export interface MemoryPassOptions {
   readonly harness: Harness;
   readonly models: MutableModels;
+  /** Tools whose output is untrusted (`src/agent/untrusted.ts`): a range that called one is skipped. */
+  readonly untrustedTools: ReadonlySet<string>;
   /** The pass's wake changed: the alarm is set again. */
   readonly onWakeChange: () => void;
   readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
@@ -547,7 +550,17 @@ export class MemoryPassRuntime {
     const now = this.#now();
     // Today's spend first, in every pass: an earlier pass of the same alarm may have crossed the spend cap (M9).
     await harness.commit((tx) => measureSpend(tx, now), context);
-    const plan = await harness.commit((tx) => planPass(tx, conversationId, now), context);
+    // What the conversation is offered, as Pi Durable resolves it: its profile and the extensions it has selected.
+    const conversation = await harness.conversation(conversationId, context);
+    const offered = (await conversation?.agent(context))?.tools ?? [];
+    const plan = await harness.commit(
+      (tx) =>
+        planPass(tx, conversationId, now, {
+          offersRemember: offered.some(({ name }) => name === REMEMBER_TOOL_NAME),
+          untrustedTools: this.#options.untrustedTools,
+        }),
+      context,
+    );
     switch (plan.kind) {
       case "skip":
       case "later":
@@ -571,24 +584,12 @@ export class MemoryPassRuntime {
     const { harness, models } = this.#options;
     let lessons: string[] | undefined;
     try {
-      const conversation = await harness.conversation(conversationId, context);
-      const ref = (await conversation?.agent(context))?.model;
-      const model = ref === undefined ? undefined : models.getModel(ref.provider, ref.modelId);
-      if (model === undefined) throw new Error("The conversation's model is not available");
-      const sessionId = await providerSession(harness, conversationId);
-      const reply = await models.completeSimple(
-        model,
-        {
-          messages: [
-            {
-              role: "user",
-              content: [{ type: "text", text: passRequest(plan.lessons, plan.lines) }],
-              timestamp: Date.now(),
-            },
-          ],
-        },
-        { maxTokens: 2048, cacheRetention: "none", sessionId },
-      );
+      const call = await sideCall(harness, models, conversationId, {
+        text: passRequest(plan.lessons, plan.lines),
+        maxTokens: 2048,
+      });
+      if (call === undefined) throw new Error("The conversation's model is not available");
+      const { model, reply } = call;
       if (this.#closed) return;
       await harness.commit((tx) => recordUsage(tx, conversationId, model, reply.usage), context);
       const text = reply.content

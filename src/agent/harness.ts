@@ -2,6 +2,7 @@ import {
   configure,
   createRegistry,
   defineExtension,
+  type Extension,
   section,
   type HarnessOptions,
 } from "./pi/durable.ts";
@@ -14,21 +15,15 @@ import {
   MODEL_PROVIDER,
   type ReadEnv,
 } from "./pi/models.ts";
-import { ConversationMeta } from "./conversations.ts";
-import { memorySection } from "./memory.ts";
-import { DEFAULT_PROFILE, type ProfileName, profileTools, toolsFor } from "./profiles.ts";
-import { ScheduledReminder } from "../tools/reminder-task.ts";
-import { DeliverScheduledInstruction } from "../tools/schedule-task.ts";
-import { conversationSearchExtension } from "../tools/search.ts";
-import { proactiveExtension, RecordRun, RoundBudget } from "./proactive.ts";
-
-/** MiPi's own durable task definitions, for the startup guard's version check. */
-export const APP_TASKS = [
-  DeliverScheduledInstruction,
-  ScheduledReminder,
-  RecordRun,
-  RoundBudget,
-] as const;
+import { ConversationMeta, setExtensionsOff } from "./conversations.ts";
+import {
+  collectTasks,
+  type MipiExtension,
+  type ResolvedExtensions,
+  resolveExtensions,
+} from "./extensions.ts";
+import { DEFAULT_PROFILE, type ProfileName, Profiles, type ProfileTable } from "./profiles.ts";
+import { proactiveExtension } from "./proactive.ts";
 
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
@@ -40,6 +35,46 @@ export interface HarnessConfig {
   /** Tests only: other model access and default model. */
   readonly models?: HarnessOptions["models"];
   readonly model?: { readonly provider: string; readonly modelId: string };
+  /** The built-in and optional extensions, from the composition root (`composition.ts`). */
+  readonly extensions: readonly MipiExtension[];
+  /** Which tools each profile offers, from the composition root. */
+  readonly profiles: ProfileTable;
+}
+
+/** Core's own extension: the static preamble. Always selected, first. */
+export const coreExtension: Extension = defineExtension({
+  name: "chat",
+  sections: [
+    // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
+    // The time comes with each message instead (`stamp.ts`).
+    section("preamble", () => `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`, {
+      tag: false,
+    }),
+  ],
+});
+
+/**
+ * Core's own Pi Durable extensions, in order: the preamble, then proactive runs (the run cap and answer settlement).
+ * Never replaced, never switched off. `chat` keeps its name from before COD-209, when it held every tool too.
+ */
+export const CORE_EXTENSIONS: readonly Extension[] = [coreExtension, proactiveExtension];
+
+/** The agent as composed: Pi Durable's options, plus what the Durable Object and the doors need from it. */
+export interface AgentComposition {
+  readonly options: HarnessOptions;
+  readonly extensions: ResolvedExtensions;
+  readonly profiles: Profiles;
+  /** Every durable task of the installed extensions: the startup guard's version check (`APP_TASKS` before COD-209). */
+  readonly tasks: ReturnType<typeof collectTasks>;
+  /**
+   * Switches extensions off for one conversation: the whole list (empty: none off). Throws for a name that isn't
+   * switchable, such as core's own.
+   */
+  switchOff(
+    tx: Parameters<typeof configure>[0],
+    conversationId: Parameters<typeof configure>[1],
+    names: readonly string[],
+  ): Promise<void>;
 }
 
 /**
@@ -51,32 +86,13 @@ export interface HarnessConfig {
 export const CACHE_RETENTION = "long" as const;
 
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
-export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions {
-  const chatExtension = defineExtension({
-    name: "chat",
-    // The legacy delivery task stays for schedules stored before reminders (M6).
-    tasks: [DeliverScheduledInstruction, ScheduledReminder],
-    // Registration only: what a conversation is offered comes from its profile (`toolsFor`).
-    tools: profileTools(),
-    sections: [
-      // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
-      // The time comes with each message instead (`stamp.ts`).
-      section(
-        "preamble",
-        () => `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`,
-        {
-          tag: false,
-        },
-      ),
-      // After the static preamble: a lesson changes only the end of the system prompt. Shown where `remember` is offered.
-      memorySection,
-    ],
-  });
+export function composeAgent(config: HarnessConfig): AgentComposition {
+  const extensions = resolveExtensions(CORE_EXTENSIONS, config.extensions);
+  const profiles = new Profiles(config.profiles, extensions.tools);
   const profile = config.profile ?? DEFAULT_PROFILE;
   const registry = createRegistry();
-  registry.install(chatExtension);
-  registry.install(conversationSearchExtension);
-  registry.install(proactiveExtension);
+  // Every extension is installed, a replaced one too, so the tasks and documents it stored keep resolving.
+  for (const extension of extensions.installed) registry.install(extension);
   const defaultAgent = {
     model: config.model ?? {
       provider: MODEL_PROVIDER,
@@ -84,15 +100,18 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
     },
     // The default model has no `off` level; `low` is its lightest.
     thinkingLevel: "low" as const,
-    tools: toolsFor(profile),
+    tools: profiles.toolsFor(profile),
   };
+  const switchable = new Map(
+    extensions.active.map((extension) => [extension.name, extension.pi] as const),
+  );
 
-  return {
+  const options: HarnessOptions = {
     models: config.models ?? createGoModels(config.readEnv ?? (() => undefined)),
     registry,
     settings: {
-      // `proactive` hooks every run; its tasks act only on runs that answer a reminder.
-      extensions: [chatExtension, proactiveExtension],
+      // The default selection, in the order core fixes: a conversation edits it only by `{ remove }`.
+      extensions: [...extensions.selection],
       compaction: compactionSettings(goModels()),
       stream: { cacheRetention: CACHE_RETENTION },
       // Every input queued behind a running turn joins the next turn together, whichever door it came through, so a
@@ -105,6 +124,20 @@ export function createHarnessOptions(config: HarnessConfig = {}): HarnessOptions
       if (conversation.owner !== undefined || conversation.parent !== undefined) return;
       await configure(tx, conversation.id, defaultAgent);
       (await tx.doc(ConversationMeta, conversation.id)).profile = profile;
+    },
+  };
+  return {
+    options,
+    extensions,
+    profiles,
+    tasks: collectTasks(extensions.installed),
+    switchOff: async (tx, conversationId, names) => {
+      const off = names.map((name) => {
+        const extension = switchable.get(name);
+        if (extension === undefined) throw new Error(`Extension "${name}" can't be switched off`);
+        return extension;
+      });
+      await setExtensionsOff(tx, conversationId, off);
     },
   };
 }

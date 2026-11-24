@@ -1,13 +1,13 @@
 /**
  * Memory (M8): short lessons MiPi keeps across conversations and doors, in one session document. The model saves them
- * with `remember` and removes them with `forget` (`src/tools/memory.ts`), and sees them in the `memory` prompt section
+ * with `remember` and removes them with `forget` (`tools.ts`), and sees them in the `memory` prompt section
  * of every conversation that is offered `remember`. Rules adapted from pi-pocket src/server/memory.ts @ 2f060f2
  * (`MAX_LESSON`, the lesson limit, and invisible characters stripped with `INVISIBLE_CLASS`).
  *
  * The section changes only when a lesson does, so the prompt prefix stays cacheable between changes.
  */
-import { defineDoc, section } from "./pi/durable.ts";
-import { defang, INVISIBLE_CLASS } from "../lib/fence.ts";
+import { defineDoc, section } from "../../../agent/pi/durable.ts";
+import { defang, INVISIBLE_CLASS } from "../../../lib/fence.ts";
 
 /** How long a lesson may be, in characters (code points). */
 export const MAX_LESSON = 300;
@@ -17,8 +17,11 @@ export const MAX_LESSONS = 20;
 export const REMEMBER_TOOL_NAME = "remember";
 export const FORGET_TOOL_NAME = "forget";
 
-/** Which door a lesson came through. */
-export type LessonSource = "web" | "telegram" | "relay" | "reminder" | "background" | "unknown";
+/**
+ * Where a lesson came from: the turn's input origin (`src/agent/origin.ts`: `web`, `telegram`, `relay`, `reminder`,
+ * `unknown`), or `background` for the memory pass. Stored as written; memory names no door.
+ */
+export type LessonSource = string;
 
 export type Lesson = {
   /** `m1`, `m2`, …: never reused, so `forget` never shifts another lesson's id. */

@@ -15,7 +15,7 @@ import { Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { ChannelBindings, ConversationMeta, profileOf } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
 import {
   addRelayReceipt,
   RELAY_BINDING,
@@ -78,6 +78,7 @@ async function openRelay(
     harness,
     timeZone: "America/Chicago",
     profile: "pidu",
+    profiles: PROFILES,
     armAlarm: async () => {},
     report: (message, error) => {
       throw new Error(`${message}: ${String(error)}`);

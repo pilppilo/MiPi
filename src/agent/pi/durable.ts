@@ -35,6 +35,7 @@ export type {
   Cursor,
   EntryId,
   EntryRecord,
+  Extension,
   HarnessOptions,
   HookApi,
   SubmissionId,

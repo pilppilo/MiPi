@@ -4,16 +4,18 @@
  * first request and on every redirect, which is followed by hand (at most `MAX_REDIRECTS`). One deadline covers every
  * hop and the body; the raw body is read up to `MAX_RAW_BYTES`, and the text given to the model up to `MAX_TEXT`.
  *
- * A page can say anything, so what it says reaches the model between `<fetched>` tags it can't close, and `remember`
- * refuses in a run that fetched (`src/tools/memory.ts`).
+ * A page can say anything, so what it says reaches the model between `<fetched>` tags it can't close, and its
+ * extension declares it untrusted, so `remember` refuses in a run that fetched (`src/agent/untrusted.ts`).
  */
-import type { ToolRegistration } from "../agent/pi/durable.ts";
-import { obj, str } from "../agent/pi/schema.ts";
-import { attribute, clip, defang } from "../lib/fence.ts";
-import { htmlToText, tidyText } from "../lib/html-text.ts";
-import { MIPI_VERSION } from "../version.ts";
-import { AgentSettings, normalHost } from "../agent/settings.ts";
-import { WEB_FETCH_TOOL_NAME } from "./memory.ts";
+import type { ToolRegistration } from "../../../agent/pi/durable.ts";
+import { obj, str } from "../../../agent/pi/schema.ts";
+import { attribute, clip, defang } from "../../../lib/fence.ts";
+import { htmlToText, tidyText } from "../../../lib/html-text.ts";
+import { MIPI_VERSION } from "../../../version.ts";
+import { AgentSettings, normalHost } from "../../../agent/settings.ts";
+
+/** The tool's name. Its output is untrusted (`index.ts`), so `remember` refuses in a run that called it. */
+export const WEB_FETCH_TOOL_NAME = "web_fetch";
 
 export const MAX_REDIRECTS = 3;
 export const FETCH_TIMEOUT_MS = 10_000;
