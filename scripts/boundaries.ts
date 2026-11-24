@@ -19,16 +19,22 @@ export type BoundaryProblem = {
 
 const TIERS = ["src/extensions/builtin/", "src/extensions/optional/"];
 
-/** `src/extensions/builtin/memory` for a file inside that extension, otherwise undefined. */
+/** `src/extensions/builtin/memory` for a path inside that extension, or the folder itself; otherwise undefined. */
 export function extensionOf(path: string): string | undefined {
   for (const tier of TIERS) {
     if (!path.startsWith(tier)) continue;
     const name = path.slice(tier.length).split("/")[0];
-    return name === undefined || name.length === 0 || !path.slice(tier.length).includes("/")
-      ? undefined
-      : `${tier}${name}`;
+    return name === undefined || name.length === 0 ? undefined : `${tier}${name}`;
   }
   return undefined;
+}
+
+/** The text without its comments, so an import shown in a comment isn't read as one. Strings are left as they are. */
+export function withoutComments(text: string): string {
+  return text.replace(
+    /\/\*[\s\S]*?\*\/|(^|[^:"'`\\])\/\/[^\n]*/g,
+    (_match, before?: string) => before ?? "",
+  );
 }
 
 /** Every module specifier a file imports or re-exports statically (`import … from`, `export … from`, `import "…"`). */
@@ -36,7 +42,7 @@ export function importSpecifiers(text: string): string[] {
   const found: string[] = [];
   const pattern =
     /(?:^|[\s;])(?:import|export)\s+(?:type\s+)?(?:[^"'`;]*?\sfrom\s+)?["']([^"']+)["']/g;
-  for (const match of text.matchAll(pattern)) found.push(match[1]!);
+  for (const match of withoutComments(text).matchAll(pattern)) found.push(match[1]!);
   return found;
 }
 

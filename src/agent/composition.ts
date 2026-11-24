@@ -24,6 +24,3 @@ export function composeMipi(config: AgentConfig = {}): AgentComposition {
 export function createHarnessOptions(config: AgentConfig = {}): HarnessOptions {
   return composeMipi(config).options;
 }
-
-/** The profile table against the built-in extensions' tools: what the Durable Object composes, for tests and tools. */
-export const PROFILES = composeMipi().profiles;

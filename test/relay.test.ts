@@ -15,7 +15,8 @@ import { Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { ChannelBindings, ConversationMeta, profileOf } from "../src/agent/conversations.ts";
-import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { PROFILES } from "./mipi.ts";
 import {
   addRelayReceipt,
   RELAY_BINDING,

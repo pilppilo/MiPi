@@ -9,7 +9,7 @@ import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi
 import { Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { AlarmScheduler, alarmTime } from "../src/agent/alarm.ts";
+import { AlarmScheduler, alarmTime, runAlarmConsumers } from "../src/agent/alarm.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import { boundConversation, syncProfileTools } from "../src/agent/conversations.ts";
 import { WakeSources } from "../src/agent/wake-sources.ts";
@@ -81,6 +81,17 @@ describe("bare core", () => {
       const wake = harness.wake();
       await scheduler.schedule(wake);
       expect(writes).toEqual([alarmTime(wake, undefined, 0) ?? "deleted"]);
+      // An alarm runs Pi Durable's resume and no source, then sets the alarm again.
+      const ran: string[] = [];
+      await runAlarmConsumers(
+        [["Pi Durable resume", () => harness.resume()], ...sources.consumers()],
+        (message) => ran.push(message),
+        async () => {
+          ran.push("rescheduled");
+          await scheduler.schedule(harness.wake());
+        },
+      );
+      expect(ran).toEqual(["rescheduled"]);
     } finally {
       await harness.close(ctx);
     }

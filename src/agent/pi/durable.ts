@@ -38,6 +38,7 @@ export type {
   Extension,
   HarnessOptions,
   HookApi,
+  RegistrySnapshot,
   SubmissionId,
   SubmissionRecord,
   TaskGraph,

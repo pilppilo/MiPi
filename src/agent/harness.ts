@@ -24,6 +24,7 @@ import {
 } from "./extensions.ts";
 import { DEFAULT_PROFILE, type ProfileName, Profiles, type ProfileTable } from "./profiles.ts";
 import { proactiveExtension } from "./proactive.ts";
+import { bindUntrustedTools, CORE_EXTENSION_NAME } from "./untrusted.ts";
 
 export interface HarnessConfig {
   /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
@@ -41,23 +42,31 @@ export interface HarnessConfig {
   readonly profiles: ProfileTable;
 }
 
-/** Core's own extension: the static preamble. Always selected, first. */
-export const coreExtension: Extension = defineExtension({
-  name: "chat",
-  sections: [
-    // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
-    // The time comes with each message instead (`stamp.ts`).
-    section("preamble", () => `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`, {
-      tag: false,
-    }),
-  ],
-});
+/** Core's own extension: the static preamble. Always selected, first. Made fresh per agent (`untrusted.ts`). */
+export function createCoreExtension(): Extension {
+  return defineExtension({
+    name: CORE_EXTENSION_NAME,
+    sections: [
+      // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
+      // The time comes with each message instead (`stamp.ts`).
+      section(
+        "preamble",
+        () => `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`,
+        {
+          tag: false,
+        },
+      ),
+    ],
+  });
+}
 
 /**
  * Core's own Pi Durable extensions, in order: the preamble, then proactive runs (the run cap and answer settlement).
  * Never replaced, never switched off. `chat` keeps its name from before COD-209, when it held every tool too.
  */
-export const CORE_EXTENSIONS: readonly Extension[] = [coreExtension, proactiveExtension];
+export function coreExtensions(): readonly Extension[] {
+  return [createCoreExtension(), proactiveExtension];
+}
 
 /** The agent as composed: Pi Durable's options, plus what the Durable Object and the doors need from it. */
 export interface AgentComposition {
@@ -87,7 +96,9 @@ export const CACHE_RETENTION = "long" as const;
 
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
 export function composeAgent(config: HarnessConfig): AgentComposition {
-  const extensions = resolveExtensions(CORE_EXTENSIONS, config.extensions);
+  const core = coreExtensions();
+  const extensions = resolveExtensions(core, config.extensions);
+  bindUntrustedTools(core[0]!, extensions.untrustedTools);
   const profiles = new Profiles(config.profiles, extensions.tools);
   const profile = config.profile ?? DEFAULT_PROFILE;
   const registry = createRegistry();

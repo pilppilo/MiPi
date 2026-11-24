@@ -5,15 +5,25 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
-import { defineExtension, Harness, type ToolRegistration } from "@earendil-works/pi-durable";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxText,
+  fauxToolCall,
+} from "@earendil-works/pi-ai/providers/faux";
+import {
+  configure,
+  defineExtension,
+  Harness,
+  type ToolRegistration,
+} from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { obj, str } from "@earendil-works/pi-schema";
 import { describe, expect, it } from "vitest";
 import { composeMipi } from "../src/agent/composition.ts";
 import { setProfile, syncProfileTools } from "../src/agent/conversations.ts";
 import { type MipiExtension, resolveExtensions } from "../src/agent/extensions.ts";
-import { CORE_EXTENSIONS } from "../src/agent/harness.ts";
+import { coreExtensions } from "../src/agent/harness.ts";
 import { originOf, UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
 import type { DeliveryDestination } from "../src/agent/delivery.ts";
 import type { ReminderDestination } from "../src/agent/proactive.ts";
@@ -47,7 +57,7 @@ const extension = (
 
 describe("resolveExtensions", () => {
   it("puts core first, then the rest by slot and name, and lets no conversation switch core off", () => {
-    const resolved = resolveExtensions(CORE_EXTENSIONS, BUILT_IN_EXTENSIONS);
+    const resolved = resolveExtensions(coreExtensions(), BUILT_IN_EXTENSIONS);
     expect(resolved.selection.map(({ name }) => name)).toEqual([
       "chat",
       "proactive",
@@ -70,7 +80,7 @@ describe("resolveExtensions", () => {
       [...BUILT_IN_EXTENSIONS, fetcher],
       [fetcher, ...BUILT_IN_EXTENSIONS],
     ]) {
-      const resolved = resolveExtensions(CORE_EXTENSIONS, list);
+      const resolved = resolveExtensions(coreExtensions(), list);
       expect(resolved.replacements).toEqual([
         { replaced: "web-fetch", by: "my-fetch", tool: "web_fetch" },
       ]);
@@ -83,7 +93,7 @@ describe("resolveExtensions", () => {
 
   it("keeps a replaced extension's tasks, and replaces memory's pass with it", () => {
     const remember = extension("my-memory", ["remember"]);
-    const resolved = resolveExtensions(CORE_EXTENSIONS, [...BUILT_IN_EXTENSIONS, remember]);
+    const resolved = resolveExtensions(coreExtensions(), [...BUILT_IN_EXTENSIONS, remember]);
     expect(resolved.replacements).toEqual([
       { replaced: "memory", by: "my-memory", tool: "remember" },
     ]);
@@ -100,18 +110,32 @@ describe("resolveExtensions", () => {
 
   it("fails to compose on a clash nothing resolves", () => {
     expect(() =>
-      resolveExtensions(CORE_EXTENSIONS, [extension("a", ["x"]), extension("b", ["x"])]),
+      resolveExtensions(coreExtensions(), [extension("a", ["x"]), extension("b", ["x"])]),
     ).toThrow(/"x" is registered by both "a" and "b"/);
     expect(() =>
-      resolveExtensions(CORE_EXTENSIONS, [
+      resolveExtensions(coreExtensions(), [
         extension("a", ["x"], { replaceable: true }),
         extension("b", ["x"], { replaceable: true }),
       ]),
     ).toThrow(/"x" is registered by both/);
-    expect(() => resolveExtensions(CORE_EXTENSIONS, [extension("memory", [])])).not.toThrow();
+    expect(() => resolveExtensions(coreExtensions(), [extension("memory", [])])).not.toThrow();
     expect(() =>
-      resolveExtensions(CORE_EXTENSIONS, [...BUILT_IN_EXTENSIONS, extension("memory", [])]),
+      resolveExtensions(coreExtensions(), [...BUILT_IN_EXTENSIONS, extension("memory", [])]),
     ).toThrow(/"memory" is used twice/);
+  });
+
+  it("refuses an untrusted tool the extension doesn't register, and keeps a replaced one's untrusted", () => {
+    expect(() =>
+      resolveExtensions(coreExtensions(), [
+        extension("f", ["web_fetch"], { untrustedTools: ["web-fetch"] }),
+      ]),
+    ).toThrow(/declares "web-fetch" untrusted but registers no such tool/);
+    const resolved = resolveExtensions(coreExtensions(), [
+      ...BUILT_IN_EXTENSIONS,
+      extension("my-fetch", ["web_fetch"]),
+    ]);
+    // Pages the replaced built-in fetched are still in the stored entries.
+    expect([...resolved.untrustedTools]).toEqual(["web_fetch"]);
   });
 
   it("refuses a replacement that reuses the replaced extension's task name", () => {
@@ -139,6 +163,10 @@ describe("input origin", () => {
     expect(originOf(undefined)).toBe(UNKNOWN_ORIGIN);
     expect(originOf("nope")).toBe(UNKNOWN_ORIGIN);
     expect(originOf("other:1")).toBe(UNKNOWN_ORIGIN);
+    // Nothing inherited from Object counts as a prefix.
+    for (const id of ["toString:1", "constructor:1", "__proto__:1", "hasOwnProperty:1"]) {
+      expect(originOf(id), id).toBe(UNKNOWN_ORIGIN);
+    }
   });
 
   it("keeps the stored reminder destination as a delivery destination", () => {
@@ -152,8 +180,11 @@ describe("input origin", () => {
 
   it("finds untrusted tools from any registry the extensions are installed in", () => {
     const { options } = composeMipi();
-    const installed = options.registry.snapshot().installed();
-    expect([...untrustedToolNames(installed)]).toEqual(["web_fetch"]);
+    expect([...untrustedToolNames(options.registry.snapshot())]).toEqual(["web_fetch"]);
+    // Bound per agent: a bare one declares none, and composing it leaves the other as it was.
+    const bare = composeMipi({ extensions: [] });
+    expect([...untrustedToolNames(bare.options.registry.snapshot())]).toEqual([]);
+    expect([...untrustedToolNames(options.registry.snapshot())]).toEqual(["web_fetch"]);
   });
 });
 
@@ -322,6 +353,101 @@ describe("switching an extension off for one conversation", () => {
       expect(lessons.map(({ text }) => text)).toEqual(["The owner likes juice."]);
     } finally {
       pass.close();
+      await harness.close(ctx);
+    }
+  });
+});
+
+describe("a replacement in a running agent", () => {
+  it("runs the replacement's tool while the replaced built-in stays installed", async () => {
+    let calls = 0;
+    const replacement: MipiExtension = {
+      name: "my-fetch",
+      tier: "optional",
+      pi: defineExtension({
+        name: "my-fetch",
+        tools: [
+          {
+            ...tool("web_fetch"),
+            execute: async () => {
+              calls += 1;
+              return { output: [{ type: "text", text: "from my-fetch" }] };
+            },
+          },
+        ],
+      }),
+    };
+    const seen: string[] = [];
+    const faux = fauxProvider();
+    faux.setResponses([
+      fauxAssistantMessage([fauxToolCall("web_fetch", { text: "https://example.com" })], {
+        stopReason: "toolUse",
+      }),
+      (context) => {
+        for (const message of context.messages) {
+          if (message.role !== "toolResult") continue;
+          for (const part of message.content) if (part.type === "text") seen.push(part.text);
+        }
+        return fauxAssistantMessage([fauxText("Done.")]);
+      },
+    ]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const composition = composeMipi({
+      extensions: [...BUILT_IN_EXTENSIONS, replacement],
+      models,
+      model: { provider: "faux", modelId: "faux-1" },
+    });
+    expect(composition.extensions.replacements).toEqual([
+      { replaced: "web-fetch", by: "my-fetch", tool: "web_fetch" },
+    ]);
+    const harness = await Harness.open(new MemoryStorage(), composition.options, ctx);
+    try {
+      expect(composition.options.registry.snapshot().extension("web-fetch")).toBeDefined();
+      const conversation = await harness.createConversation(
+        { ownership: { kind: "ownerless" } },
+        ctx,
+      );
+      await (await conversation.submit({ type: "input", content: "fetch it" }, ctx)).wait(ctx);
+      expect(calls).toBe(1);
+      expect(seen.join("\n")).toContain("from my-fetch");
+      const agent = await conversation.agent(ctx);
+      expect(agent.extensions.map(({ name }) => name)).not.toContain("web-fetch");
+      expect(agent.tools.map(({ name }) => name)).toContain("web_fetch");
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+});
+
+describe("the startup profile sync with an extension switched off", () => {
+  it("gives a stale conversation its tools back, and keeps the switched-off extension off", async () => {
+    const { harness, composition, create } = await openRecording();
+    const { profiles } = composition;
+    try {
+      const conversation = await create();
+      await harness.commit(async (tx) => {
+        await composition.switchOff(tx, conversation.id, ["memory"]);
+        // As an older build might leave it: no tools at all.
+        await configure(tx, conversation.id, { tools: [] });
+      }, ctx);
+      await harness.commit(async (tx) => {
+        delete (await tx.doc(AgentSettings)).profileTools;
+      }, ctx);
+      expect(await syncProfileTools(harness, profiles)).toEqual([conversation.id]);
+      const agent = await (await harness.conversation(conversation.id, ctx))!.agent(ctx);
+      expect(agent.tools.map(({ name }) => name).sort()).toEqual([
+        "schedule",
+        "search_history",
+        "web_fetch",
+      ]);
+      expect(agent.extensions.map(({ name }) => name)).not.toContain("memory");
+      // And it doesn't keep rewriting: the next run finds it as expected.
+      await harness.commit(async (tx) => {
+        delete (await tx.doc(AgentSettings)).profileTools;
+      }, ctx);
+      expect(await syncProfileTools(harness, profiles)).toEqual([]);
+    } finally {
       await harness.close(ctx);
     }
   });

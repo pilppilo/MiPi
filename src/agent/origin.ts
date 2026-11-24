@@ -4,8 +4,8 @@
  *
  * Core owns the request-id scheme: `<prefix>:<rest>`, and this table says what each prefix means. Doors and the
  * reminders build their ids with their own prefix (`src/lib/requests.ts`); an extension reads origin from here and
- * never parses an id itself. The table is data rather than registrations because tools read it from inside their own
- * commits, where only the code is shared.
+ * never parses an id itself. For now the table is core data; COD-210 moves each prefix to its door or extension as a
+ * registration, with the reply destination that needs door state.
  */
 import type { ConversationId, ToolRegistration } from "./pi/durable.ts";
 import { LiveDoc } from "./pi/durable.ts";
@@ -21,19 +21,19 @@ export type InputOrigin = {
 export const UNKNOWN_ORIGIN: InputOrigin = { source: "unknown", automated: false };
 
 /** The request-id prefixes and what they mean. */
-const PREFIXES: Readonly<Record<string, InputOrigin>> = {
-  web: { source: "web", automated: false },
-  tg: { source: "telegram", automated: false },
-  relay: { source: "relay", automated: false },
-  sched: { source: "reminder", automated: true },
-};
+const PREFIXES: ReadonlyMap<string, InputOrigin> = new Map([
+  ["web", { source: "web", automated: false }],
+  ["tg", { source: "telegram", automated: false }],
+  ["relay", { source: "relay", automated: false }],
+  ["sched", { source: "reminder", automated: true }],
+]);
 
 /** The origin of one input, from its request id. */
 export function originOf(requestId: string | undefined): InputOrigin {
   if (requestId === undefined) return UNKNOWN_ORIGIN;
   const colon = requestId.indexOf(":");
   if (colon <= 0) return UNKNOWN_ORIGIN;
-  return PREFIXES[requestId.slice(0, colon)] ?? UNKNOWN_ORIGIN;
+  return PREFIXES.get(requestId.slice(0, colon)) ?? UNKNOWN_ORIGIN;
 }
 
 type ToolTx = Parameters<Parameters<Parameters<ToolRegistration["execute"]>[1]["commit"]>[0]>[0];

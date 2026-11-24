@@ -26,7 +26,8 @@ import { obj, str } from "@earendil-works/pi-schema";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { setProfile } from "../src/agent/conversations.ts";
-import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { PROFILES } from "./mipi.ts";
 import { addLesson, MAX_LESSONS, MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import {
   MEMORY_IDLE_MS,

@@ -3,8 +3,9 @@
  * keeps (memory). An extension declares which of its tools return it (`MipiExtension.untrustedTools`); core answers
  * whether entries, or the run calling a tool, contain a call to one or its result. Core names no such tool.
  *
- * The declarations are kept by Pi Durable extension object, so a tool reads them back from its own registry snapshot
- * (`api.registry.installed()`) and nothing global is shared between agents.
+ * What a composition declared is kept on its own core extension object (`bindUntrustedTools`), which `composeAgent`
+ * makes fresh for every agent: a tool reads it back from its registry snapshot, and nothing is shared between
+ * compositions or left behind by an earlier one.
  */
 import {
   type ConversationId,
@@ -13,20 +14,27 @@ import {
   type EntryRecord,
   type Extension,
   LiveDoc,
+  type RegistrySnapshot,
   type ToolRegistration,
   UserEntry,
 } from "./pi/durable.ts";
 
-const declared = new WeakMap<Extension, readonly string[]>();
+/** The name of core's own extension (the preamble), which carries the composition's untrusted tools. */
+export const CORE_EXTENSION_NAME = "chat";
 
-/** Records that `extension`'s `tools` return untrusted content (`resolveExtensions` calls it for every extension). */
-export function declareUntrustedTools(extension: Extension, tools: readonly string[]): void {
-  if (tools.length > 0) declared.set(extension, [...tools]);
+const bound = new WeakMap<Extension, ReadonlySet<string>>();
+
+/** Records the composition's untrusted tool names on its core extension (`composeAgent`). */
+export function bindUntrustedTools(core: Extension, tools: ReadonlySet<string>): void {
+  bound.set(core, new Set(tools));
 }
 
-/** The untrusted tool names of `installed` (e.g. a tool's `api.registry.installed()`), whoever registered them. */
-export function untrustedToolNames(installed: readonly Extension[]): ReadonlySet<string> {
-  return new Set(installed.flatMap((extension) => declared.get(extension) ?? []));
+/** The untrusted tool names of the agent a registry belongs to (a tool's `api.registry`); none if it bound none. */
+export function untrustedToolNames(
+  registry: Pick<RegistrySnapshot, "extension">,
+): ReadonlySet<string> {
+  const core = registry.extension(CORE_EXTENSION_NAME);
+  return (core === undefined ? undefined : bound.get(core)) ?? new Set();
 }
 
 /** Whether an entry is a call to one of `tools` or its result. */

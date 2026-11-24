@@ -12,7 +12,6 @@
  */
 import type { MutableModels } from "./pi/ai.ts";
 import type { Extension, Harness, ToolRegistration } from "./pi/durable.ts";
-import { declareUntrustedTools } from "./untrusted.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
 
 /** `builtin` ships on by default; `optional` is added at build time (an npm extension is one too, on Workers). */
@@ -27,7 +26,7 @@ const SLOT_ORDER: readonly SectionSlot[] = ["static", "memory", "dynamic"];
 export interface BackgroundContext {
   readonly harness: Harness;
   readonly models: MutableModels;
-  /** Tools whose output is untrusted, across every installed extension (`untrustedToolNames`). */
+  /** Tools whose output is untrusted (`ResolvedExtensions.untrustedTools`). */
   readonly untrustedTools: ReadonlySet<string>;
   /** The source's wake changed: the alarm is set again. */
   readonly onWakeChange: () => void;
@@ -84,6 +83,11 @@ export interface ResolvedExtensions {
   readonly switchable: readonly string[];
   /** Every tool any installed extension registers, by name: the first registration wins, core's first. */
   readonly tools: ReadonlyMap<string, ToolRegistration>;
+  /**
+   * Every extension's untrusted tools, a replaced one's too: what it fetched is still in the stored entries, and a
+   * replacement doesn't make an old page trusted. A replacement that registers the same name and doesn't declare it
+   * untrusted therefore still has its results kept out of memory.
+   */
   readonly untrustedTools: ReadonlySet<string>;
 }
 
@@ -171,8 +175,18 @@ export function resolveExtensions(
   }
   const untrustedTools = new Set<string>();
   for (const extension of extensions) {
-    declareUntrustedTools(extension.pi, extension.untrustedTools ?? []);
-    for (const tool of extension.untrustedTools ?? []) untrustedTools.add(tool);
+    const registered = new Set(
+      [extension.pi, ...(extension.helpers ?? [])].flatMap((pi) => toolNames(pi)),
+    );
+    for (const tool of extension.untrustedTools ?? []) {
+      // A misspelt name would switch the guard off without a word, so it refuses to compose.
+      if (!registered.has(tool)) {
+        throw new Error(
+          `Extension "${extension.name}" declares "${tool}" untrusted but registers no such tool`,
+        );
+      }
+      untrustedTools.add(tool);
+    }
   }
   return {
     active,

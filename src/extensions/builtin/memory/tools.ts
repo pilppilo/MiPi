@@ -1,5 +1,5 @@
 /**
- * `remember` and `forget` (M8): the model's hands on memory (`src/agent/memory.ts`). Both are replay-safe: a rerun of
+ * `remember` and `forget` (M8): the model's hands on memory (`memory.ts`). Both are replay-safe: a rerun of
  * `remember` finds its lesson already kept (a duplicate changes nothing), and a rerun of `forget` finds it gone.
  *
  * `remember` refuses in a run that called a tool with untrusted output (`web_fetch`, declared by its extension), so text
@@ -36,7 +36,7 @@ export const rememberTool: ToolRegistration = {
   execute: async (args, api, context) => {
     const { text: lesson } = args as { text: string };
     const result = await api.commit(async (tx) => {
-      const untrusted = untrustedToolNames(api.registry.installed());
+      const untrusted = untrustedToolNames(api.registry);
       if (await runTouched(tx, api.conversationId, untrusted)) return { kind: "fetched" as const };
       const { source } = await runOrigin(tx, api.conversationId);
       return addLesson(

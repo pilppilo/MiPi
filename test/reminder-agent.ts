@@ -17,7 +17,8 @@ import {
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { ChannelBindings } from "../src/agent/conversations.ts";
-import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { PROFILES } from "./mipi.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../src/agent/telegram.ts";
 import { type ReminderInput, ScheduledReminder } from "../src/tools/reminder-task.ts";

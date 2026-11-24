@@ -288,6 +288,8 @@ export class MipiAgent extends DurableObject<Env> {
       });
       return;
     }
+    // A composition from an earlier start must not show beside a refusal of this one.
+    this.#composition = undefined;
     let composition: AgentComposition;
     try {
       composition = this.#compose();

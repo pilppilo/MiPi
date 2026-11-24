@@ -13,7 +13,8 @@ import {
   startingProfile,
   syncProfileTools,
 } from "../src/agent/conversations.ts";
-import { createHarnessOptions, PROFILES } from "../src/agent/composition.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { PROFILES } from "./mipi.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
 import { PROFILE_NAMES, type ProfileName } from "../src/agent/profiles.ts";
 import { PROFILE_TABLE } from "../src/extensions/profiles.ts";

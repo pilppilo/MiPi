@@ -10,6 +10,7 @@ describe("extension boundaries", () => {
     expect(extensionOf("src/extensions/optional/opencode-go/index.ts")).toBe(
       "src/extensions/optional/opencode-go",
     );
+    expect(extensionOf("src/extensions/builtin/memory")).toBe("src/extensions/builtin/memory");
     expect(extensionOf("src/extensions/builtins.ts")).toBeUndefined();
     expect(extensionOf("src/agent/harness.ts")).toBeUndefined();
   });
@@ -20,6 +21,12 @@ describe("extension boundaries", () => {
         'import type { A } from "./a.ts";\nimport { b } from "../b.ts";\nexport { c } from "./c.ts";\nimport "./d.ts";',
       ),
     ).toEqual(["./a.ts", "../b.ts", "./c.ts", "./d.ts"]);
+    // An import shown in a comment is not one.
+    expect(
+      importSpecifiers(
+        '/** e.g. import { x } from "../other/foo.ts"; */\n// import { y } from "../y.ts";\nconst url = "https://example.com"; import { z } from "./z.ts";',
+      ),
+    ).toEqual(["./z.ts"]);
   });
 
   it("allows core, lib and an extension's own files", () => {
@@ -43,11 +50,13 @@ describe("extension boundaries", () => {
         path: "src/extensions/optional/opencode-go/index.ts",
         text: 'import type { A } from "../../builtin/memory/index.ts";',
       },
+      { path: "src/extensions/builtin/reminders/index.ts", text: 'import { m } from "../memory";' },
     ]);
     expect(problems.map(({ file, specifier }) => [file, specifier])).toEqual([
       ["src/extensions/builtin/web-fetch/index.ts", "../memory/memory.ts"],
       ["src/extensions/builtin/web-fetch/index.ts", "../../builtins.ts"],
       ["src/extensions/optional/opencode-go/index.ts", "../../builtin/memory/index.ts"],
+      ["src/extensions/builtin/reminders/index.ts", "../memory"],
     ]);
   });
 });
