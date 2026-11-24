@@ -66,7 +66,11 @@ export class AnswerSettlement implements WakeSource {
 
   /** Picks up what a previous instance left: watches every pending input, then delivers what settled meanwhile. */
   async start(): Promise<void> {
-    for (const id of await this.#waiting()) this.#watch(id);
+    if (this.#closed) return;
+    const waiting = await this.#waiting();
+    // Closed while it read (maintenance took the object): nothing more starts against a closing harness.
+    if (this.#closed) return;
+    for (const id of waiting) this.#watch(id);
     await this.reconcile();
   }
 
@@ -82,7 +86,9 @@ export class AnswerSettlement implements WakeSource {
       try {
         do {
           this.#refreshAgain = false;
-          for (const id of await this.#waiting()) this.#watch(id);
+          const waiting = await this.#waiting();
+          if (this.#closed) return;
+          for (const id of waiting) this.#watch(id);
         } while (this.#refreshAgain && !this.#closed);
       } catch (error) {
         if (!this.#closed) this.#options.report("Refreshing the answer settlement failed", error);
@@ -100,6 +106,7 @@ export class AnswerSettlement implements WakeSource {
   /** Turns every settled input into its messages, in the commit that clears it. */
   reconcile(): Promise<void> {
     return this.#queue.run("reconcile", async () => {
+      if (this.#closed) return;
       const queued = await this.#commit((tx) =>
         reconcileAnswers(tx, this.#now(), this.#options.connectors),
       );
@@ -107,8 +114,14 @@ export class AnswerSettlement implements WakeSource {
     });
   }
 
-  #waiting(): Promise<number[]> {
-    return this.#commit((tx) => pendingSubmissions(tx, this.#options.connectors));
+  /** Every pending input, read in a commit that also refreshes the wake from it. */
+  async #waiting(): Promise<number[]> {
+    let waiting: number[] = [];
+    await this.#commit(
+      async () => undefined,
+      (pending) => (waiting = pending),
+    );
+    return waiting;
   }
 
   /** Waits for an input to settle, then delivers. Harmless to call twice. */
@@ -132,14 +145,23 @@ export class AnswerSettlement implements WakeSource {
     })();
   }
 
-  /** A commit that also refreshes the wake from what is still pending. */
-  async #commit<T>(change: (tx: Tx) => T | Promise<T>): Promise<T> {
+  /**
+   * A commit that also refreshes the wake from what is still pending, read once (`read` gets the same list). Closed
+   * meanwhile, the wake is left alone, so a shutdown (an export, a restore) never arms the alarm again.
+   */
+  async #commit<T>(
+    change: (tx: Tx) => T | Promise<T>,
+    read?: (pending: number[]) => void,
+  ): Promise<T> {
     let active = false;
     const result = await this.#options.harness.commit(async (tx) => {
       const value = await change(tx);
-      active = (await pendingSubmissions(tx, this.#options.connectors)).length > 0;
+      const pending = await pendingSubmissions(tx, this.#options.connectors);
+      read?.(pending);
+      active = pending.length > 0;
       return value;
     }, context);
+    if (this.#closed) return result;
     if (active !== this.#wake.active) {
       this.#wake = { active };
       this.#options.onWakeChange();

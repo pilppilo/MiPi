@@ -129,7 +129,9 @@
                   "**/doors/telegram/state*",
                   "**/doors/telegram/outbox*",
                   "../telegram/state*",
-                  "../telegram/outbox*"
+                  "../telegram/outbox*",
+                  "./telegram/state*",
+                  "./telegram/outbox*"
                 ],
                 "message": "Only the Telegram door reads or writes its documents (COD-210). Core reaches its inputs and chats through the door's registrations (src/doors/telegram/index.ts); the composition root may name the door's runtime and sender."
               },

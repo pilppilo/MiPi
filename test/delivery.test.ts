@@ -7,6 +7,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { Harness, MemoryStorage } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
+import { AnswerSettlement } from "../src/agent/answers.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import { Delivery, type DeliveryAdapter } from "../src/agent/delivery.ts";
 import { tellHeld } from "../src/agent/gates.ts";
@@ -138,6 +139,69 @@ describe("delivery", () => {
       }, ctx);
       expect((await harness.snapshot(TelegramOutbox, ctx))?.replies ?? []).toEqual([]);
       expect((await harness.snapshot(Proactive, ctx))?.cap?.noticeSent).toBe(false);
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+});
+
+describe("answer settlement", () => {
+  it("does nothing more once closed mid-start: no watch, no reconcile, no alarm", async () => {
+    const composition = composeMipi({
+      models: createModels(),
+      model: { provider: "faux", modelId: "faux-1" },
+    });
+    const harness = await Harness.open(new MemoryStorage(), composition.options, ctx);
+    try {
+      // A reminder waits for its answer, and its record is gone: a reconcile would settle it and send a notice.
+      await harness.commit(async (tx) => {
+        (await tx.doc(TelegramChannel)).lastChat = CHAT;
+        (await tx.doc(Proactive)).pending = [
+          {
+            submissionId: 999,
+            reminderId: "reminder:x",
+            instruction: "Stretch",
+            conversationId: 1,
+            destination: { kind: "telegram", chatId: CHAT },
+          },
+        ];
+      }, ctx);
+      let wakeChanges = 0;
+      const answers = new AnswerSettlement({
+        harness,
+        connectors: composition.connectors,
+        onWakeChange: () => {
+          wakeChanges += 1;
+        },
+        report: (message, error) => {
+          throw new Error(`${message}: ${String(error)}`);
+        },
+      });
+      // Maintenance closes it while its first read is in flight (`void answers.start()` in the agent).
+      const started = answers.start();
+      answers.close();
+      await started;
+      await answers.reconcile();
+      answers.refresh();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(wakeChanges).toBe(0);
+      expect(answers.wake()).toEqual({ active: false });
+      expect((await harness.snapshot(Proactive, ctx))?.pending).toHaveLength(1);
+      expect((await harness.snapshot(TelegramOutbox, ctx))?.replies ?? []).toEqual([]);
+
+      // Open, the same input is settled and its notice queued.
+      const open = new AnswerSettlement({
+        harness,
+        connectors: composition.connectors,
+        onWakeChange: () => {},
+        report: () => {},
+      });
+      await open.start();
+      open.close();
+      expect((await harness.snapshot(Proactive, ctx))?.pending).toEqual([]);
+      expect(
+        ((await harness.snapshot(TelegramOutbox, ctx))?.replies ?? []).map(({ id }) => id),
+      ).toEqual([`unanswered:999:${CHAT}`]);
     } finally {
       await harness.close(ctx);
     }
