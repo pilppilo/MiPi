@@ -32,12 +32,14 @@ All three lead to the same assistant, with the same memory and reminders.
 | `/new`     | Start a new conversation                |
 | `/model`   | Show or change the model MiPi uses      |
 | `/profile` | Show or change which tools MiPi may use |
+| `/usage`   | Show today's spend and usage            |
 | `/version` | Show which version of MiPi is running   |
 
 ## Your data and privacy
 
 - **Only you can use it.** The web app is behind a sign-in, and the Telegram bot answers only the accounts you allow. Messages from anyone else, or from a group, get no reply.
 - **Backed up before every update.** Each update first saves a copy of your assistant's data. If a backup cannot be made, the update stops.
+- **A daily spending limit.** Work you didn't ask for at that moment, such as reminders and background memory, stops for the day once MiPi's own estimate of what it spent reaches the limit you set. Your own messages still go through. You can also pause MiPi completely.
 - **Safe when something goes wrong.** If MiPi finds data it does not understand, it stops and says so instead of carrying on and risking damage. Updates can be rolled back, and a backup can be restored.
 - **Your own account.** MiPi runs on Cloudflare, and its answers come from the model provider OpenCode Go, so your messages go to that provider.
 

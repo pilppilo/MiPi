@@ -17,6 +17,7 @@ import {
 } from "./pi/durable.ts";
 import { boundConversation, ChannelBindings } from "./conversations.ts";
 import { answerText } from "./proactive.ts";
+import { Spend } from "./spend.ts";
 import type { ProfileName } from "./profiles.ts";
 import { stampInput } from "./stamp.ts";
 import { defang } from "../lib/fence.ts";
@@ -80,7 +81,9 @@ export type RelayResult =
   | { readonly kind: "too-large"; readonly limitBytes: number }
   | { readonly kind: "not-found" }
   /** The agent isn't open (maintenance, the startup guard) or is closing. */
-  | { readonly kind: "unavailable" };
+  | { readonly kind: "unavailable" }
+  /** MiPi is paused (`MIPI_PAUSED`); nothing was admitted. */
+  | { readonly kind: "paused" };
 
 /** The message as the model sees it: PiDu's text between tags it can't close, with how to read it. */
 export function relayContent(text: string): string {
@@ -233,6 +236,11 @@ export class RelayRuntime {
       // Admitted before and its receipt pruned: the stored input is the answer, never a conflict.
       const existing = await tx.submissionByRequest(conversation.id, requestId);
       if (existing !== undefined) return { kind: "existing", submissionId: existing.id };
+      // Paused (`MIPI_PAUSED`, M9): nothing new is admitted, so nothing waits to run later. A key admitted before still
+      // gets its answer above.
+      if ((await tx.doc(Spend)).paused === true) {
+        return { kind: "refused", result: { kind: "paused" } };
+      }
       const recent = recentAdmissions(state.admitted, now);
       if (recent.length >= RELAY_PER_HOUR) {
         return {

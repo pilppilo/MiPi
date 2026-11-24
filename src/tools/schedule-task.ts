@@ -2,6 +2,8 @@ import { type ConversationId, defineDoc, defineTask } from "../agent/pi/durable.
 import { formatScheduledInstruction } from "../protocol.ts";
 import { AgentSettings } from "../agent/settings.ts";
 import { localTime } from "../agent/stamp.ts";
+import { holdOf, measureSpend } from "../agent/spend.ts";
+import { afterNextChicagoMidnight } from "../lib/cap-day.ts";
 
 export type ScheduleCadence = {
   readonly unit: "minute" | "hour" | "day" | "week" | "month";
@@ -237,6 +239,34 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
       }, context);
     },
     deliver: async (task, runtime, context) => {
+      // M9: paused or over the spend cap, the delivery is held as reminders are. This task's checkpoint has no time of
+      // its own to wait for, so a successor carries it instead: a repeating schedule's next time, or a one-time one's
+      // next look past Chicago midnight. This occurrence is not delivered. One already submitted (a restart in the
+      // middle of this phase) is never held: it went out.
+      const now = runtime.now();
+      let held = false;
+      await runtime.commit(async (tx) => {
+        if (
+          (await tx.submissionByRequest(task.input.conversationId, task.input.id)) !== undefined
+        ) {
+          return undefined;
+        }
+        const spend = await measureSpend(tx, now);
+        if (holdOf(spend, now) === undefined) return undefined;
+        held = true;
+        const runAt =
+          task.input.recurrence === undefined
+            ? afterNextChicagoMidnight(now)
+            : nextRecurrenceRunAt(task.input.runAt, task.input.recurrence, now);
+        await tx.createTask(DeliverScheduledInstruction, heldSuccessor(task.input, runAt), {
+          ownership: { kind: "conversation" },
+          conversationId: task.input.conversationId,
+          background: true,
+        });
+        removeDelivery(await tx.doc(ScheduleDeliveries), task.input.id);
+        return { status: "terminal", outcome: { status: "completed", result: null } };
+      }, context);
+      if (held) return;
       try {
         // A recurring schedule has its own zone; otherwise the owner's, as this agent recorded it.
         let timeZone = task.input.recurrence?.timezone;
@@ -284,6 +314,30 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
     }, context);
   },
 });
+
+/**
+ * The same schedule at `runAt`, under an id of its own (its request id): the base id, then `~` and the time. A held
+ * successor held again replaces the time rather than growing the id.
+ */
+export function heldSuccessor(input: ScheduledInstruction, runAt: number): ScheduledInstruction {
+  return {
+    id: `${input.id.replace(/~\d+$/, "")}~${runAt}`,
+    conversationId: input.conversationId,
+    instruction: input.instruction,
+    runAt,
+    ...(input.recurrence === undefined
+      ? {}
+      : {
+          recurrence: {
+            cadence: {
+              unit: input.recurrence.cadence.unit,
+              interval: input.recurrence.cadence.interval,
+            },
+            timezone: input.recurrence.timezone,
+          },
+        }),
+  };
+}
 
 const removeDelivery = (
   deliveries: { active: Array<{ scheduleId: string }> },

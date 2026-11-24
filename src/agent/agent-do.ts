@@ -35,6 +35,17 @@ import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import { parseDailyRunCap, Proactive, PROACTIVE_DOC_KIND } from "./proactive.ts";
 import {
+  holdOf,
+  measureSpend,
+  PAUSED_REPLY,
+  parsePaused,
+  parseSpendCap,
+  Spend,
+  SPEND_DOC_KIND,
+} from "./spend.ts";
+import { readUsage, usageText } from "./usage.ts";
+import { ProviderUsageCache, usageSources } from "./usage-sources.ts";
+import {
   type ExportCursor,
   type ExportHeader,
   type ExportPage,
@@ -66,6 +77,7 @@ import {
   type ConversationSummary,
   type Options,
   type ServerEvent,
+  type UsageReadout,
 } from "../protocol.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
@@ -218,6 +230,8 @@ export interface AdminStatus {
   };
   readonly bookmark?: string;
   readonly rows: Readonly<Record<string, number>>;
+  /** The usage readout (M9), while the agent is open, with only providers' cached figures; absent if it failed. */
+  readonly usage?: UsageReadout;
 }
 
 export class MipiAgent extends DurableObject<Env> {
@@ -243,6 +257,10 @@ export class MipiAgent extends DurableObject<Env> {
   #relay: RelayRuntime | undefined;
   /** The background memory pass over idle conversations (M8); present while the harness is open. */
   #memoryPass: MemoryPassRuntime | undefined;
+  /** Each provider's own usage figures for the readout (M9), cached in memory only. */
+  #providerUsage = new ProviderUsageCache([]);
+  /** `MIPI_PAUSED` as this instance started with it (M9): every door refuses new messages while it is on. */
+  #paused = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -352,6 +370,15 @@ export class MipiAgent extends DurableObject<Env> {
     } catch {
       // Point-in-time recovery is not available here.
     }
+    let usage: UsageReadout | undefined;
+    if (this.#state.kind === "open") {
+      try {
+        // No provider is asked here: a deploy's checks mustn't wait on one.
+        usage = await readUsage(this.#harness, this.#providerUsage, Date.now(), { fresh: false });
+      } catch (error) {
+        reportError("Reading the usage for the admin status failed", error);
+      }
+    }
     return {
       state: this.#state,
       meta: readMeta(this.ctx.storage.sql),
@@ -362,6 +389,7 @@ export class MipiAgent extends DurableObject<Env> {
       },
       ...(bookmark === undefined ? {} : { bookmark }),
       rows: rowCounts(this.ctx.storage.sql),
+      ...(usage === undefined ? {} : { usage }),
     };
   }
 
@@ -543,6 +571,53 @@ export class MipiAgent extends DurableObject<Env> {
     }, BACKGROUND_CONTEXT);
   }
 
+  /**
+   * Stores the spend cap (`MIPI_DAILY_SPEND_CAP`) and the pause switch (`MIPI_PAUSED`) where tasks read them (M9). An
+   * invalid cap is reported and means none; an invalid pause value is reported and pauses.
+   */
+  async #applySpendSettings(harness: Harness): Promise<void> {
+    const { cap, invalid } = parseSpendCap(this.env.MIPI_DAILY_SPEND_CAP);
+    if (invalid !== undefined) {
+      reportError(
+        "MIPI_DAILY_SPEND_CAP is not an amount of dollars",
+        new Error(`Got "${invalid}"`),
+        {
+          using: "no cap",
+        },
+      );
+    }
+    const pause = parsePaused(this.env.MIPI_PAUSED);
+    if (pause.invalid !== undefined) {
+      reportError("MIPI_PAUSED is neither on nor off", new Error(`Got "${pause.invalid}"`), {
+        using: "paused",
+      });
+    }
+    this.#paused = pause.paused;
+    await harness.commit(async (tx) => {
+      const state = await tx.doc(Spend);
+      if (cap === undefined) {
+        if (state.limit !== undefined) delete state.limit;
+      } else if (state.limit !== cap) {
+        state.limit = cap;
+      }
+      if (pause.paused && state.paused !== true) state.paused = true;
+      if (!pause.paused && state.paused !== undefined) delete state.paused;
+    }, BACKGROUND_CONTEXT);
+  }
+
+  /** Why work nobody asked for right now (a title written by the model) may not start, with today's spend measured. */
+  #hold(): Promise<"paused" | "spend-cap" | undefined> {
+    const now = Date.now();
+    return this.#harness.commit(
+      async (tx) => holdOf(await measureSpend(tx, now), now),
+      BACKGROUND_CONTEXT,
+    );
+  }
+
+  #readUsage(): Promise<UsageReadout> {
+    return readUsage(this.#harness, this.#providerUsage, Date.now());
+  }
+
   async #initialize(): Promise<void> {
     // A fallback before anything can throw: an object whose open or recovery fails is started again.
     const fallback = Date.now() + HEARTBEAT_MS;
@@ -560,6 +635,7 @@ export class MipiAgent extends DurableObject<Env> {
     });
     this.#models = options.models as MutableModels;
     this.#modelList = new ModelList(() => fetchLiveGoModelIds(this.env.OPENCODE_API_KEY));
+    this.#providerUsage = new ProviderUsageCache(usageSources((name) => this.#setting(name)));
     const harness = await Harness.open(
       storage,
       {
@@ -602,15 +678,16 @@ export class MipiAgent extends DurableObject<Env> {
           // A reminder (M6) records its Telegram answers in the door's document from inside its own task.
           if (isTelegramChange(publication)) this.#telegram?.refresh();
           // New entries move a conversation's idle time, and so the memory pass's next wake (M8).
-          // Memory and the run cap decide whether a pass can run at all: forgetting a lesson or resuming the runs
-          // brings it back.
+          // Memory, the run cap and the spend cap decide whether a pass can run at all: forgetting a lesson, resuming
+          // the runs or a new day brings it back.
           if (
             publication.changes.some(
               (change) =>
                 change.type === "entry" ||
                 (change.type === "document" &&
                   (change.record?.kind === MEMORY_DOC_KIND ||
-                    change.record?.kind === PROACTIVE_DOC_KIND)),
+                    change.record?.kind === PROACTIVE_DOC_KIND ||
+                    change.record?.kind === SPEND_DOC_KIND)),
             )
           )
             this.#memoryPass?.refresh();
@@ -635,6 +712,7 @@ export class MipiAgent extends DurableObject<Env> {
         );
       }
       await this.#applyDailyRunCap(harness);
+      await this.#applySpendSettings(harness);
       await this.#restoreViews();
       const telegram = new TelegramChannelRuntime({
         harness,
@@ -650,6 +728,7 @@ export class MipiAgent extends DurableObject<Env> {
             .schedule(harness.wake())
             .catch(() => this.ctx.abort("Alarm write failed")),
         onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
+        usage: async () => usageText(await this.#readUsage(), this.env.MIPI_TIMEZONE),
         report: reportError,
       });
       this.#telegram = telegram;
@@ -1089,6 +1168,9 @@ export class MipiAgent extends DurableObject<Env> {
           });
           return;
         }
+        // Paused (`MIPI_PAUSED`, M9): a new message is refused with a clear reason, nothing admitted. A retry of one
+        // admitted before still gets its answer above.
+        if (this.#paused) throw new Error(PAUSED_REPLY);
         // Arm before admitting work: `onWake` runs after the commit, so an instance that dies in between is
         // still woken. An early alarm is harmless; a missing one strands the turn.
         await this.#alarm.schedule({ ...this.#harness.wake(), active: true });
@@ -1115,6 +1197,16 @@ export class MipiAgent extends DurableObject<Env> {
           submissionId: submission.id,
         });
         await this.#nameConversation(conversation.id, command.content);
+        return;
+      }
+      case "usage.read": {
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          usage: await this.#readUsage(),
+        });
         return;
       }
       case "options.list": {
@@ -1233,6 +1325,9 @@ export class MipiAgent extends DurableObject<Env> {
     );
     await this.#broadcastSessionSnapshot();
     if (provisional === undefined) return;
+    // A title from the model is work nobody asked for: not while paused or over the spend cap (M9). The first
+    // message's words stay the title.
+    if ((await this.#hold()) !== undefined) return;
     void writeTitle(this.#harness, this.#models, conversationId, text, provisional, (error) =>
       reportError("Writing a conversation title failed", error, { conversationId }),
     ).then(async (changed) => {

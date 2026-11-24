@@ -22,6 +22,7 @@ import {
 import { boundConversation, ConversationMeta, profileOf, setProfile } from "./conversations.ts";
 import type { ModelList } from "./model-list.ts";
 import { isProfileName, PROFILE_NAMES, PROFILES, type ProfileName } from "./profiles.ts";
+import { PAUSED_REPLY, Spend, warnOwnerOverCap } from "./spend.ts";
 import { stampInput } from "./stamp.ts";
 import {
   enqueueReply,
@@ -92,6 +93,7 @@ export const HELP_TEXT =
   "/new starts a new conversation\n" +
   "/profile shows or sets the tool profile\n" +
   "/model shows or sets the model\n" +
+  "/usage shows today's spend and usage\n" +
   "/version shows the version";
 
 export const NON_TEXT_HINT = "I can only read text messages for now.";
@@ -154,6 +156,8 @@ export interface TelegramChannelOptions {
   readonly armAlarm: () => Promise<void>;
   /** The channel's `wake()` may have changed. */
   readonly onWakeChange: () => void;
+  /** The usage readout as text, for `/usage` (M9). Unset: the command says it isn't available. */
+  readonly usage?: () => Promise<string>;
   /** A text message was submitted: the door-independent follow-ups (titles, snapshots). */
   readonly onSubmitted?: (conversationId: ConversationId, text: string) => Promise<void>;
   readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
@@ -272,7 +276,17 @@ export class TelegramChannelRuntime {
     });
     switch (update.kind) {
       case "text":
-        return this.#admitText(update, conversationId);
+        // Paused (`MIPI_PAUSED`, M9): refused before any window opens, so nothing waits to run later.
+        if ((await this.#options.harness.snapshot(Spend, context))?.paused === true) {
+          await this.#reply(update.updateId, update.chatId, () => PAUSED_REPLY);
+          return;
+        }
+        await this.#admitText(update, conversationId);
+        // The owner's first message over the spend cap each day gets one line saying so; it still goes through.
+        if (await this.#commit((tx) => warnOwnerOverCap(tx, update.chatId, this.#now()))) {
+          this.#kickDrain();
+        }
+        return;
       case "command":
         return this.#admitCommand(update, conversationId);
       case "non-text":
@@ -508,6 +522,18 @@ export class TelegramChannelRuntime {
       case "version":
         await this.#reply(updateId, chatId, () => `MiPi ${this.#options.version}`);
         return;
+      case "usage": {
+        // Read before the commit: a provider's usage is an outside lookup, short and cached.
+        let text: string;
+        try {
+          text = (await this.#options.usage?.()) ?? "Usage isn't available here.";
+        } catch (error) {
+          this.#options.report("Reading the usage failed", error);
+          text = "I couldn't read the usage just now; try again in a moment.";
+        }
+        await this.#reply(updateId, chatId, () => text);
+        return;
+      }
       case "new": {
         // Messages waiting in the chat's window belong to the old conversation: they go there first, in the same
         // commit, before the chat is rebound (the submit before any table write, the new conversation's included).

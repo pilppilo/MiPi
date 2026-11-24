@@ -53,6 +53,17 @@ body:has(.session-workspace) {
   padding: 0 1rem 1rem;
 }
 
+.usage-line {
+  margin: 0.25rem 0 0;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.usage-line--held {
+  opacity: 1;
+  font-weight: 600;
+}
+
 .conversation-navigation {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);

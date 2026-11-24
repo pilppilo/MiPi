@@ -53,6 +53,14 @@ jobs:
       # PiDu relay (M7): on once the lane's Environment has RELAY_TOKEN. RELAY_TOKEN_PREVIOUS only while rotating it.
       RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
       RELAY_TOKEN_PREVIOUS: ${{ secrets.RELAY_TOKEN_PREVIOUS }}
+      # Spend cap and pause (M9): an Environment variable overrides wrangler.jsonc's value for that lane. MIPI_PAUSED=1
+      # holds every model call until a deploy without it.
+      MIPI_DAILY_SPEND_CAP: ${{ vars.MIPI_DAILY_SPEND_CAP }}
+      MIPI_PAUSED: ${{ vars.MIPI_PAUSED }}
+      # Provider usage readout (M9), optional: a key with usage permission when the model key has none, and the
+      # OpenCode workspace id if Go asks for one.
+      OPENCODE_USAGE_KEY: ${{ secrets.OPENCODE_USAGE_KEY }}
+      OPENCODE_ORG_ID: ${{ vars.OPENCODE_ORG_ID }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -144,8 +152,10 @@ jobs:
           jq -n --arg key "$OPENCODE_API_KEY" --arg spike "$MIPI_SPIKE_TOKEN" --arg admin "$ADMIN_TOKEN" \
             --arg bot "$TELEGRAM_BOT_TOKEN" --arg hook "$TELEGRAM_WEBHOOK_SECRET" \
             --arg relay "$RELAY_TOKEN" --arg relay_previous "$RELAY_TOKEN_PREVIOUS" \
+            --arg usage_key "$OPENCODE_USAGE_KEY" \
             '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}
               + (if $bot == "" then {} else {TELEGRAM_BOT_TOKEN: $bot, TELEGRAM_WEBHOOK_SECRET: $hook} end)
+              + (if $usage_key == "" then {} else {OPENCODE_USAGE_KEY: $usage_key} end)
               + {RELAY_TOKEN: (if $relay == "" then "off" else $relay end),
                  RELAY_TOKEN_PREVIOUS: (if $relay_previous == "" then "off" else $relay_previous end)}' > "$secrets"
           # Secrets ship with the version itself, so no deployed version ever runs without its key.
@@ -162,7 +172,12 @@ jobs:
           if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
             telegram_vars=(--var "TELEGRAM_ALLOWED_USER_IDS:$TELEGRAM_ALLOWED_USER_IDS" --var "TELEGRAM_BOT_USERNAME:$TELEGRAM_BOT_USERNAME")
           fi
-          pnpm exec wrangler deploy --secrets-file "$secrets" "${access_vars[@]}" "${telegram_vars[@]}" \
+          # The spend cap, pause and Go workspace ride as vars too, only when the Environment sets them.
+          ops_vars=()
+          if [ -n "$MIPI_DAILY_SPEND_CAP" ]; then ops_vars+=(--var "MIPI_DAILY_SPEND_CAP:$MIPI_DAILY_SPEND_CAP"); fi
+          if [ -n "$MIPI_PAUSED" ]; then ops_vars+=(--var "MIPI_PAUSED:$MIPI_PAUSED"); fi
+          if [ -n "$OPENCODE_ORG_ID" ]; then ops_vars+=(--var "OPENCODE_ORG_ID:$OPENCODE_ORG_ID"); fi
+          pnpm exec wrangler deploy --secrets-file "$secrets" "${access_vars[@]}" "${telegram_vars[@]}" "${ops_vars[@]}" \
             --message "$version (${GITHUB_SHA::7})" --tag "$version"
 
       - name: Health check

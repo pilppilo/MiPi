@@ -42,7 +42,8 @@ import {
   passLines,
   passRequest,
 } from "../src/agent/memory-pass.ts";
-import { chicagoDay, Proactive } from "../src/agent/proactive.ts";
+import { afterNextChicagoMidnight, chicagoDay, Proactive } from "../src/agent/proactive.ts";
+import { Spend } from "../src/agent/spend.ts";
 import { formatScheduledInstruction } from "../src/protocol.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -515,6 +516,37 @@ describe("the memory pass", () => {
       }, ctx);
       await agent.pass.run();
       expect(agent.pass.wake().at).toBe(due);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("doesn't ask while paused, and waits for Chicago midnight over the spend cap (M9)", async () => {
+    const agent = await openAgent([say("Noted."), lessons("Likes tea")]);
+    try {
+      const conversation = await chat(agent, "I like tea.", "web:1");
+      await agent.pass.run();
+      expect(agent.pass.wake().at).toBeDefined();
+
+      await agent.harness.commit(async (tx) => {
+        (await tx.doc(Spend)).paused = true;
+      }, ctx);
+      idle(agent);
+      expect(await agent.pass.pass(conversation.id)).toBe(false);
+      await agent.pass.run();
+      expect(agent.pass.wake()).toEqual({ active: false });
+
+      // Unpaused but over the cap: no request, and the wake moves past midnight.
+      await agent.harness.commit(async (tx) => {
+        Object.assign(await tx.doc(Spend), {
+          paused: undefined,
+          limit: 0,
+        });
+      }, ctx);
+      expect(await agent.pass.pass(conversation.id)).toBe(false);
+      await agent.pass.run();
+      expect(agent.pass.wake().at).toBe(afterNextChicagoMidnight(agent.clock.now));
+      expect(agent.requests).toHaveLength(1);
     } finally {
       await agent.close();
     }

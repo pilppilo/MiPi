@@ -158,6 +158,47 @@ export interface Options {
 
 export const MAX_CHOICE_ID_CHARACTERS = 128;
 
+/** One window of a provider's own allowance, such as OpenCode Go's rolling, weekly and monthly ones. */
+export interface UsageWindow {
+  readonly name: string;
+  /** How much of the window's allowance is used, 0 to 100. */
+  readonly percent: number;
+  /** The provider refuses requests until the window resets. */
+  readonly limited: boolean;
+  /** Milliseconds since the Unix epoch. */
+  readonly resetsAt: number;
+}
+
+/** What one provider says about its own usage, or why it couldn't be read. */
+export type ProviderUsage =
+  | {
+      readonly provider: string;
+      readonly label: string;
+      readonly status: "ok";
+      readonly windows: readonly UsageWindow[];
+    }
+  | {
+      readonly provider: string;
+      readonly label: string;
+      readonly status: "unavailable";
+      readonly reason: string;
+    };
+
+/** The usage readout (M9): MiPi's own spend estimate for today, its caps, and each provider's own figures. */
+export interface UsageReadout {
+  /** The Chicago day the figures count, `YYYY-MM-DD`. */
+  readonly day: string;
+  /** Dollars MiPi spent today by its own estimate (pi-ai list prices), whatever the provider bills. */
+  readonly spent: number;
+  /** `MIPI_DAILY_SPEND_CAP`, dollars; unset: no cap. */
+  readonly cap?: number;
+  /** Why background work is held now: paused (`MIPI_PAUSED`) or the spend cap reached. */
+  readonly held?: "paused" | "spend-cap";
+  /** Model rounds scheduled runs took today, of the run cap (`MIPI_DAILY_RUN_CAP`). */
+  readonly runs: { readonly used: number; readonly cap: number };
+  readonly providers: readonly ProviderUsage[];
+}
+
 export type ClientCommand =
   | {
       readonly type: "presence.typing";
@@ -201,6 +242,11 @@ export type ClientCommand =
       readonly requestId: string;
     }
   | {
+      /** The usage readout: today's spend, the caps, and each provider's own figures. */
+      readonly type: "usage.read";
+      readonly requestId: string;
+    }
+  | {
       /** Switches a conversation's model, tool profile, or both, from its next request. */
       readonly type: "conversation.configure";
       readonly requestId: string;
@@ -222,6 +268,8 @@ export type CommandResult =
       readonly page?: { readonly items: readonly EntryRecord[]; readonly next?: Cursor };
       /** For `options.list`. */
       readonly options?: Options;
+      /** For `usage.read`. */
+      readonly usage?: UsageReadout;
     }
   | {
       readonly type: "command.result";
@@ -341,6 +389,69 @@ const parseOptions = (value: unknown): Options => {
   };
 };
 
+const finite = (value: unknown, name: string): number => {
+  if (typeof value !== "number" || !Number.isFinite(value)) throw new Error(`${name} is invalid`);
+  return value;
+};
+
+const parseUsageWindow = (value: unknown): UsageWindow => {
+  if (!isRecord(value) || typeof value.name !== "string" || typeof value.limited !== "boolean") {
+    throw new Error("Usage window is invalid");
+  }
+  return {
+    name: value.name,
+    percent: finite(value.percent, "usage window percent"),
+    limited: value.limited,
+    resetsAt: finite(value.resetsAt, "usage window reset"),
+  };
+};
+
+const parseProviderUsage = (value: unknown): ProviderUsage => {
+  if (!isRecord(value) || typeof value.provider !== "string" || typeof value.label !== "string") {
+    throw new Error("Provider usage is invalid");
+  }
+  if (value.status === "ok" && Array.isArray(value.windows)) {
+    return {
+      provider: value.provider,
+      label: value.label,
+      status: "ok",
+      windows: value.windows.map(parseUsageWindow),
+    };
+  }
+  if (value.status === "unavailable" && typeof value.reason === "string") {
+    return {
+      provider: value.provider,
+      label: value.label,
+      status: "unavailable",
+      reason: value.reason,
+    };
+  }
+  throw new Error("Provider usage is invalid");
+};
+
+export const parseUsageReadout = (value: unknown): UsageReadout => {
+  if (
+    !isRecord(value) ||
+    typeof value.day !== "string" ||
+    !isRecord(value.runs) ||
+    !Array.isArray(value.providers) ||
+    (value.held !== undefined && value.held !== "paused" && value.held !== "spend-cap")
+  ) {
+    throw new Error("Usage readout is invalid");
+  }
+  return {
+    day: value.day,
+    spent: finite(value.spent, "usage spent"),
+    ...(value.cap === undefined ? {} : { cap: finite(value.cap, "usage cap") }),
+    ...(value.held === undefined ? {} : { held: value.held }),
+    runs: {
+      used: finite(value.runs.used, "usage runs used"),
+      cap: finite(value.runs.cap, "usage runs cap"),
+    },
+    providers: value.providers.map(parseProviderUsage),
+  };
+};
+
 const commandTypes = new Set<ClientCommandType>([
   "conversation.open",
   "conversation.entries",
@@ -348,6 +459,7 @@ const commandTypes = new Set<ClientCommandType>([
   "conversation.fork",
   "prompt.submit",
   "options.list",
+  "usage.read",
   "conversation.configure",
 ]);
 
@@ -538,6 +650,7 @@ export function parseClientCommand(message: string): ClientCommand {
       };
     }
     case "options.list":
+    case "usage.read":
       return { type: value.type, requestId };
     case "conversation.configure": {
       const model = optionalChoiceId(value.model, "model");
@@ -667,6 +780,7 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
             ? {}
             : { page: value.page as unknown as { items: EntryRecord[]; next?: Cursor } }),
           ...(value.options === undefined ? {} : { options: parseOptions(value.options) }),
+          ...(value.usage === undefined ? {} : { usage: parseUsageReadout(value.usage) }),
         };
       }
       if (value.ok === false) {

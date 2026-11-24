@@ -31,6 +31,7 @@ import {
 import { ConversationMeta, profileOf } from "./conversations.ts";
 import { addLesson, MAX_LESSON, MAX_LESSONS, MemoryDoc, REMEMBER_TOOL_NAME } from "./memory.ts";
 import { afterNextChicagoMidnight, chicagoDay, Proactive } from "./proactive.ts";
+import { holdOf, measureSpend, Spend } from "./spend.ts";
 import { PROFILES } from "./profiles.ts";
 import { providerSession, recordUsage } from "./titles.ts";
 import { touchesWebFetch } from "../tools/memory.ts";
@@ -309,6 +310,10 @@ export async function planPass(
   // pass out until a lesson is forgotten or the runs resume (`#earliest`), so it never wakes just to wait again.
   if (memory.lessons.length >= MAX_LESSONS) return { kind: "skip", reason: "memory full" };
   if ((await tx.doc(Proactive)).limit === 0) return { kind: "skip", reason: "paused" };
+  // Paused (`MIPI_PAUSED`): as above. Over the spend cap: the range waits for Chicago midnight (M9).
+  const hold = holdOf(await tx.doc(Spend), now);
+  if (hold === "paused") return { kind: "skip", reason: "paused" };
+  if (hold === "spend-cap") return wait(afterNextChicagoMidnight(now), "spend cap");
   // Today's passes used: the range waits for Chicago midnight, so the alarm doesn't come straight back for it.
   const day = chicagoDay(now);
   const used = state.cap?.day === day ? state.cap.count : 0;
@@ -442,6 +447,11 @@ export class MemoryPassRuntime {
     const memory = await harness.snapshot(MemoryDoc, context);
     if ((memory?.lessons.length ?? 0) >= MAX_LESSONS) return undefined;
     if ((await harness.snapshot(Proactive, context))?.limit === 0) return undefined;
+    // Paused: no wake until the agent starts again unpaused. Over the spend cap: nothing before Chicago midnight (M9).
+    const spend = await harness.snapshot(Spend, context);
+    const hold = spend === undefined ? undefined : holdOf(spend, this.#now());
+    if (hold === "paused") return undefined;
+    const notBefore = hold === "spend-cap" ? afterNextChicagoMidnight(this.#now()) : undefined;
     const state = (await harness.snapshot(MemoryPassDoc, context)) ?? { marks: {} };
     // Closed meanwhile (an export or restore began): no commit into a closing harness.
     if (this.#closed) return undefined;
@@ -466,7 +476,9 @@ export class MemoryPassRuntime {
       const at = dueAt({ entry, at: activeAt }, markOf(state, id));
       if (at !== undefined && (earliest === undefined || at < earliest)) earliest = at;
     }
-    return earliest;
+    return earliest === undefined || notBefore === undefined
+      ? earliest
+      : Math.max(earliest, notBefore);
   }
 
   /**
@@ -478,6 +490,8 @@ export class MemoryPassRuntime {
     if (this.#closed || this.#running) return;
     this.#running = true;
     try {
+      // Today's spend first, so every plan below sees the spend cap as it stands (M9).
+      await this.#options.harness.commit((tx) => measureSpend(tx, this.#now()), context);
       let passes = 0;
       for (const id of await this.#conversations()) {
         if (this.#closed || passes >= PASSES_PER_ALARM) break;

@@ -13,6 +13,7 @@ import {
   type ConversationSummary,
   type Options,
   ROOT_CONVERSATION_ID,
+  type UsageReadout,
 } from "../protocol.ts";
 import type { ConversationSnapshot } from "./session-state.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
@@ -39,6 +40,48 @@ const statusLabel = {
 } as const;
 
 const TYPING_IDLE_MS = 1_500;
+
+const dollars = (amount: number): string => `$${amount.toFixed(2)}`;
+
+/**
+ * Today's spend by MiPi's own estimate, against its cap, then each provider's busiest window (all of them on hover).
+ * Marked when background work is held: paused, or over the spend cap.
+ */
+function UsageLine({ usage }: { readonly usage: UsageReadout }) {
+  const spend =
+    usage.cap === undefined
+      ? `Today ~${dollars(usage.spent)}`
+      : `Today ~${dollars(usage.spent)} of ${dollars(usage.cap)}`;
+  const providers = usage.providers.map((provider) => {
+    if (provider.status === "unavailable") return `${provider.label}: unavailable`;
+    const busiest = [...provider.windows].sort((left, right) => right.percent - left.percent)[0];
+    return busiest === undefined
+      ? provider.label
+      : `${provider.label} ${Math.round(busiest.percent)}% ${busiest.name}`;
+  });
+  const held =
+    usage.held === "paused" ? "paused" : usage.held === "spend-cap" ? "over the cap" : undefined;
+  const details = usage.providers.flatMap((provider) =>
+    provider.status === "unavailable"
+      ? [`${provider.label}: ${provider.reason}`]
+      : provider.windows.map(
+          (window) =>
+            `${provider.label} ${window.name}: ${Math.round(window.percent)}%${window.limited ? " (limit reached)" : ""}, resets ${new Date(window.resetsAt).toLocaleString()}`,
+        ),
+  );
+  return (
+    <p
+      className={`usage-line${held === undefined ? "" : " usage-line--held"}`}
+      title={[
+        "MiPi's own estimate at list prices",
+        `Scheduled runs: ${usage.runs.used} of ${usage.runs.cap} rounds`,
+        ...details,
+      ].join("\n")}
+    >
+      {[spend, ...providers, ...(held === undefined ? [] : [held])].join(" · ")}
+    </p>
+  );
+}
 
 const typingLabel = (usernames: readonly string[]): string => {
   if (usernames.length === 1) return `${usernames[0]} is typing…`;
@@ -267,6 +310,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           <p className="connection-status" role="status">
             {statusLabel[session.status]}
           </p>
+          {session.usage === undefined ? null : <UsageLine usage={session.usage} />}
         </header>
 
         {session.error === undefined ? null : (

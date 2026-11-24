@@ -20,6 +20,7 @@ import {
   type ReminderDestination,
   takeRound,
 } from "../agent/proactive.ts";
+import { holdOf, measureSpend, noticeSpend, Spend } from "../agent/spend.ts";
 import { TelegramChannel } from "../agent/telegram-state.ts";
 import { enqueueReply, TelegramOutbox } from "../agent/telegram-outbox.ts";
 import { reminderRequest } from "../lib/requests.ts";
@@ -55,8 +56,20 @@ type ReminderProgress = {
   skippedBusy: number;
   /** Repeat times skipped because they came more than `LATE_WINDOW_MS` late. */
   skippedLate: number;
-  /** Repeat times skipped because proactive runs reached the daily cap (M6). */
+  /** Repeat times skipped because proactive runs reached the daily cap (M6) or the spend cap (M9). */
   skippedCap?: number;
+  /** Repeat times skipped while MiPi was paused (`MIPI_PAUSED`, M9). */
+  skippedPaused?: number;
+};
+
+/** Why a due occurrence goes out without the model, or waits: the run cap, the spend cap, or a pause. */
+type Held = "run-cap" | "spend-cap" | "paused";
+
+/** What a held one-time Telegram reminder says, sent as it is without the model. */
+const HELD_REASON: Readonly<Record<Held, string>> = {
+  "run-cap": "daily limit reached",
+  "spend-cap": "daily spend cap reached",
+  paused: "MiPi is paused",
 };
 
 /** A phase sees only its own checkpoint, so the phases are a tagged union. */
@@ -121,6 +134,8 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
         return;
       }
       const now = runtime.now();
+      // Today's spend first, in a commit of its own: the next one submits, and its submit must be its first write.
+      await runtime.commit((tx) => measureSpend(tx, now).then(() => undefined), context);
       await runtime.commit(async (tx) => {
         // Reads first; the submit is this commit's first table write. Documents may change before it.
         const previous =
@@ -143,17 +158,20 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             ? await tx.submissionByRequest(conversation.id, requestId)
             : undefined;
         let sent = state.sent;
-        // pi-ledger L7. The run's first model round is checked here, and counted after the submit.
-        const capped = decision === "send" && existing === undefined && !hasRound(proactive, now);
-        if (capped) {
+        // pi-ledger L7. The run's first model round is checked here, and counted after the submit. A pause or the
+        // spend cap holds it as the run cap does (M9).
+        const spend = await tx.doc(Spend);
+        const held: Held | undefined =
+          decision !== "send" || existing !== undefined
+            ? undefined
+            : (holdOf(spend, now) ?? (hasRound(proactive, now) ? undefined : "run-cap"));
+        if (held !== undefined) {
           const chat = input.destination.kind === "telegram" ? input.destination.chatId : undefined;
-          noticeCap(
-            proactive,
-            await tx.doc(TelegramChannel),
-            await tx.doc(TelegramOutbox),
-            chat,
-            now,
-          );
+          // The owner paused MiPi: no notice. A cap tells once a day.
+          const channel = await tx.doc(TelegramChannel);
+          const outbox = await tx.doc(TelegramOutbox);
+          if (held === "run-cap") noticeCap(proactive, channel, outbox, chat, now);
+          else if (held === "spend-cap") noticeSpend(spend, channel, outbox, chat, now);
           if (input.every === undefined) {
             if (chat !== undefined) {
               // A reminder asked for is never dropped: sent as it is, without the model.
@@ -162,13 +180,13 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
                 {
                   id: `reminder-capped:${input.id}`,
                   chatId: chat,
-                  text: `Reminder: ${input.instruction} (sent without MiPi: daily limit reached).`,
+                  text: `Reminder: ${input.instruction} (sent without MiPi: ${HELD_REASON[held]}).`,
                 },
                 now,
               );
               return { status: "terminal", outcome: { status: "completed", result: null } };
             }
-            // On the web: it runs once the cap resets, past Chicago midnight.
+            // On the web: it runs once the caps reset, past Chicago midnight (or looks again then, if still paused).
             return {
               status: "running",
               checkpoint: { ...state, phase: "wait", at: afterNextChicagoMidnight(now) },
@@ -224,7 +242,11 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             sent,
             skippedBusy: state.skippedBusy + (decision === "skip-busy" ? 1 : 0),
             skippedLate: state.skippedLate + (decision === "skip-late" ? 1 : 0),
-            skippedCap: (state.skippedCap ?? 0) + (capped ? 1 : 0),
+            skippedCap:
+              (state.skippedCap ?? 0) + (held === "run-cap" || held === "spend-cap" ? 1 : 0),
+            ...(held === "paused" || state.skippedPaused !== undefined
+              ? { skippedPaused: (state.skippedPaused ?? 0) + (held === "paused" ? 1 : 0) }
+              : {}),
           },
         };
       }, context);
