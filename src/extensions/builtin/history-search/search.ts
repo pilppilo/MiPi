@@ -1,6 +1,10 @@
-import type { Context } from "../agent/pi/context.ts";
-import type { AssistantMessage, Message } from "../agent/pi/ai.ts";
-import { obj, str } from "../agent/pi/schema.ts";
+/**
+ * History search: `search_history` hands a question about earlier conversations to a subagent, which searches with
+ * `search_conversations` and answers. Which conversations count is core's (`visibility.ts`).
+ */
+import type { Context } from "../../../agent/pi/context.ts";
+import type { AssistantMessage, Message } from "../../../agent/pi/ai.ts";
+import { obj, str } from "../../../agent/pi/schema.ts";
 import {
   AssistantEntry,
   configure,
@@ -11,7 +15,8 @@ import {
   type ToolExecutionApi,
   type ToolRegistration,
   UserEntry,
-} from "../agent/pi/durable.ts";
+} from "../../../agent/pi/durable.ts";
+import { OWNER_SCOPE, visiblePage } from "../../../agent/visibility.ts";
 
 export const SEARCH_CONVERSATIONS_TOOL_NAME = "search_conversations";
 export const SEARCH_HISTORY_TOOL_NAME = "search_history";
@@ -67,8 +72,8 @@ function match(entry: EntryRecord, term: string): ConversationMatch | undefined 
 }
 
 /**
- * Case-insensitive substring search over ordinary turns in ownerless conversations. Owned conversations (subagents)
- * and every turn that invokes history search are skipped, so search questions and answers derived from earlier searches never
+ * Case-insensitive substring search over ordinary turns in the owner's visible conversations (`visibility.ts`: not a
+ * subagent's). Every turn that invokes history search is skipped, so search questions and answers derived from earlier searches never
  * become evidence. Each page is read in its own commit so a scan never holds the Session's commit line for long.
  */
 export async function searchConversations(
@@ -92,11 +97,10 @@ export async function searchConversations(
   let conversationCursor: Cursor | undefined;
   do {
     const conversations = await api.commit(
-      (tx) => tx.scanConversations({}, PAGE_SIZE, conversationCursor),
+      (tx) => visiblePage(tx, OWNER_SCOPE, PAGE_SIZE, conversationCursor),
       context,
     );
     for (const conversation of conversations.items) {
-      if (conversation.owner !== undefined) continue;
       let turn: EntryRecord[] = [];
       let entryCursor: Cursor | undefined;
       do {
