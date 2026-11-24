@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { createRegistry, Harness, InboxDoc, MemoryStorage } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
 import { queuedInputs } from "../src/protocol.ts";
 
 const context = BACKGROUND_CONTEXT;

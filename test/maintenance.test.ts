@@ -25,7 +25,7 @@ import {
   type ExportRow,
 } from "../src/agent/maintenance.ts";
 import { SUPPORTED_SCHEMA_VERSION } from "../src/agent/pi/storage.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
 import worker from "../src/worker/index.ts";
 import { MIPI_VERSION } from "../src/version.ts";
 import { withSpikeToken } from "./spike.ts";
@@ -305,6 +305,11 @@ describe("export and restore", () => {
       rows: countsOf(exported.rows),
     });
     expect(after.state).toEqual({ kind: "open" });
+    // The admin status names the extensions in use, and replaced none (COD-209).
+    expect(after.extensions).toEqual({
+      active: ["history-search", "reminders", "web-fetch", "memory"],
+      replaced: [],
+    });
     // And the alarm still runs every source without a failure.
     await runDurableObjectAlarm(env.AGENT.getByName(owner));
     expect((await call<AdminStatus>("GET", "/api/admin/status")).state).toEqual({ kind: "open" });

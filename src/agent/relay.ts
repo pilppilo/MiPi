@@ -18,7 +18,7 @@ import {
 import { boundConversation, ChannelBindings } from "./conversations.ts";
 import { answerText } from "./proactive.ts";
 import { Spend } from "./spend.ts";
-import type { ProfileName } from "./profiles.ts";
+import type { ProfileName, Profiles } from "./profiles.ts";
 import { stampInput } from "./stamp.ts";
 import { defang } from "../lib/fence.ts";
 import { isRelayKey, relayRequest } from "../lib/requests.ts";
@@ -169,6 +169,8 @@ export interface RelayRuntimeOptions {
   readonly harness: Harness;
   readonly timeZone: string | undefined;
   readonly profile: ProfileName;
+  /** The profile table, against the installed extensions' tools. */
+  readonly profiles: Profiles;
   /** Arms the alarm before work is admitted, as every door does. */
   readonly armAlarm: () => Promise<void>;
   /** Titles the conversation from a message; never fails the admission. */
@@ -213,7 +215,7 @@ export class RelayRuntime {
     const { harness } = this.#options;
     // Creating the conversation writes tables, and `submit(tx, …)` must come first in its commit: so on its own.
     const conversationId = await harness.commit(
-      (tx) => boundConversation(tx, RELAY_BINDING, this.#options.profile),
+      (tx) => boundConversation(tx, RELAY_BINDING, this.#options.profile, this.#options.profiles),
       context,
     );
     const conversation = await harness.conversation(conversationId, context);

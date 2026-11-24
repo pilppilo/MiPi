@@ -5,7 +5,8 @@ import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi
 import { Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { CACHE_RETENTION, createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { CACHE_RETENTION } from "../src/agent/harness.ts";
 import { localTime, ownerTimeZone, stampInput } from "../src/agent/stamp.ts";
 import { formatScheduledInstruction, parseScheduledInstruction } from "../src/protocol.ts";
 

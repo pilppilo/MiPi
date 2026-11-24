@@ -16,9 +16,39 @@
   },
   "overrides": [
     {
-      "files": ["src/agent/pi/**", "test/**", "vitest.config.ts"],
+      "files": ["src/agent/**"],
       "rules": {
-        "no-restricted-imports": "off"
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              },
+              {
+                "group": ["**/extensions/**", "**/tools/**"],
+                "message": "Core imports no extension or tool (COD-208): only the composition root (agent-do.ts, composition.ts) names them. Reach a feature through a connector."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/agent/agent-do.ts", "src/agent/composition.ts"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              }
+            ]
+          }
+        ]
       }
     },
     {
@@ -47,6 +77,40 @@
             ]
           }
         ]
+      }
+    },
+    {
+      "files": ["src/extensions/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              },
+              {
+                "group": [
+                  "**/agent/telegram*",
+                  "**/agent/relay*",
+                  "**/doors/**",
+                  "**/agent/agent-do*",
+                  "**/agent/composition*",
+                  "**/client/**",
+                  "**/worker/**"
+                ],
+                "message": "An extension imports only core (COD-208): never a door, the composition root, or another extension (scripts/check-boundaries.ts)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/agent/pi/**", "test/**", "vitest.config.ts"],
+      "rules": {
+        "no-restricted-imports": "off"
       }
     }
   ]

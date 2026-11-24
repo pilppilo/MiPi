@@ -17,7 +17,8 @@ import { openDurableObjectSqliteStorage } from "./pi/sqlite.ts";
 import { normalizeUsername } from "../lib/identity.ts";
 import { webRequest } from "../lib/requests.ts";
 import type { MutableModels } from "./pi/ai.ts";
-import { APP_TASKS, createHarnessOptions } from "./harness.ts";
+import type { AgentComposition } from "./harness.ts";
+import { composeMipi } from "./composition.ts";
 import {
   boundConversation,
   ConversationMeta,
@@ -28,7 +29,7 @@ import {
 } from "./conversations.ts";
 import { fetchLiveGoModelIds, ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
-import { isProfileName, PROFILE_NAMES, PROFILES, profileOrDefault } from "./profiles.ts";
+import { isProfileName, PROFILE_NAMES, profileOrDefault } from "./profiles.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
@@ -76,7 +77,6 @@ import type { TelegramInbound } from "../lib/telegram-update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
 import { AlarmScheduler, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
 import { WakeSources } from "./wake-sources.ts";
-import { isMemoryPassChange, MemoryPassRuntime } from "./memory-pass.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
 import { botApiSender } from "./telegram-outbox.ts";
 import { RelayRuntime, type RelayResult } from "./relay.ts";
@@ -224,11 +224,22 @@ export interface AdminStatus {
   readonly rows: Readonly<Record<string, number>>;
   /** The usage readout (M9) as last measured, with providers' cached figures, while open; absent if it failed. */
   readonly usage?: UsageReadout;
+  /** The extensions in use, in default order, and any replaced at startup (COD-209); absent until composed. */
+  readonly extensions?: {
+    readonly active: readonly string[];
+    readonly replaced: readonly {
+      readonly replaced: string;
+      readonly by: string;
+      readonly tool: string;
+    }[];
+  };
 }
 
 export class MipiAgent extends DurableObject<Env> {
   #harness!: Harness;
   #models!: MutableModels;
+  /** The agent as composed at the last start: core, the built-in extensions, the profile table. */
+  #composition: AgentComposition | undefined;
   #modelList!: ModelList;
   #state: AgentState = { kind: "refused", reason: "Starting" };
   /** The close in progress before maintenance (`#closeForMaintenance`). */
@@ -277,7 +288,21 @@ export class MipiAgent extends DurableObject<Env> {
       });
       return;
     }
-    const guard = checkStoredData(sql, APP_TASKS);
+    // A composition from an earlier start must not show beside a refusal of this one.
+    this.#composition = undefined;
+    let composition: AgentComposition;
+    try {
+      composition = this.#compose();
+    } catch (error) {
+      // Two extensions claiming one name or tool: a wiring mistake in this build. Refuse clearly, never half-run.
+      const reason = `The extensions don't compose: ${error instanceof Error ? error.message : String(error)}`;
+      this.#state = { kind: "refused", reason };
+      reportError("Composing the agent failed", error, { build: MIPI_VERSION });
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    this.#composition = composition;
+    const guard = checkStoredData(sql, composition.tasks);
     if (!guard.ok) {
       this.#state = { kind: "refused", reason: guard.reason };
       reportError("Startup guard refused the stored data", new Error(guard.reason), {
@@ -294,7 +319,7 @@ export class MipiAgent extends DurableObject<Env> {
       app_version: MIPI_VERSION,
       pi_durable_version: PI_DURABLE_VERSION,
       schema_version: String(storedSchemaVersion(sql) ?? SUPPORTED_SCHEMA_VERSION),
-      task_versions: JSON.stringify(supportedTaskVersions(APP_TASKS)),
+      task_versions: JSON.stringify(supportedTaskVersions(composition.tasks)),
     });
     this.#state = { kind: "open" };
   }
@@ -380,7 +405,31 @@ export class MipiAgent extends DurableObject<Env> {
       ...(bookmark === undefined ? {} : { bookmark }),
       rows: rowCounts(this.ctx.storage.sql),
       ...(usage === undefined ? {} : { usage }),
+      ...(this.#composition === undefined
+        ? {}
+        : {
+            extensions: {
+              active: this.#composition.extensions.active.map(({ name }) => name),
+              replaced: this.#composition.extensions.replacements,
+            },
+          }),
     };
+  }
+
+  /** Core, the built-in extensions and the profile table, configured from the bindings. Throws on a conflict. */
+  #compose(): AgentComposition {
+    const composition = composeMipi({
+      modelId: this.env.MIPI_MODEL,
+      profile: profileOrDefault(this.env.MIPI_PROFILE),
+      readEnv: (name) => {
+        const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
+        return typeof value === "string" ? value : undefined;
+      },
+    });
+    for (const replacement of composition.extensions.replacements) {
+      console.log(JSON.stringify({ message: "Replaced a built-in extension", ...replacement }));
+    }
+    return composition;
   }
 
   /** Starts an export: closes the harness, pauses everything, and returns the header. Works on refused data too. */
@@ -616,14 +665,8 @@ export class MipiAgent extends DurableObject<Env> {
     if (current === null || current > fallback) await this.ctx.storage.setAlarm(fallback);
 
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage);
-    const options = createHarnessOptions({
-      modelId: this.env.MIPI_MODEL,
-      profile: profileOrDefault(this.env.MIPI_PROFILE),
-      readEnv: (name) => {
-        const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
-        return typeof value === "string" ? value : undefined;
-      },
-    });
+    const composition = this.#composition ?? this.#compose();
+    const { options, profiles } = composition;
     this.#models = options.models as MutableModels;
     this.#modelList = new ModelList(() => fetchLiveGoModelIds(this.env.OPENCODE_API_KEY));
     this.#providerUsage = new ProviderUsageCache(usageSources((name) => this.#setting(name)));
@@ -679,7 +722,7 @@ export class MipiAgent extends DurableObject<Env> {
         end: () => {},
       });
       // Before anything runs: every conversation offers its profile's tools (older ones may lack them).
-      const synced = await syncProfileTools(harness);
+      const synced = await syncProfileTools(harness, profiles);
       if (synced.length > 0) {
         console.log(
           JSON.stringify({
@@ -696,6 +739,7 @@ export class MipiAgent extends DurableObject<Env> {
         owner: ownerName(this.env.MIPI_OWNER),
         timeZone: this.env.MIPI_TIMEZONE,
         profile: startingProfile("telegram", profileOrDefault(this.env.MIPI_PROFILE)),
+        profiles,
         version: MIPI_VERSION,
         modelList: this.#modelList,
         send: botApiSender(this.#setting("TELEGRAM_BOT_TOKEN")),
@@ -709,15 +753,6 @@ export class MipiAgent extends DurableObject<Env> {
         report: reportError,
       });
       this.#telegram = telegram;
-      const memoryPass = new MemoryPassRuntime({
-        harness,
-        models: this.#models,
-        onWakeChange: () =>
-          void this.#alarm
-            .schedule(harness.wake())
-            .catch(() => this.ctx.abort("Alarm write failed")),
-        report: reportError,
-      });
       // Each part that needs the alarm, once. The alarm runs them in this order, after Pi Durable's resume.
       this.#wakeSources.register({
         name: "Telegram door",
@@ -729,26 +764,38 @@ export class MipiAgent extends DurableObject<Env> {
         refresh: () => telegram.refresh(),
         close: () => telegram.close(),
       });
-      this.#wakeSources.register({
-        name: "memory pass",
-        wake: () => memoryPass.wake(),
-        // Idle conversations' memory passes that are due (M8).
-        run: () => memoryPass.run(),
-        observes: isMemoryPassChange,
-        refresh: () => memoryPass.refresh(),
-        close: () => memoryPass.close(),
-      });
+      // Then each extension's background work, in default order (today the memory pass).
+      const prepares: Array<() => Promise<void>> = [];
+      for (const extension of composition.extensions.active) {
+        const sources =
+          extension.wakeSources?.({
+            harness,
+            models: this.#models,
+            untrustedTools: composition.extensions.untrustedTools,
+            onWakeChange: () =>
+              void this.#alarm
+                .schedule(harness.wake())
+                .catch(() => this.ctx.abort("Alarm write failed")),
+            report: reportError,
+          }) ?? [];
+        for (const source of sources) {
+          this.#wakeSources.register(source);
+          const prepare = source.prepare;
+          if (prepare !== undefined) prepares.push(() => prepare.call(source));
+        }
+      }
       this.#relay = new RelayRuntime({
         harness,
         timeZone: this.env.MIPI_TIMEZONE,
         profile: startingProfile("relay", profileOrDefault(this.env.MIPI_PROFILE)),
+        profiles,
         armAlarm: () => this.#alarm.schedule({ ...harness.wake(), active: true }),
         onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
         report: reportError,
       });
-      // The memory pass's first look, before the alarm is set: its wake is in the first write, and nothing of it is in
-      // flight once opening is over.
-      await memoryPass.start();
+      // Each source's first look, before the alarm is set: its wake is in the first write, and nothing of it is in
+      // flight once opening is over (the memory pass).
+      for (const prepare of prepares) await prepare();
       // Armed before `resume()` runs anything, as for any call that can start work.
       await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
@@ -1025,6 +1072,7 @@ export class MipiAgent extends DurableObject<Env> {
           tx,
           "web",
           startingProfile("web", profileOrDefault(this.env.MIPI_PROFILE)),
+          this.#composition!.profiles,
           { existing: root.id },
         ),
       BACKGROUND_CONTEXT,
@@ -1237,7 +1285,7 @@ export class MipiAgent extends DurableObject<Env> {
         await this.#harness.commit(async (tx) => {
           if (model !== undefined) await configure(tx, conversation.id, { model });
           if (profile !== undefined && isProfileName(profile)) {
-            await setProfile(tx, conversation.id, profile);
+            await setProfile(tx, conversation.id, profile, this.#composition!.profiles);
           }
         }, BACKGROUND_CONTEXT);
         await this.#broadcastSessionSnapshot();
@@ -1301,7 +1349,8 @@ export class MipiAgent extends DurableObject<Env> {
 
   /** What the web pickers offer. A failed live model list leaves the model picker empty, with the reason. */
   async #options(): Promise<Options> {
-    const profiles = PROFILE_NAMES.map((name) => ({ id: name, name: PROFILES[name].description }));
+    const table = this.#composition!.profiles;
+    const profiles = PROFILE_NAMES.map((name) => ({ id: name, name: table.description(name) }));
     const defaultModel = this.env.MIPI_MODEL || DEFAULT_MODEL_ID;
     try {
       return { models: await this.#modelList.models(), profiles, defaultModel };

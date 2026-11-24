@@ -23,8 +23,9 @@ import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { boundConversation, startingProfile } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
-import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/agent/memory-pass.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { PROFILES } from "./mipi.ts";
+import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { Proactive } from "../src/agent/proactive.ts";
 import { Spend } from "../src/agent/spend.ts";
@@ -115,6 +116,7 @@ async function seed(): Promise<void> {
       owner: "jerome",
       timeZone: "America/Chicago",
       profile: startingProfile("telegram", "default"),
+      profiles: PROFILES,
       version: MIPI_VERSION,
       modelList: new ModelList(async () => ["deepseek-v4.1-flash"]),
       send: async () => ({ kind: "sent", messageId: 1 }),
@@ -129,6 +131,7 @@ async function seed(): Promise<void> {
       harness,
       timeZone: "America/Chicago",
       profile: startingProfile("relay", "default"),
+      profiles: PROFILES,
       armAlarm: async () => {},
       report: (message, error) => {
         throw new Error(`${message}: ${String(error)}`);
@@ -137,6 +140,7 @@ async function seed(): Promise<void> {
     const pass = new MemoryPassRuntime({
       harness,
       models,
+      untrustedTools: new Set(["web_fetch"]),
       onWakeChange: () => {},
       report: (message, error) => {
         throw new Error(`${message}: ${String(error)}`);
@@ -163,7 +167,7 @@ async function seed(): Promise<void> {
 
       // Bound as the web door binds it, so the fixture holds the `web` channel binding too.
       const webId = await harness.commit(
-        (tx) => boundConversation(tx, "web", startingProfile("web", "default")),
+        (tx) => boundConversation(tx, "web", startingProfile("web", "default"), PROFILES),
         ctx,
       );
       const web = (await harness.conversation(webId, ctx))!;

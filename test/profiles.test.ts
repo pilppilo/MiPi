@@ -13,9 +13,11 @@ import {
   startingProfile,
   syncProfileTools,
 } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { PROFILES } from "./mipi.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
-import { PROFILE_NAMES, PROFILES, type ProfileName } from "../src/agent/profiles.ts";
+import { PROFILE_NAMES, type ProfileName } from "../src/agent/profiles.ts";
+import { PROFILE_TABLE } from "../src/extensions/profiles.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -64,11 +66,11 @@ describe("tool profiles", () => {
         { ownership: { kind: "ownerless" } },
         ctx,
       );
-      await harness.commit((tx) => setProfile(tx, conversation.id, name), ctx);
+      await harness.commit((tx) => setProfile(tx, conversation.id, name, PROFILES), ctx);
       await (await conversation.submit({ type: "input", content: "hi" }, ctx)).wait(ctx);
 
       const { tools, prompt } = offered(requests.at(-1)!);
-      expect(tools).toEqual([...PROFILES[name].tools].sort());
+      expect(tools).toEqual([...PROFILE_TABLE[name].tools].sort());
       // Pi Durable's optional extras never come in on their own.
       expect(tools).not.toEqual(expect.arrayContaining(["codemode"]));
       for (const builtIn of ["read", "write", "edit", "bash", "search_tools"]) {
@@ -106,7 +108,7 @@ describe("tool profiles", () => {
         "web_fetch",
       ]);
 
-      await harness.commit((tx) => setProfile(tx, root.id, "empty"), ctx);
+      await harness.commit((tx) => setProfile(tx, root.id, "empty", PROFILES), ctx);
       await (await root.submit({ type: "input", content: "two" }, ctx)).wait(ctx);
       expect(offered(requests[1]!).tools).toEqual([]);
     } finally {
@@ -119,19 +121,25 @@ describe("tool profiles", () => {
     try {
       const relay = startingProfile("relay", "default");
       expect(relay).toBe("pidu");
-      const first = await harness.commit((tx) => boundConversation(tx, "relay:pidu", relay), ctx);
-      const again = await harness.commit((tx) => boundConversation(tx, "relay:pidu", relay), ctx);
+      const first = await harness.commit(
+        (tx) => boundConversation(tx, "relay:pidu", relay, PROFILES),
+        ctx,
+      );
+      const again = await harness.commit(
+        (tx) => boundConversation(tx, "relay:pidu", relay, PROFILES),
+        ctx,
+      );
       expect(again).toBe(first);
       expect(profileOf(await harness.snapshot(ConversationMeta, first, ctx))).toBe("pidu");
 
       const fresh = await harness.commit(
-        (tx) => boundConversation(tx, "relay:pidu", relay, { rebind: true }),
+        (tx) => boundConversation(tx, "relay:pidu", relay, PROFILES, { rebind: true }),
         ctx,
       );
       expect(fresh).not.toBe(first);
-      expect(await harness.commit((tx) => boundConversation(tx, "relay:pidu", relay), ctx)).toBe(
-        fresh,
-      );
+      expect(
+        await harness.commit((tx) => boundConversation(tx, "relay:pidu", relay, PROFILES), ctx),
+      ).toBe(fresh);
     } finally {
       await harness.close(ctx);
     }
@@ -159,10 +167,10 @@ describe("profile tools at startup", () => {
       // A plain chat stays plain: `empty` offers nothing, and nothing changes there.
       const plain = await harness.commit(async (tx) => {
         const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
-        await setProfile(tx, id, "empty");
+        await setProfile(tx, id, "empty", PROFILES);
         return id;
       }, ctx);
-      expect(await syncProfileTools(harness)).toEqual([old]);
+      expect(await syncProfileTools(harness, PROFILES)).toEqual([old]);
       const agent = await (await harness.conversation(old, ctx))!.agent(ctx);
       expect(agent.tools.map(({ name }) => name).sort()).toEqual([
         "forget",
@@ -177,13 +185,13 @@ describe("profile tools at startup", () => {
       await harness.commit(async (tx) => {
         await configure(tx, old, { tools: [] });
       }, ctx);
-      expect(await syncProfileTools(harness)).toEqual([]);
+      expect(await syncProfileTools(harness, PROFILES)).toEqual([]);
       // A change to the profiles' tools (here, a forgotten digest) runs the pass again.
       await harness.commit(async (tx) => {
         delete (await tx.doc(AgentSettings)).profileTools;
       }, ctx);
-      expect(await syncProfileTools(harness)).toEqual([old]);
-      expect(await syncProfileTools(harness)).toEqual([]);
+      expect(await syncProfileTools(harness, PROFILES)).toEqual([old]);
+      expect(await syncProfileTools(harness, PROFILES)).toEqual([]);
     } finally {
       await harness.close(ctx);
     }

@@ -21,7 +21,7 @@ import {
 } from "./pi/durable.ts";
 import { boundConversation, ConversationMeta, profileOf, setProfile } from "./conversations.ts";
 import type { ModelList } from "./model-list.ts";
-import { isProfileName, PROFILE_NAMES, PROFILES, type ProfileName } from "./profiles.ts";
+import { isProfileName, PROFILE_NAMES, type ProfileName, type Profiles } from "./profiles.ts";
 import { PAUSED_REPLY, Spend, warnOwnerOverCap } from "./spend.ts";
 import { stampInput } from "./stamp.ts";
 import {
@@ -145,6 +145,8 @@ export interface TelegramChannelOptions {
   readonly timeZone: string | undefined;
   /** The profile a chat's first conversation starts on. */
   readonly profile: ProfileName;
+  /** The profile table, against the installed extensions' tools. */
+  readonly profiles: Profiles;
   readonly version: string;
   readonly modelList: ModelList;
   readonly send: TelegramSend;
@@ -268,7 +270,12 @@ export class TelegramChannelRuntime {
     const conversationId = await this.#commit(async (tx) => {
       // The private chat that wrote last: where a notice goes when nothing else names a chat (M6).
       (await tx.doc(TelegramChannel)).lastChat = update.chatId;
-      return boundConversation(tx, telegramBinding(update.chatId), this.#options.profile);
+      return boundConversation(
+        tx,
+        telegramBinding(update.chatId),
+        this.#options.profile,
+        this.#options.profiles,
+      );
     });
     switch (update.kind) {
       case "text":
@@ -602,9 +609,13 @@ export class TelegramChannelRuntime {
               submitted = { id, text: batchText(messages) };
             }
           }
-          await boundConversation(tx, telegramBinding(chatId), this.#options.profile, {
-            rebind: true,
-          });
+          await boundConversation(
+            tx,
+            telegramBinding(chatId),
+            this.#options.profile,
+            this.#options.profiles,
+            { rebind: true },
+          );
           return "Started a new conversation.";
         });
         if (submitted !== undefined && previous !== undefined) {
@@ -616,14 +627,14 @@ export class TelegramChannelRuntime {
         await this.#reply(updateId, chatId, async (tx) => {
           if (argument.length === 0) {
             const current = profileOf(await tx.doc(ConversationMeta, conversationId));
-            return `Profile: ${current} (${PROFILES[current].description}).\nPick one with /profile <name>: ${PROFILE_NAMES.join(", ")}.`;
+            return `Profile: ${current} (${this.#options.profiles.description(current)}).\nPick one with /profile <name>: ${PROFILE_NAMES.join(", ")}.`;
           }
           const name = argument.toLowerCase();
           if (!isProfileName(name)) {
             return `${argument} is not a profile. Pick one of: ${PROFILE_NAMES.join(", ")}.`;
           }
           if (await this.#busy(tx, conversationId)) return BUSY_REPLY;
-          await setProfile(tx, conversationId, name);
+          await setProfile(tx, conversationId, name, this.#options.profiles);
           return `Profile set to ${name}.`;
         });
         return;

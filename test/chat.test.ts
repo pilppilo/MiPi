@@ -15,9 +15,9 @@ import {
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { withSpikeToken } from "./spike.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
 import { HEARTBEAT_MS } from "../src/agent/alarm.ts";
-import { MEMORY_IDLE_MS } from "../src/agent/memory-pass.ts";
+import { MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
 import worker from "../src/worker/index.ts";
 import { MAX_CLIENT_FRAME_CHARACTERS, queuedInputs } from "../src/protocol.ts";
 import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";

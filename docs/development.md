@@ -10,11 +10,14 @@ How to work on the MiPi code. Running and deploying MiPi is in [Deployment and o
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `src/worker/`                    | The Worker: routing and authentication                                                                                                                       |
 | `src/agent/agent-do.ts`          | The Durable Object (`MipiAgent`): opens the harness, alarms, WebSockets                                                                                      |
-| `src/agent/harness.ts`           | Agent composition: model, tools, prompt sections                                                                                                             |
-| `src/agent/profiles.ts`          | Tool profiles (`default`, `empty`, `pidu`) and `toolsFor()`, the only place tools are offered                                                                |
+| `src/agent/harness.ts`           | Core composition: the preamble, the extension selection, models and settings (`composeAgent`)                                                                |
+| `src/agent/composition.ts`       | The composition root: core plus the built-in extensions and the profile table (`composeMipi`)                                                                |
+| `src/agent/extensions.ts`        | The extension contract: a Pi Durable extension plus MiPi registrations; replacement, order, tasks                                                            |
+| `src/agent/profiles.ts`          | Tool profiles (`default`, `empty`, `pidu`) as a mechanism: `Profiles.toolsFor()`, the only place tools are offered                                           |
+| `src/extensions/`                | Built-in extensions (`builtin/<name>/`, listed in `builtins.ts`) and which tools each profile offers (`profiles.ts`)                                         |
 | `src/agent/conversations.ts`     | Per-conversation profile and title, and channel bindings (which conversation a door talks to)                                                                |
 | `src/agent/pi/`                  | The only code that imports `@earendil-works/*` (lint-enforced): `durable.ts` for the server, `shared.ts` for the browser, `storage.ts` for the upgrade guard |
-| `src/tools/`                     | Tools (`schedule`, `search_history`)                                                                                                                         |
+| `src/tools/`                     | The reminders' and history search's code, until COD-210 and COD-211 move it into its extensions                                                              |
 | `src/lib/`                       | Small helpers with no Pi imports                                                                                                                             |
 | `src/protocol.ts`, `src/client/` | WebSocket protocol and the React web client                                                                                                                  |
 

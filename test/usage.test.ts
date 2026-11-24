@@ -9,7 +9,7 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { Harness, UsageDoc } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
 import { Proactive } from "../src/agent/proactive.ts";
 import { measureSpend, Spend } from "../src/agent/spend.ts";
 import { readUsage, usageText } from "../src/agent/usage.ts";

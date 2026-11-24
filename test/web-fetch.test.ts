@@ -17,11 +17,11 @@ import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import type { MipiAgent } from "../src/agent/agent-do.ts";
 import { describe, expect, it } from "vitest";
-import { createHarnessOptions } from "../src/agent/harness.ts";
-import { MemoryDoc } from "../src/agent/memory.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { AgentSettings, OWN_HOSTS_KEPT, withOwnHost } from "../src/agent/settings.ts";
 import { decodeEntities, htmlToText } from "../src/lib/html-text.ts";
-import { rememberTool } from "../src/tools/memory.ts";
+import { rememberTool } from "../src/extensions/builtin/memory/tools.ts";
 import {
   createWebFetchTool,
   fencedPage,
@@ -30,7 +30,7 @@ import {
   MAX_TEXT,
   refusedUrl,
   textType,
-} from "../src/tools/web-fetch.ts";
+} from "../src/extensions/builtin/web-fetch/web-fetch.ts";
 import { MIPI_VERSION } from "../src/version.ts";
 
 const ctx = BACKGROUND_CONTEXT;

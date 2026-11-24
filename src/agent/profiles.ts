@@ -1,55 +1,27 @@
 /**
  * Tool profiles. MiPi has no built-in tools: a conversation gets exactly the tools of its profile, stored per
- * conversation like the model and set by the channel that created it. A new tool is opt-in by adding it to a profile
- * here, in the same PR as the change to `test/profiles.test.ts`.
+ * conversation like the model and set by the channel that created it. Every tool is opt-in.
+ *
+ * This is the mechanism; the table of which tool each profile offers lives beside the built-in extensions
+ * (`src/extensions/profiles.ts`), so core names no tool. A profile only offers tools an installed extension registers,
+ * and a conversation only sees those of the extensions it has selected: Pi Durable drops the rest of the stored names.
  *
  * Never add Pi Durable's coding tools (read, write, edit, bash), codemode or tool search.
  */
 import type { ToolRegistration } from "./pi/durable.ts";
-import { forgetTool, rememberTool } from "../tools/memory.ts";
-import { scheduleTool } from "../tools/schedule.ts";
-import { searchHistoryTool } from "../tools/search.ts";
-import { webFetchTool } from "../tools/web-fetch.ts";
 
 export const PROFILE_NAMES = ["default", "empty", "pidu"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
 
-/** MiPi's tools by id. Only tools listed here can be in a profile. */
-const TOOLS = {
-  schedule: scheduleTool,
-  search_history: searchHistoryTool,
-  remember: rememberTool,
-  forget: forgetTool,
-  web_fetch: webFetchTool,
-} as const satisfies Record<string, ToolRegistration>;
-export type ToolId = keyof typeof TOOLS;
-
-export interface Profile {
-  readonly name: ProfileName;
+export interface ProfileEntry {
   /** One line for pickers. */
   readonly description: string;
-  readonly tools: readonly ToolId[];
+  /** Tool names, in the order they are offered. */
+  readonly tools: readonly string[];
 }
 
-/** Plain data: a name, a description, and the tools by id. */
-export const PROFILES: Readonly<Record<ProfileName, Profile>> = {
-  default: {
-    name: "default",
-    description: "Everyday tools: scheduling, history search, memory and web pages",
-    tools: ["schedule", "search_history", "remember", "forget", "web_fetch"],
-  },
-  empty: {
-    name: "empty",
-    description: "Plain chat, no tools",
-    tools: [],
-  },
-  pidu: {
-    name: "pidu",
-    // Relay input is authenticated owner input, so it starts with the default tools; separate so it can narrow.
-    description: "The PiDu relay: the default tools for now",
-    tools: ["schedule", "search_history", "remember", "forget", "web_fetch"],
-  },
-};
+/** Every profile's description and tool names: plain data, supplied by the composition root. */
+export type ProfileTable = Readonly<Record<ProfileName, ProfileEntry>>;
 
 export const DEFAULT_PROFILE: ProfileName = "default";
 
@@ -62,12 +34,32 @@ export function profileOrDefault(value: string | undefined): ProfileName {
   return isProfileName(value) ? value : DEFAULT_PROFILE;
 }
 
-/** The tools a conversation on `profile` is offered: the only place profiles become tool registrations. */
-export function toolsFor(profile: ProfileName): ToolRegistration[] {
-  return PROFILES[profile].tools.map((id) => TOOLS[id]);
-}
+/** The profile table against the tools the installed extensions register. */
+export class Profiles {
+  readonly #table: ProfileTable;
+  readonly #tools: ReadonlyMap<string, ToolRegistration>;
 
-/** Every tool any profile uses, once each: what the harness's extension registers. */
-export function profileTools(): ToolRegistration[] {
-  return [...new Set(PROFILE_NAMES.flatMap((name) => toolsFor(name)))];
+  constructor(table: ProfileTable, tools: ReadonlyMap<string, ToolRegistration>) {
+    this.#table = table;
+    this.#tools = tools;
+  }
+
+  description(profile: ProfileName): string {
+    return this.#table[profile].description;
+  }
+
+  /** The tools a conversation on `profile` is offered: the only place profiles become tool registrations. */
+  toolsFor(profile: ProfileName): ToolRegistration[] {
+    return this.#table[profile].tools.flatMap((name) => {
+      const tool = this.#tools.get(name);
+      return tool === undefined ? [] : [tool];
+    });
+  }
+
+  /** Every profile's tool names, in one string: a different one means some conversation may need new tools. */
+  digest(): string {
+    return JSON.stringify(
+      PROFILE_NAMES.map((name) => [name, this.toolsFor(name).map((tool) => tool.name)]),
+    );
+  }
 }

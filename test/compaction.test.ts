@@ -1,7 +1,7 @@
 // Adapted from pi-pocket test/compaction-budget.test.ts @ 2f060f2, MIT © 2026 Tanner Middleton (see LICENSES/pi-pocket.txt)
 import { DEFAULT_COMPACTION_POLICY } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import { createHarnessOptions } from "../src/agent/harness.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
 import { compactionSettings, summaryReserve } from "../src/agent/pi/compaction.ts";
 import { DEFAULT_MODEL_ID, goModels, MODEL_PROVIDER } from "../src/agent/pi/models.ts";
 

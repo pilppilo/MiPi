@@ -15,10 +15,11 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
+import { originOf, UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
 import type { AdminStatus, MipiAgent } from "../src/agent/agent-do.ts";
 import { ChannelBindings } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/harness.ts";
-import { MemoryDoc } from "../src/agent/memory.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { ScheduledReminder } from "../src/tools/reminder-task.ts";
 import worker from "../src/worker/index.ts";
 import type { Fixture } from "./fixture-capture.test.ts";
@@ -126,6 +127,20 @@ describe("fixture databases", () => {
       // What each door stored reads back as this build's documents and tasks.
       await runInDurableObject(stub, async (_instance, state) => {
         await state.blockConcurrencyWhile(async () => {});
+        // Every stored input's origin reads from its request id, as it was stored then (COD-209).
+        const origins = state.storage.sql
+          .exec<{ record: string }>("SELECT record FROM submissions")
+          .toArray()
+          .map(({ record }) => (JSON.parse(record) as { requestId?: string }).requestId)
+          .filter((requestId): requestId is string => requestId !== undefined)
+          .map((requestId) => ({ requestId, origin: originOf(requestId) }));
+        expect(origins.length).toBeGreaterThan(0);
+        for (const { requestId, origin } of origins) {
+          expect(origin, requestId).not.toEqual(UNKNOWN_ORIGIN);
+        }
+        expect(new Set(origins.map(({ origin }) => origin.source))).toEqual(
+          new Set(["web", "telegram", "relay"]),
+        );
         const harness = await Harness.open(
           await openDurableObjectSqliteStorage(state.storage),
           createHarnessOptions({
