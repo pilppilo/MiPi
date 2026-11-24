@@ -101,7 +101,7 @@ export async function openAgent(
     profile: "default",
     profiles: PROFILES,
     version: "0.0.0-test",
-    modelList: new ModelList(async () => []),
+    modelList: new ModelList([]),
     send: async (chatId, message) => {
       sent.push({ chatId, text: message.text });
       return { kind: "sent", messageId: ++calls };

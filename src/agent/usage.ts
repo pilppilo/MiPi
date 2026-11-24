@@ -1,14 +1,14 @@
 /**
  * The usage readout (M9), the same for every door: Telegram's `/usage`, the web header and the admin status. Today's
  * spend by MiPi's own estimate is measured as it's read, then each provider's own figures are added where MiPi can
- * read them (`usage-sources.ts`).
+ * read them (`providers.ts`).
  */
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import type { Harness } from "./pi/durable.ts";
 import { runCap } from "./gates.ts";
 import { dollars, holdOf, measureSpend, Spend, spentToday } from "./spend.ts";
 import { localTime } from "./stamp.ts";
-import type { ProviderUsageCache } from "./usage-sources.ts";
+import type { ProviderUsageCache } from "./providers.ts";
 import { chicagoDay } from "../lib/cap-day.ts";
 import type { UsageReadout } from "../protocol.ts";
 

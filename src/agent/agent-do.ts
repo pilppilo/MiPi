@@ -26,7 +26,7 @@ import {
   startingProfile,
   syncProfileTools,
 } from "./conversations.ts";
-import { fetchLiveGoModelIds, ModelList } from "./model-list.ts";
+import { ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
 import { isProfileName, PROFILE_NAMES, profileOrDefault } from "./profiles.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
@@ -38,7 +38,7 @@ import { holdOf, measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend }
 import { isPausedNow } from "./gates.ts";
 import { AnswerSettlement } from "./answers.ts";
 import { readUsage, usageText } from "./usage.ts";
-import { ProviderUsageCache, usageSources } from "./usage-sources.ts";
+import { ProviderUsageCache } from "./providers.ts";
 import {
   type ExportCursor,
   type ExportHeader,
@@ -670,8 +670,9 @@ export class MipiAgent extends DurableObject<Env> {
     const composition = this.#composition ?? this.#compose();
     const { options, profiles } = composition;
     this.#models = options.models as MutableModels;
-    this.#modelList = new ModelList(() => fetchLiveGoModelIds(this.env.OPENCODE_API_KEY));
-    this.#providerUsage = new ProviderUsageCache(usageSources((name) => this.#setting(name)));
+    const read = (name: string) => this.#setting(name);
+    this.#modelList = new ModelList(composition.providers.modelSources(read));
+    this.#providerUsage = new ProviderUsageCache(composition.providers.usageSources(read));
     const harness = await Harness.open(
       storage,
       {
@@ -1375,7 +1376,7 @@ export class MipiAgent extends DurableObject<Env> {
     try {
       return { models: await this.#modelList.models(), profiles, defaultModel };
     } catch (error) {
-      reportError("Reading the Go model list failed", error);
+      reportError("Reading the model list failed", error);
       return {
         models: [],
         profiles,

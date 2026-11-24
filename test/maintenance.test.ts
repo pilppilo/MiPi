@@ -307,7 +307,7 @@ describe("export and restore", () => {
     expect(after.state).toEqual({ kind: "open" });
     // The admin status names the extensions in use, and replaced none (COD-209).
     expect(after.extensions).toEqual({
-      active: ["history-search", "reminders", "web-fetch", "memory"],
+      active: ["history-search", "opencode-go", "reminders", "web-fetch", "memory"],
       replaced: [],
     });
     // And the alarm still runs every source without a failure.

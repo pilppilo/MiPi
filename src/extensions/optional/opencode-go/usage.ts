@@ -1,27 +1,12 @@
 /**
- * Each provider's own usage figures (M9), beside MiPi's own estimate. MiPi's estimate (`spend.ts`) works for every
- * provider; a provider's figures show only where MiPi can read them: one small reader per provider id, with a key that
- * has usage permission. A provider with no reader, or no key, shows nothing here, and the estimate stands alone.
- *
- * Reads are outside lookups: each is cached for five minutes, a failure too, and never stored.
+ * OpenCode Go's usage reader (M9, COD-193), moved out of core in COD-212. Registered with core's providers connector
+ * (`src/agent/providers.ts`) by this extension's `index.ts`.
  */
-import type { ProviderUsage, UsageWindow } from "../protocol.ts";
-import type { FetchLike } from "./model-list.ts";
-import { MODEL_PROVIDER, type ReadEnv } from "./pi/models.ts";
+import type { ProviderUsage, UsageWindow } from "../../../protocol.ts";
+import type { UsageSource } from "../../../agent/providers.ts";
+import { MODEL_PROVIDER, type ReadEnv } from "../../../agent/pi/models.ts";
 
-/** One provider's usage reader. */
-export interface UsageSource {
-  /** pi-ai's provider id, as in a model ref. */
-  readonly provider: string;
-  /** How the readout names it. */
-  readonly label: string;
-  read(fetcher: FetchLike): Promise<ProviderUsage>;
-}
-
-export const USAGE_CACHE_MS = 5 * 60_000;
 const READ_TIMEOUT_MS = 5_000;
-
-// ---- OpenCode Go ----
 
 /**
  * OpenCode Go's allowance: `{ usage: { rolling, weekly, monthly } }`, each `{ status: "ok" | "rate-limited", percent,
@@ -109,61 +94,4 @@ export function goUsageSource(readEnv: ReadEnv): UsageSource | undefined {
       };
     },
   };
-}
-
-/** Every provider MiPi has a reader and a key for. */
-export function usageSources(readEnv: ReadEnv): UsageSource[] {
-  return [goUsageSource(readEnv)].flatMap((source) => (source === undefined ? [] : [source]));
-}
-
-// ---- The cache ----
-
-/** Each source read at most every five minutes; a failed read is kept as "unavailable" for as long. */
-export class ProviderUsageCache {
-  readonly #sources: readonly UsageSource[];
-  readonly #fetcher: FetchLike;
-  readonly #cached = new Map<string, { readonly at: number; readonly usage: ProviderUsage }>();
-  /** Reads in flight, by provider: callers at the same moment share one. */
-  readonly #reading = new Map<string, Promise<ProviderUsage>>();
-
-  constructor(sources: readonly UsageSource[], fetcher: FetchLike = fetch) {
-    this.#sources = sources;
-    this.#fetcher = fetcher;
-  }
-
-  /** What was read last, at most five minutes ago, without reading again: for callers that mustn't wait on a provider. */
-  cached(now: number = Date.now()): ProviderUsage[] {
-    return this.#sources.flatMap((source) => {
-      const cached = this.#cached.get(source.provider);
-      return cached !== undefined && now - cached.at < USAGE_CACHE_MS ? [cached.usage] : [];
-    });
-  }
-
-  read(now: number = Date.now()): Promise<ProviderUsage[]> {
-    return Promise.all(
-      this.#sources.map(async (source) => {
-        const cached = this.#cached.get(source.provider);
-        if (cached !== undefined && now - cached.at < USAGE_CACHE_MS) return cached.usage;
-        const reading = this.#reading.get(source.provider);
-        if (reading !== undefined) return reading;
-        const read = (async (): Promise<ProviderUsage> => {
-          let usage: ProviderUsage;
-          try {
-            usage = await source.read(this.#fetcher);
-          } catch (error) {
-            usage = {
-              provider: source.provider,
-              label: source.label,
-              status: "unavailable",
-              reason: error instanceof Error ? error.message : String(error),
-            };
-          }
-          this.#cached.set(source.provider, { at: now, usage });
-          return usage;
-        })().finally(() => this.#reading.delete(source.provider));
-        this.#reading.set(source.provider, read);
-        return read;
-      }),
-    );
-  }
 }

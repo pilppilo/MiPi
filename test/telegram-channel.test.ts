@@ -22,6 +22,7 @@ import { AnswerSettlement } from "../src/agent/answers.ts";
 import { earliestWake } from "../src/agent/wake-sources.ts";
 import { PROFILES } from "./mipi.ts";
 import { ModelList } from "../src/agent/model-list.ts";
+import { goModelListSource } from "../src/extensions/optional/opencode-go/models.ts";
 import {
   BATCH_MAX_MESSAGES,
   BATCH_MAX_UNITS,
@@ -113,7 +114,12 @@ async function openAgent(
     profile: "default",
     profiles: PROFILES,
     version: "0.0.0-test",
-    modelList: new ModelList(options.modelIds ?? (async () => ["deepseek-v4.1-flash"])),
+    modelList: new ModelList([
+      {
+        ...goModelListSource(() => undefined),
+        liveIds: options.modelIds ?? (async () => ["deepseek-v4.1-flash"]),
+      },
+    ]),
     send: async (chatId, message) => {
       calls += 1;
       const result = await behaviour(chatId, message, calls);
