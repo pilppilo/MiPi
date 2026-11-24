@@ -1,20 +1,20 @@
 /**
- * The `reminders` built-in (M6): `schedule`, its reminders (`app.reminder`) and the older scheduled deliveries
- * (`app.deliver-scheduled-instruction`), with their tasks. Proactive runs (`RecordRun`, `RoundBudget`) are core.
- *
- * Its code still lives in `src/tools/` and writes Telegram's documents itself; COD-210 moves it here and onto core's
- * delivery. Until then it is a built-in by registration only.
+ * The `reminders` built-in (M6, COD-210): `schedule`, its reminders (`app.reminder`) and the older scheduled
+ * deliveries (`app.deliver-scheduled-instruction`), with their tasks. It registers the `sched` request-id prefix as
+ * automated, so core knows a reminder's own run. Proactive runs (`RecordRun`, `RoundBudget`), the gates and delivery
+ * are core: this extension reaches them through connectors and never names a door.
  */
 import { defineExtension } from "../../../agent/pi/durable.ts";
 import type { MipiExtension } from "../../../agent/extensions.ts";
-import { ScheduledReminder } from "../../../tools/reminder-task.ts";
-import { DeliverScheduledInstruction } from "../../../tools/schedule-task.ts";
-import { scheduleTool } from "../../../tools/schedule.ts";
+import { ScheduledReminder } from "./reminder-task.ts";
+import { DeliverScheduledInstruction } from "./schedule-task.ts";
+import { scheduleTool } from "./schedule.ts";
 
 export const remindersExtension: MipiExtension = {
   name: "reminders",
   tier: "builtin",
   replaceable: true,
+  origins: [{ prefix: "sched", source: "reminder", automated: true }],
   pi: defineExtension({
     name: "reminders",
     tools: [scheduleTool],

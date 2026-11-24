@@ -9,7 +9,7 @@
  */
 import type { ToolRegistration } from "../../../agent/pi/durable.ts";
 import { str, obj } from "../../../agent/pi/schema.ts";
-import { runOrigin } from "../../../agent/origin.ts";
+import { connectorsOf } from "../../../agent/connectors.ts";
 import { runTouched, untrustedToolNames } from "../../../agent/untrusted.ts";
 import {
   addLesson,
@@ -38,7 +38,7 @@ export const rememberTool: ToolRegistration = {
     const result = await api.commit(async (tx) => {
       const untrusted = untrustedToolNames(api.registry);
       if (await runTouched(tx, api.conversationId, untrusted)) return { kind: "fetched" as const };
-      const { source } = await runOrigin(tx, api.conversationId);
+      const { source } = await connectorsOf(api.registry).origins.runOrigin(tx, api.conversationId);
       return addLesson(
         await tx.doc(MemoryDoc),
         lesson,

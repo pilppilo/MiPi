@@ -5,7 +5,7 @@ import {
   renderInline,
   renderTelegramHtml,
   splitMarkdownForTelegram,
-} from "../src/lib/telegram-html.ts";
+} from "../src/doors/telegram/html.ts";
 
 describe("renderTelegramHtml", () => {
   it("renders the constructs Telegram supports", () => {

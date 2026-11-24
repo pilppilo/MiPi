@@ -24,13 +24,14 @@ import { composeMipi } from "../src/agent/composition.ts";
 import { setProfile, syncProfileTools } from "../src/agent/conversations.ts";
 import { type MipiExtension, resolveExtensions } from "../src/agent/extensions.ts";
 import { coreExtensions } from "../src/agent/harness.ts";
-import { originOf, UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
+import { Origins, UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
+import { connectorsOf, createConnectors } from "../src/agent/connectors.ts";
 import type { DeliveryDestination } from "../src/agent/delivery.ts";
-import type { ReminderDestination } from "../src/agent/proactive.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
 import { untrustedToolNames } from "../src/agent/untrusted.ts";
 import { BUILT_IN_EXTENSIONS } from "../src/extensions/builtins.ts";
-import { ScheduledReminder } from "../src/tools/reminder-task.ts";
+import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
+import type { ReminderDestination } from "../src/extensions/builtin/reminders/reminder-task.ts";
 import { addLesson, MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { MEMORY_IDLE_MS, MemoryPassRuntime } from "../src/extensions/builtin/memory/memory-pass.ts";
 
@@ -155,6 +156,7 @@ describe("resolveExtensions", () => {
 
 describe("input origin", () => {
   it("reads the door from the request id, a person's input before an automated one", () => {
+    const { originOf } = composeMipi().connectors.origins;
     expect(originOf("web:abc")).toEqual({ source: "web", automated: false });
     expect(originOf("tg:42")).toEqual({ source: "telegram", automated: false });
     expect(originOf("tg:batch:42")).toEqual({ source: "telegram", automated: false });
@@ -167,6 +169,33 @@ describe("input origin", () => {
     for (const id of ["toString:1", "constructor:1", "__proto__:1", "hasOwnProperty:1"]) {
       expect(originOf(id), id).toBe(UNKNOWN_ORIGIN);
     }
+  });
+
+  it("names no prefix in core: each door and the reminders register their own", () => {
+    expect(createConnectors([], []).origins.prefixes()).toEqual([]);
+    // Bare core still has the doors, but no reminders: `sched:` means nothing there.
+    const bare = composeMipi({ extensions: [] }).connectors.origins;
+    expect(bare.prefixes()).toEqual(["web", "tg", "relay"]);
+    expect(bare.originOf("sched:r1:0")).toBe(UNKNOWN_ORIGIN);
+    expect(composeMipi({ extensions: [], doors: [] }).connectors.origins.prefixes()).toEqual([]);
+    expect(
+      () =>
+        new Origins([
+          { prefix: "tg", source: "a", automated: false },
+          { prefix: "tg", source: "b", automated: false },
+        ]),
+    ).toThrow(/twice/);
+    expect(() => new Origins([{ prefix: "t:g", source: "a", automated: false }])).toThrow(
+      /letters/,
+    );
+  });
+
+  it("reaches the agent's own connectors from its registry, per agent", () => {
+    const full = composeMipi();
+    const bare = composeMipi({ extensions: [] });
+    expect(connectorsOf(full.options.registry.snapshot())).toBe(full.connectors);
+    expect(connectorsOf(bare.options.registry.snapshot())).toBe(bare.connectors);
+    expect(connectorsOf(full.options.registry.snapshot()).origins.prefixes()).toContain("sched");
   });
 
   it("keeps the stored reminder destination as a delivery destination", () => {

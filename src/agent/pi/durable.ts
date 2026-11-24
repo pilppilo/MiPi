@@ -44,6 +44,7 @@ export type {
   TaskGraph,
   ToolExecutionApi,
   ToolRegistration,
+  Tx,
   Wake,
   WatchHandle,
 } from "@earendil-works/pi-durable";

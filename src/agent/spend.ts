@@ -10,18 +10,15 @@
  *   estimate, whatever the provider bills. The first measure only records where the total stands.
  * - **The cap** (`MIPI_DAILY_SPEND_CAP`, dollars) holds work nobody asked for at that moment: reminders, the memory
  *   pass, model-written titles. The owner's own messages still go through; the first one over the cap each day gets
- *   one warning line (Telegram).
+ *   one warning line, where it was sent (a door that can push).
  * - **Pause** (`MIPI_PAUSED`) holds every model call: doors refuse messages, and reminders are held as at the cap.
  *
  * pi-ledger L7. Spend is measured where work is decided (a reminder's admission, each tool round of a reminder run,
  * the memory pass, a title, the readout), never in a hook before a request: `beforeRequest` can't write or stop.
  */
-import { configure, type Cursor, defineDoc, UsageDoc } from "./pi/durable.ts";
-import type { TelegramChannelState } from "./telegram-state.ts";
-import { enqueueReply, TelegramOutbox, type OutboxState } from "./telegram-outbox.ts";
+import { type Cursor, defineDoc, type Tx, UsageDoc } from "./pi/durable.ts";
+import type { Delivery, DeliveryDestination } from "./delivery.ts";
 import { chicagoDay } from "../lib/cap-day.ts";
-
-type Tx = Parameters<typeof configure>[0];
 
 export type SpendState = {
   /** The Chicago day `spent` counts. */
@@ -140,29 +137,38 @@ export async function measureSpend(tx: Tx, now: number): Promise<SpendState> {
 }
 
 /**
- * Today's one notice that scheduled work waits for the spend cap: to `chatId` when the held reminder answers in a
- * chat, otherwise the private chat that last wrote. With neither, nothing is sent and the day isn't marked.
+ * Today's one notice that scheduled work waits for the spend cap: at `prefer` when the held work answers somewhere that
+ * can push, otherwise wherever delivery says the owner is (`tellOwner`). With nobody to tell, nothing is sent and the
+ * day isn't marked, so later held work can still tell. In the caller's commit.
  */
-export function noticeSpend(
+export async function noticeSpend(
+  tx: Tx,
   state: SpendState,
-  channel: TelegramChannelState,
-  outbox: OutboxState,
-  chatId: number | undefined,
+  delivery: Delivery,
+  prefer: DeliveryDestination | undefined,
   now: number,
-): void {
+): Promise<void> {
   const day = chicagoDay(now);
   if (state.noticeDay === day) return;
-  const chat = chatId ?? channel.lastChat;
-  if (chat === undefined) return;
-  state.noticeDay = day;
-  enqueueReply(outbox, { id: `spend-cap:${day}`, chatId: chat, text: SPEND_NOTICE }, now);
+  const told = await delivery.tellOwner(
+    tx,
+    { id: `spend-cap:${day}`, text: SPEND_NOTICE },
+    now,
+    prefer,
+  );
+  if (told) state.noticeDay = day;
 }
 
 /**
- * The owner's first message over the cap each day gets one line saying so, in its chat. Their messages still go
- * through. Measures first; call it after the commit's submit. Returns whether a line was queued.
+ * The owner's first message over the cap each day gets one line saying so, at the destination it came from. Their
+ * messages still go through. Measures first; call it after the commit's submit. Returns whether a line was queued.
  */
-export async function warnOwnerOverCap(tx: Tx, chatId: number, now: number): Promise<boolean> {
+export async function warnOwnerOverCap(
+  tx: Tx,
+  delivery: Delivery,
+  destination: DeliveryDestination,
+  now: number,
+): Promise<boolean> {
   const day = chicagoDay(now);
   const stored = await tx.doc(Spend);
   // No cap, or told today already: no need to read every conversation's usage.
@@ -171,15 +177,15 @@ export async function warnOwnerOverCap(tx: Tx, chatId: number, now: number): Pro
   }
   const state = await measureSpend(tx, now);
   if (holdOf(state, now) !== "spend-cap") return false;
-  stored.ownerNoticeDay = day;
-  enqueueReply(
-    await tx.doc(TelegramOutbox),
+  const queued = await delivery.send(
+    tx,
+    destination,
     {
       id: `spend-owner:${day}`,
-      chatId,
       text: `Heads up: MiPi has spent about ${dollars(state.spent)} today, over its ${dollars(state.limit ?? 0)} daily cap. Your messages still go through; scheduled runs wait until tomorrow.`,
     },
     now,
   );
-  return true;
+  if (queued) stored.ownerNoticeDay = day;
+  return queued;
 }

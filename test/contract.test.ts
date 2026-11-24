@@ -37,7 +37,7 @@ import {
   rowCounts,
   tablesWithoutRowid,
 } from "../src/agent/maintenance.ts";
-import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
+import { DeliverScheduledInstruction } from "../src/extensions/builtin/reminders/schedule-task.ts";
 
 const ctx = context.BACKGROUND_CONTEXT;
 /** How a submission settles when an afterTools hook task ends its run (pinned by the hooks test). */

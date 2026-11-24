@@ -9,6 +9,10 @@
           {
             "group": ["@earendil-works/*", "@earendil-works/**"],
             "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+          },
+          {
+            "group": ["**/doors/telegram/state*", "**/doors/telegram/outbox*"],
+            "message": "Only the Telegram door reads or writes its documents (COD-210). Core reaches its inputs and chats through the door's registrations (src/doors/telegram/index.ts); the composition root may name the door's runtime and sender."
           }
         ]
       }
@@ -27,8 +31,8 @@
                 "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
               },
               {
-                "group": ["**/extensions/**", "**/tools/**"],
-                "message": "Core imports no extension or tool (COD-208): only the composition root (agent-do.ts, composition.ts) names them. Reach a feature through a connector."
+                "group": ["**/extensions/**", "**/tools/**", "**/doors/**"],
+                "message": "Core imports no door, extension or tool (COD-208, COD-210): only the composition root (agent-do.ts, composition.ts) names them. Reach a feature through a connector."
               }
             ]
           }
@@ -45,6 +49,10 @@
               {
                 "group": ["@earendil-works/*", "@earendil-works/**"],
                 "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              },
+              {
+                "group": ["**/doors/telegram/state*", "**/doors/telegram/outbox*"],
+                "message": "Only the Telegram door reads or writes its documents (COD-210). Core reaches its inputs and chats through the door's registrations (src/doors/telegram/index.ts); the composition root may name the door's runtime and sender."
               }
             ]
           }
@@ -92,8 +100,6 @@
               },
               {
                 "group": [
-                  "**/agent/telegram*",
-                  "**/agent/relay*",
                   "**/doors/**",
                   "**/agent/agent-do*",
                   "**/agent/composition*",
@@ -101,6 +107,69 @@
                   "**/worker/**"
                 ],
                 "message": "An extension imports only core (COD-208): never a door, the composition root, or another extension (scripts/check-boundaries.ts)."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/doors/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              },
+              {
+                "group": [
+                  "**/doors/telegram/state*",
+                  "**/doors/telegram/outbox*",
+                  "../telegram/state*",
+                  "../telegram/outbox*"
+                ],
+                "message": "Only the Telegram door reads or writes its documents (COD-210). Core reaches its inputs and chats through the door's registrations (src/doors/telegram/index.ts); the composition root may name the door's runtime and sender."
+              },
+              {
+                "group": [
+                  "**/extensions/**",
+                  "**/tools/**",
+                  "**/agent/agent-do*",
+                  "**/agent/composition*",
+                  "**/client/**",
+                  "**/worker/**"
+                ],
+                "message": "A door imports only core (COD-210): never an extension, the composition root, the client or the Worker. Reach a feature through a connector."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/doors/telegram/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "Import Pi Durable, pi-ai, pi-schema, and chord through src/agent/pi/ (durable.ts, shared.ts, \u2026) so an upgrade is fixed in one folder."
+              },
+              {
+                "group": [
+                  "**/extensions/**",
+                  "**/tools/**",
+                  "**/agent/agent-do*",
+                  "**/agent/composition*",
+                  "**/client/**",
+                  "**/worker/**"
+                ],
+                "message": "A door imports only core (COD-210): never an extension, the composition root, the client or the Worker. Reach a feature through a connector."
               }
             ]
           }

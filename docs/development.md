@@ -16,8 +16,12 @@ How to work on the MiPi code. Running and deploying MiPi is in [Deployment and o
 | `src/agent/profiles.ts`          | Tool profiles (`default`, `empty`, `pidu`) as a mechanism: `Profiles.toolsFor()`, the only place tools are offered                                           |
 | `src/extensions/`                | Built-in extensions (`builtin/<name>/`, listed in `builtins.ts`) and which tools each profile offers (`profiles.ts`)                                         |
 | `src/agent/conversations.ts`     | Per-conversation profile and title, and channel bindings (which conversation a door talks to)                                                                |
+| `src/agent/connectors.ts`        | What doors and extensions register with core: origin (`origin.ts`), delivery (`delivery.ts`) and the inputs waiting for an answer                            |
+| `src/agent/answers.ts`           | Core's one answer settlement: settled inputs of every door and every reminder, judged once (`proactive.ts`) and delivered                                    |
+| `src/agent/gates.ts`             | The run cap, the spend cap and the pause, read-only for doors and extensions                                                                                 |
+| `src/doors/`                     | The doors (`telegram/`, `relay/`, `web/`): their registrations with core and their runtimes                                                                  |
 | `src/agent/pi/`                  | The only code that imports `@earendil-works/*` (lint-enforced): `durable.ts` for the server, `shared.ts` for the browser, `storage.ts` for the upgrade guard |
-| `src/tools/`                     | The reminders' and history search's code, until COD-210 and COD-211 move it into its extensions                                                              |
+| `src/tools/`                     | History search's code, until COD-211 moves it into its extension                                                                                             |
 | `src/lib/`                       | Small helpers with no Pi imports                                                                                                                             |
 | `src/protocol.ts`, `src/client/` | WebSocket protocol and the React web client                                                                                                                  |
 

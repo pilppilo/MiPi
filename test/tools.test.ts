@@ -12,10 +12,11 @@ import {
   Harness,
   MemoryStorage,
 } from "@earendil-works/pi-durable";
+import { connectedCore } from "./mipi.ts";
 import { describe, expect, it } from "vitest";
-import { ScheduledReminder } from "../src/tools/reminder-task.ts";
-import { DeliverScheduledInstruction } from "../src/tools/schedule-task.ts";
-import { scheduleTool } from "../src/tools/schedule.ts";
+import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
+import { DeliverScheduledInstruction } from "../src/extensions/builtin/reminders/schedule-task.ts";
+import { scheduleTool } from "../src/extensions/builtin/reminders/schedule.ts";
 
 describe("custom tools", () => {
   it("creates a background reminder task per schedule, once or repeating", async () => {
@@ -36,6 +37,7 @@ describe("custom tools", () => {
     const models = createModels();
     models.setProvider(faux.provider);
     const registry = createRegistry();
+    registry.install(connectedCore());
     registry.install(
       defineExtension({
         name: "schedule",
@@ -114,6 +116,7 @@ describe("custom tools", () => {
     const models = createModels();
     models.setProvider(faux.provider);
     const registry = createRegistry();
+    registry.install(connectedCore());
     registry.install(
       defineExtension({
         name: "schedule",

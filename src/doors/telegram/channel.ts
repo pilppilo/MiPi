@@ -1,14 +1,15 @@
 /**
- * The Telegram door's state and work inside the agent: admitting updates, commands, turning settled inputs into
- * replies, and draining the outbox. The Worker only authenticates the webhook and parses the update
- * (`src/lib/telegram-update.ts`); the Durable Object wires this to its alarm.
+ * The Telegram door's work inside the agent: admitting updates, commands, and draining the outbox. The Worker only
+ * authenticates the webhook and parses the update (`update.ts`); the Durable Object wires this to its alarm. Turning a
+ * settled input into its reply is core's (`src/agent/answers.ts`), which reads this door's pending inputs and sends
+ * through its delivery adapter (`index.ts`).
  *
  * Every admitted update leaves a receipt keyed by its `update_id`, in one session document shared by every
  * conversation, so a replay is acknowledged and does nothing, also after `/new` or a restart. A text message is
  * submitted to its chat's bound conversation with request id `tg:<update_id>`, and its chat is recorded with the
  * submission: the reply goes back to that chat when the submission settles, whatever the chat is bound to by then.
  */
-import { BACKGROUND_CONTEXT } from "./pi/context.ts";
+import { BACKGROUND_CONTEXT } from "../../agent/pi/context.ts";
 import {
   configure,
   type Conversation,
@@ -18,12 +19,28 @@ import {
   InboxDoc,
   LiveDoc,
   type SubmissionId,
-} from "./pi/durable.ts";
-import { boundConversation, ConversationMeta, profileOf, setProfile } from "./conversations.ts";
-import type { ModelList } from "./model-list.ts";
-import { isProfileName, PROFILE_NAMES, type ProfileName, type Profiles } from "./profiles.ts";
-import { PAUSED_REPLY, Spend, warnOwnerOverCap } from "./spend.ts";
-import { stampInput } from "./stamp.ts";
+  type Tx,
+} from "../../agent/pi/durable.ts";
+import {
+  boundConversation,
+  ConversationMeta,
+  profileOf,
+  setProfile,
+} from "../../agent/conversations.ts";
+import type { Delivery } from "../../agent/delivery.ts";
+import { isPaused, isPausedNow, PAUSED_REPLY, warnOwnerOverCap } from "../../agent/gates.ts";
+import type { ModelList } from "../../agent/model-list.ts";
+import {
+  isProfileName,
+  PROFILE_NAMES,
+  type ProfileName,
+  type Profiles,
+} from "../../agent/profiles.ts";
+import { onDelivered } from "../../agent/proactive.ts";
+import { stampInput } from "../../agent/stamp.ts";
+import type { CommitChanges } from "../../agent/wake-sources.ts";
+import { KeyedSerialQueue } from "../../lib/serial.ts";
+import { telegramDestination } from "./index.ts";
 import {
   enqueueReply,
   nextOutboxWake,
@@ -33,23 +50,13 @@ import {
   recordSend,
   settleStale,
   TelegramOutbox,
-  type TelegramSend,
-} from "./telegram-outbox.ts";
-import { TELEGRAM_DOC_KIND, TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
-import type { CommitChanges } from "./wake-sources.ts";
-import { KeyedSerialQueue } from "../lib/serial.ts";
-import { telegramBatchRequest, telegramRequest } from "../lib/requests.ts";
-import {
-  Proactive,
-  PROACTIVE_DOC_KIND,
-  reconcileAnswers,
-  recordProactiveSend,
-} from "./proactive.ts";
-import type { TelegramInbound } from "../lib/telegram-update.ts";
+} from "./outbox.ts";
+import type { TelegramSend } from "./bot-api.ts";
+import { telegramBatchRequest, telegramRequest } from "./requests.ts";
+import { TELEGRAM_DOC_KIND, TelegramChannel, type TelegramChannelState } from "./state.ts";
+import type { TelegramInbound } from "./update.ts";
 
 const context = BACKGROUND_CONTEXT;
-
-type Tx = Parameters<typeof configure>[0];
 
 /** A receipt is kept at least this long after its update was admitted (Telegram retries for about a day). */
 export const RECEIPT_WINDOW_MS = 48 * 60 * 60_000;
@@ -64,20 +71,17 @@ export const BATCH_MAX_MESSAGES = 50;
 /** …or this many UTF-16 code units of text, the unit the outbox counts in too. */
 export const BATCH_MAX_UNITS = 32_000;
 
-export { type StagedWindow, TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
+export { type StagedWindow, TelegramChannel, type TelegramChannelState } from "./state.ts";
 
 /**
- * Whether a commit changed the door's document: then another part of the agent (a reminder) may have recorded an input
- * for the door to answer, and `refresh()` picks it up.
+ * Whether a commit changed the door's documents: then another part of the agent (core's answer settlement, a reminder
+ * or a notice) may have queued a message, and `refresh()` sends it.
  */
 export function isTelegramChange(publication: CommitChanges): boolean {
   return publication.changes.some(
     (change) =>
       change.type === "document" &&
-      (change.record?.kind === TELEGRAM_DOC_KIND ||
-        change.record?.kind === PROACTIVE_DOC_KIND ||
-        // A reminder may only queue a message (a capped one sent without the model, M6).
-        change.record?.kind === OUTBOX_DOC_KIND),
+      (change.record?.kind === TELEGRAM_DOC_KIND || change.record?.kind === OUTBOX_DOC_KIND),
   );
 }
 
@@ -136,8 +140,6 @@ export function addReceipt(state: TelegramChannelState, updateId: number, now: n
   });
 }
 
-export { answerText } from "./proactive.ts";
-
 export interface TelegramChannelOptions {
   readonly harness: Harness;
   /** Who every Telegram message is from, for the stamp. */
@@ -150,6 +152,8 @@ export interface TelegramChannelOptions {
   readonly version: string;
   readonly modelList: ModelList;
   readonly send: TelegramSend;
+  /** Core's delivery: the over-the-cap warning goes back to the chat that wrote through it. */
+  readonly delivery: Delivery;
   /** Arms the recovery alarm; called before any commit that can start work. */
   readonly armAlarm: () => Promise<void>;
   /** The channel's `wake()` may have changed. */
@@ -168,10 +172,9 @@ export type TelegramWake = { readonly at?: number; readonly active: boolean };
 export class TelegramChannelRuntime {
   readonly #options: TelegramChannelOptions;
   readonly #now: () => number;
-  readonly #queue = new KeyedSerialQueue<"admit" | "reconcile" | "commands" | "drain">();
+  readonly #queue = new KeyedSerialQueue<"admit" | "commands" | "drain">();
   /** Sends whose request is running now: a `sending` chunk outside this set was cut off. */
   readonly #inFlight = new Set<string>();
-  readonly #watched = new Set<number>();
   #wake: TelegramWake = { active: false };
   #closed = false;
   #refreshing = false;
@@ -187,22 +190,19 @@ export class TelegramChannelRuntime {
     return this.#wake;
   }
 
-  /** Picks up what a previous instance left: watches pending inputs, then runs commands and the outbox. */
+  /** Picks up what a previous instance left: windows, commands and the outbox. */
   async start(): Promise<void> {
-    // Plain values only leave a commit: its documents are drafts that end with it.
-    const submissions = await this.#commit((tx) => this.#waiting(tx));
-    for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
     await this.recover();
   }
 
   /**
-   * Picks up inputs another part of the agent recorded for this door (a reminder's occurrence, M6): watches each until
-   * it settles, and refreshes the wake. Harmless to call often; a call while one runs makes it read once more.
+   * Sends what another part of the agent queued (an answer core settled, a reminder's message, a notice): refreshes the
+   * wake and drains what is due. Harmless to call often; a call while one runs makes it read once more.
    */
   refresh(): void {
     if (this.#closed) return;
     if (this.#refreshing) {
-      // Read again once the running pass ends, so an input recorded during it isn't missed.
+      // Read again once the running pass ends, so a message queued during it isn't missed.
       this.#refreshAgain = true;
       return;
     }
@@ -211,8 +211,7 @@ export class TelegramChannelRuntime {
       try {
         do {
           this.#refreshAgain = false;
-          const submissions = await this.#commit((tx) => this.#waiting(tx));
-          for (const submissionId of submissions) this.#watch(submissionId as SubmissionId);
+          await this.#commit(() => undefined);
         } while (this.#refreshAgain && !this.#closed);
         // A message queued elsewhere goes out now rather than at the next alarm. Not while one is in flight: that
         // send's own commit refreshes again when it ends.
@@ -226,27 +225,18 @@ export class TelegramChannelRuntime {
     })();
   }
 
-  /** Submissions waiting for an answer this door delivers: its own inputs and every pending reminder. */
-  async #waiting(tx: Tx): Promise<number[]> {
-    return [
-      ...(await tx.doc(TelegramChannel)).inputs.map(({ submissionId }) => submissionId),
-      ...(await tx.doc(Proactive)).pending.map(({ submissionId }) => submissionId),
-    ];
-  }
-
   /** Stops background work; what is pending stays stored for the next instance. */
   close(): void {
     this.#closed = true;
   }
 
   /**
-   * Everything that may be due: windows past their deadline, settled inputs, deferred commands, and the outbox. Each
-   * part fails on its own.
+   * Everything that may be due: windows past their deadline, deferred commands, and the outbox. Each part fails on its
+   * own.
    */
   async recover(): Promise<void> {
     for (const [name, work] of [
       ["flush", () => this.flushDue()],
-      ["reconcile", () => this.reconcile()],
       ["commands", () => this.runCommands()],
       ["drain", () => this.drain()],
     ] as const) {
@@ -280,14 +270,21 @@ export class TelegramChannelRuntime {
     switch (update.kind) {
       case "text":
         // Paused (`MIPI_PAUSED`, M9): refused before any window opens, so nothing waits to run later.
-        if ((await this.#options.harness.snapshot(Spend, context))?.paused === true) {
+        if (await isPausedNow(this.#options.harness)) {
           await this.#reply(update.updateId, update.chatId, () => PAUSED_REPLY);
           return;
         }
         // The owner's first new message over the spend cap each day gets one line saying so; it still goes through.
         if (
           (await this.#admitText(update, conversationId)) &&
-          (await this.#commit((tx) => warnOwnerOverCap(tx, update.chatId, this.#now())))
+          (await this.#commit((tx) =>
+            warnOwnerOverCap(
+              tx,
+              this.#options.delivery,
+              telegramDestination(update.chatId),
+              this.#now(),
+            ),
+          ))
         ) {
           this.#kickDrain();
         }
@@ -453,7 +450,7 @@ export class TelegramChannelRuntime {
     conversationId: ConversationId,
     submitted: { readonly id: SubmissionId; readonly text: string },
   ): Promise<void> {
-    this.#watch(submitted.id);
+    // Core's settlement sees the input in this door's document after the commit and watches it (`answers.ts`).
     try {
       await this.#options.onSubmitted?.(conversationId, submitted.text);
     } catch (error) {
@@ -523,7 +520,7 @@ export class TelegramChannelRuntime {
     state: TelegramChannelState,
     window: NonNullable<TelegramChannelState["staged"]>[number],
   ): Promise<boolean> {
-    if ((await tx.doc(Spend)).paused !== true) return false;
+    if (!(await isPaused(tx))) return false;
     this.#unstage(state, window.chatId, window.firstUpdateId);
     enqueueReply(
       await tx.doc(TelegramOutbox),
@@ -743,37 +740,6 @@ export class TelegramChannelRuntime {
     });
   }
 
-  /** Waits for an input to settle, then turns it into a reply. Harmless to call twice. */
-  #watch(submissionId: SubmissionId): void {
-    if (this.#watched.has(submissionId)) return;
-    this.#watched.add(submissionId);
-    void (async () => {
-      try {
-        const submission = await this.#options.harness.submission(submissionId, context);
-        await submission?.wait(context);
-        if (!this.#closed) await this.reconcile();
-      } catch (error) {
-        // A closing harness rejects the wait; the next instance watches again from the stored inputs.
-        if (!this.#closed) this.#options.report("Watching a Telegram input failed", error);
-      } finally {
-        this.#watched.delete(submissionId);
-      }
-    })();
-  }
-
-  /**
-   * Turns every settled input into its reply, in the commit that removes it from the pending inputs: an answer goes
-   * to the chat the input came from; an input that ended without an answer gets a short notice instead. Inputs that
-   * one run answered together get the answer once per chat.
-   */
-  reconcile(): Promise<void> {
-    return this.#queue.run("reconcile", async () => {
-      // One judgement per answer, over this door's inputs and reminders alike (M6, `proactive.ts`).
-      const queued = await this.#commit((tx) => reconcileAnswers(tx, this.#now()));
-      if (queued) this.#kickDrain();
-    });
-  }
-
   #kickDrain(): void {
     if (this.#closed) return;
     void this.drain().catch((error) => this.#options.report("Telegram drain failed", error));
@@ -821,7 +787,7 @@ export class TelegramChannelRuntime {
       }
       await this.#commit(async (tx) => {
         recordSend(await tx.doc(TelegramOutbox), send, result, this.#now());
-        if (result.kind === "sent") await recordProactiveSend(tx, send.replyId, this.#now());
+        if (result.kind === "sent") await recordDelivered(tx, send.replyId, this.#now());
       });
     } finally {
       this.#inFlight.delete(key);
@@ -835,19 +801,15 @@ export class TelegramChannelRuntime {
       const value = await change(tx);
       const state = await tx.doc(TelegramChannel);
       const outbox = await tx.doc(TelegramOutbox);
-      const reminders = (await tx.doc(Proactive)).pending.length;
       const staged = state.staged ?? [];
       const times = [
         nextOutboxWake(outbox, this.#now()),
         ...staged.map(({ deadline }) => deadline),
       ].filter((value): value is number => value !== undefined);
       const at = times.length === 0 ? undefined : Math.min(...times);
+      // Inputs waiting for their answer keep core's settlement active, not this door (`answers.ts`).
       wake = {
-        active:
-          state.inputs.length > 0 ||
-          state.commands.length > 0 ||
-          staged.length > 0 ||
-          reminders > 0,
+        active: state.commands.length > 0 || staged.length > 0,
         ...(at === undefined ? {} : { at }),
       };
       return value;
@@ -858,4 +820,22 @@ export class TelegramChannelRuntime {
     }
     return result;
   }
+}
+
+/**
+ * After a send confirmed: a proactive reply's first confirmed chunk is reported to core (`onDelivered`) once, whatever
+ * later splits do to its chunks.
+ */
+export async function recordDelivered(tx: Tx, replyId: string, now: number): Promise<void> {
+  const outbox = await tx.doc(TelegramOutbox);
+  const reply = outbox.replies.find(({ id }) => id === replyId);
+  if (reply?.proactive === undefined || reply.proactiveRecorded === true) return;
+  const first = reply.chunks.find(({ status }) => status === "sent");
+  if (first === undefined) return;
+  reply.proactiveRecorded = true;
+  await onDelivered(
+    tx,
+    { sourceId: reply.proactive.reminderId, address: reply.chatId, text: first.text },
+    now,
+  );
 }

@@ -1,8 +1,8 @@
 /**
  * The MiPi extension contract (COD-208, COD-209). A MiPi extension is a Pi Durable extension (`pi`: tools, sections,
  * hooks, wraps, tasks) plus what Pi Durable doesn't model: its tier, whether a later extension may replace it, its
- * prompt slot, the tools whose output is untrusted, and the wake sources it runs in the background. There is no second
- * registry: tools and sections reach the model only through Pi Durable.
+ * prompt slot, the tools whose output is untrusted, the request-id prefixes it builds (origin), and the wake sources it
+ * runs in the background. There is no second registry: tools and sections reach the model only through Pi Durable.
  *
  * Every extension is always installed, so the tasks and documents it stored keep resolving. What a conversation uses
  * is its selection: one default list core builds here (core's own extensions first, then the rest by slot and name),
@@ -12,6 +12,7 @@
  */
 import type { MutableModels } from "./pi/ai.ts";
 import type { Extension, Harness, ToolRegistration } from "./pi/durable.ts";
+import type { OriginRegistration } from "./origin.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
 
 /** `builtin` ships on by default; `optional` is added at build time (an npm extension is one too, on Workers). */
@@ -58,6 +59,11 @@ export interface MipiExtension {
   readonly helpers?: readonly Extension[];
   /** Tools whose results are untrusted (a fetched page): a run that called one can't write memory. */
   readonly untrustedTools?: readonly string[];
+  /**
+   * The request-id prefixes its inputs use (the reminders' `sched`). Registered even when the extension is replaced:
+   * the ids it stored still mean the same.
+   */
+  readonly origins?: readonly OriginRegistration[];
   /** Background work that needs the alarm. Not started for an extension that was replaced. */
   readonly wakeSources?: (context: BackgroundContext) => readonly ExtensionSource[];
 }

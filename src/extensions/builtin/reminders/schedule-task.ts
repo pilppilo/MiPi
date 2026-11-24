@@ -1,11 +1,10 @@
-import { type ConversationId, defineDoc, defineTask } from "../agent/pi/durable.ts";
-import { formatScheduledInstruction } from "../protocol.ts";
-import { AgentSettings } from "../agent/settings.ts";
-import { localTime } from "../agent/stamp.ts";
-import { holdOf, measureSpend, noticeSpend, Spend } from "../agent/spend.ts";
-import { TelegramChannel } from "../agent/telegram-state.ts";
-import { TelegramOutbox } from "../agent/telegram-outbox.ts";
-import { afterNextChicagoMidnight } from "../lib/cap-day.ts";
+import { type ConversationId, defineDoc, defineTask } from "../../../agent/pi/durable.ts";
+import { formatScheduledInstruction } from "../../../protocol.ts";
+import { connectorsOf } from "../../../agent/connectors.ts";
+import { holdNow, tellHeld } from "../../../agent/gates.ts";
+import { AgentSettings } from "../../../agent/settings.ts";
+import { localTime } from "../../../agent/stamp.ts";
+import { afterNextChicagoMidnight } from "../../../lib/cap-day.ts";
 
 export type ScheduleCadence = {
   readonly unit: "minute" | "hour" | "day" | "week" | "month";
@@ -253,21 +252,12 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
         ) {
           return undefined;
         }
-        const spend = await measureSpend(tx, now);
-        const hold = holdOf(spend, now);
+        const hold = await holdNow(tx, now);
         if (hold === undefined) return undefined;
         held = true;
-        // At the spend cap, today's one notice, as for reminders; a pause tells nothing. This older kind has no chat of
-        // its own, so the notice goes to the private chat that last wrote.
-        if (hold === "spend-cap") {
-          noticeSpend(
-            await tx.doc(Spend),
-            await tx.doc(TelegramChannel),
-            await tx.doc(TelegramOutbox),
-            undefined,
-            now,
-          );
-        }
+        // At the spend cap, today's one notice, as for reminders; a pause tells nothing. This older kind has no
+        // destination of its own, so the notice goes wherever delivery says the owner is.
+        await tellHeld(tx, connectorsOf(runtime.registry).delivery, hold, undefined, now);
         const runAt =
           task.input.recurrence === undefined
             ? afterNextChicagoMidnight(now)

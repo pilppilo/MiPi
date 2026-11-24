@@ -7,8 +7,14 @@
  * Fenced code is read before anything else; inline markdown is parsed by `markdown.ts`, shared with the web door, and
  * a marker without its partner stays literal there, so tags are always well nested (Telegram refuses crossing tags).
  */
-import { CLOSE_FENCE, type Inline, languageOf, OPEN_FENCE, parseInline } from "./markdown.ts";
-import { splitForTelegram, TELEGRAM_TEXT_LIMIT } from "./telegram-text.ts";
+import {
+  CLOSE_FENCE,
+  type Inline,
+  languageOf,
+  OPEN_FENCE,
+  parseInline,
+} from "../../lib/markdown.ts";
+import { splitForTelegram, TELEGRAM_TEXT_LIMIT } from "./text.ts";
 
 /** Room the splitter keeps for a code fence closed at a chunk's end and reopened at the next one's start. */
 export const FENCE_RESERVE = 32;
