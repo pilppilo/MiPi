@@ -1,8 +1,10 @@
 /**
  * The MiPi extension contract (COD-208, COD-209). A MiPi extension is a Pi Durable extension (`pi`: tools, sections,
  * hooks, wraps, tasks) plus what Pi Durable doesn't model: its tier, whether a later extension may replace it, its
- * prompt slot, the tools whose output is untrusted, the request-id prefixes it builds (origin), and the wake sources it
- * runs in the background. There is no second registry: tools and sections reach the model only through Pi Durable.
+ * prompt slot, the tools whose output is untrusted, the request-id prefixes it builds (origin), the wake sources it
+ * runs in the background, and the provider pieces it adds (usage, model list). There is no second registry: tools and
+ * sections reach the model only through Pi Durable. An extension with only agent-wide pieces (a provider's) has no
+ * Pi Durable part (COD-212): it is never in a conversation's selection and can't be switched off.
  *
  * Every extension is always installed, so the tasks and documents it stored keep resolving. What a conversation uses
  * is its selection: one default list core builds here (core's own extensions first, then the rest by slot and name),
@@ -13,6 +15,7 @@
 import type { MutableModels } from "./pi/ai.ts";
 import type { Extension, Harness, ToolRegistration } from "./pi/durable.ts";
 import type { OriginRegistration } from "./origin.ts";
+import type { ProviderRegistration } from "./providers.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
 
 /** `builtin` ships on by default; `optional` is added at build time (an npm extension is one too, on Workers). */
@@ -43,7 +46,7 @@ export interface ExtensionSource extends WakeSource {
 }
 
 export interface MipiExtension {
-  /** Unique among installed extensions; also the name of `pi`. */
+  /** Unique among installed extensions; also the name of `pi`, when it has one. */
   readonly name: string;
   readonly tier: ExtensionTier;
   /**
@@ -53,8 +56,8 @@ export interface MipiExtension {
   readonly replaceable?: boolean;
   /** Where its sections go. Default: `static`. */
   readonly slot?: SectionSlot;
-  /** The Pi Durable extension: selected by default. */
-  readonly pi: Extension;
+  /** The Pi Durable extension: selected by default. None for an extension with only agent-wide pieces. */
+  readonly pi?: Extension;
   /** Installed but never selected by default: Pi Durable extensions for its own subagents. */
   readonly helpers?: readonly Extension[];
   /** Tools whose results are untrusted (a fetched page): a run that called one can't write memory. */
@@ -66,6 +69,8 @@ export interface MipiExtension {
   readonly origins?: readonly OriginRegistration[];
   /** Background work that needs the alarm. Not started for an extension that was replaced. */
   readonly wakeSources?: (context: BackgroundContext) => readonly ExtensionSource[];
+  /** A provider's usage reader and model list (`providers.ts`). Not registered for an extension that was replaced. */
+  readonly providers?: readonly ProviderRegistration[];
 }
 
 /** One replacement, for the startup report and the admin status. */
@@ -85,7 +90,7 @@ export interface ResolvedExtensions {
   readonly installed: readonly Extension[];
   /** The default selection: core's own first, then the active extensions by slot and name. */
   readonly selection: readonly Extension[];
-  /** Names a conversation may switch off: the active extensions, never core's own. */
+  /** Names a conversation may switch off: the active extensions with a Pi Durable part, never core's own. */
   readonly switchable: readonly string[];
   /** Every tool any installed extension registers, by name: the first registration wins, core's first. */
   readonly tools: ReadonlyMap<string, ToolRegistration>;
@@ -97,8 +102,12 @@ export interface ResolvedExtensions {
   readonly untrustedTools: ReadonlySet<string>;
 }
 
-const toolNames = (extension: Extension): string[] =>
-  (extension.tools ?? []).map(({ name }) => name);
+const toolNames = (extension: Extension | undefined): string[] =>
+  (extension?.tools ?? []).map(({ name }) => name);
+
+/** An extension's Pi Durable part, as a list: empty when it has none. */
+const piOf = (extension: MipiExtension): Extension[] =>
+  extension.pi === undefined ? [] : [extension.pi];
 
 /**
  * Applies the contract to `core` (core's own Pi Durable extensions, never replaced or switched off) and `extensions`:
@@ -118,7 +127,7 @@ export function resolveExtensions(
     names.add(name);
   }
   for (const extension of extensions) {
-    if (extension.pi.name !== extension.name) {
+    if (extension.pi !== undefined && extension.pi.name !== extension.name) {
       throw new Error(
         `Extension "${extension.name}" wraps a Pi Durable extension named "${extension.pi.name}"`,
       );
@@ -173,16 +182,17 @@ export function resolveExtensions(
 
   const installed = [
     ...core,
-    ...extensions.flatMap((extension) => [extension.pi, ...(extension.helpers ?? [])]),
+    ...extensions.flatMap((extension) => [...piOf(extension), ...(extension.helpers ?? [])]),
   ];
   const tools = new Map<string, ToolRegistration>();
-  for (const extension of [...core, ...active.map(({ pi }) => pi)]) {
+  const selection = [...core, ...active.flatMap(piOf)];
+  for (const extension of selection) {
     for (const tool of extension.tools ?? []) if (!tools.has(tool.name)) tools.set(tool.name, tool);
   }
   const untrustedTools = new Set<string>();
   for (const extension of extensions) {
     const registered = new Set(
-      [extension.pi, ...(extension.helpers ?? [])].flatMap((pi) => toolNames(pi)),
+      [...piOf(extension), ...(extension.helpers ?? [])].flatMap((pi) => toolNames(pi)),
     );
     for (const tool of extension.untrustedTools ?? []) {
       // A misspelt name would switch the guard off without a word, so it refuses to compose.
@@ -198,8 +208,8 @@ export function resolveExtensions(
     active,
     replacements,
     installed,
-    selection: [...core, ...active.map(({ pi }) => pi)],
-    switchable: active.map(({ name }) => name),
+    selection,
+    switchable: active.flatMap((extension) => (extension.pi === undefined ? [] : [extension.name])),
     tools,
     untrustedTools,
   };

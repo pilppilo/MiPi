@@ -9,19 +9,20 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { Harness, UsageDoc } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { composeMipi, createHarnessOptions } from "../src/agent/composition.ts";
 import { Proactive } from "../src/agent/proactive.ts";
 import { measureSpend, Spend } from "../src/agent/spend.ts";
 import { readUsage, usageText } from "../src/agent/usage.ts";
+import type { ReadEnv } from "../src/agent/pi/models.ts";
+import { ProviderUsageCache, USAGE_CACHE_MS, type UsageSource } from "../src/agent/providers.ts";
 import {
   GO_USAGE_URL,
   goUsageSource,
   parseGoUsage,
-  ProviderUsageCache,
-  USAGE_CACHE_MS,
-  type UsageSource,
-  usageSources,
-} from "../src/agent/usage-sources.ts";
+} from "../src/extensions/optional/opencode-go/usage.ts";
+
+/** The usage readers the composed agent registers (OpenCode Go's, from its optional extension). */
+const usageSources = (readEnv: ReadEnv) => composeMipi().providers.usageSources(readEnv);
 import { parseUsageReadout, type UsageReadout } from "../src/protocol.ts";
 import { CHAT, clock, inObject, openAgent } from "./reminder-agent.ts";
 

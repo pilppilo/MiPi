@@ -31,11 +31,12 @@ import {
   createConnectors,
   type DoorRegistration,
 } from "./connectors.ts";
+import { createProviders, type Providers } from "./providers.ts";
 
 export interface HarnessConfig {
-  /** OpenCode Go model id for new conversations (`MIPI_MODEL`). */
+  /** The model id for new conversations (`MIPI_MODEL`), at the model seam's provider. */
   readonly modelId?: string;
-  /** Reads Worker bindings, for model API keys (`OPENCODE_API_KEY`). Default: none, so models are unauthenticated. */
+  /** Reads Worker bindings, for the model seam's API keys. Default: none, so models are unauthenticated. */
   readonly readEnv?: ReadEnv;
   /** The tool profile new top-level conversations start on (`MIPI_PROFILE`). Default: `default`. */
   readonly profile?: ProfileName;
@@ -83,6 +84,8 @@ export interface AgentComposition {
   readonly profiles: Profiles;
   /** Origin, delivery and the doors' pending inputs, as the doors and extensions registered them. */
   readonly connectors: Connectors;
+  /** The provider pieces (usage readers, model lists) the extensions in use registered. */
+  readonly providers: Providers;
   /** Every durable task of the installed extensions: the startup guard's version check (`APP_TASKS` before COD-209). */
   readonly tasks: ReturnType<typeof collectTasks>;
   /**
@@ -114,6 +117,12 @@ export function composeAgent(config: HarnessConfig): AgentComposition {
     config.extensions.flatMap((extension) => extension.origins ?? []),
   );
   bindConnectors(core[0]!, connectors);
+  // A replaced extension isn't running, so its providers aren't registered (as with wake sources).
+  const providers = createProviders(
+    extensions.active.flatMap((extension) =>
+      (extension.providers ?? []).map((registration) => ({ owner: extension.name, registration })),
+    ),
+  );
   const profiles = new Profiles(config.profiles, extensions.tools);
   const profile = config.profile ?? DEFAULT_PROFILE;
   const registry = createRegistry();
@@ -129,7 +138,9 @@ export function composeAgent(config: HarnessConfig): AgentComposition {
     tools: profiles.toolsFor(profile),
   };
   const switchable = new Map(
-    extensions.active.map((extension) => [extension.name, extension.pi] as const),
+    extensions.active.flatMap((extension) =>
+      extension.pi === undefined ? [] : [[extension.name, extension.pi] as const],
+    ),
   );
 
   const options: HarnessOptions = {
@@ -157,6 +168,7 @@ export function composeAgent(config: HarnessConfig): AgentComposition {
     extensions,
     profiles,
     connectors,
+    providers,
     tasks: collectTasks(extensions.installed),
     switchOff: async (tx, conversationId, names) => {
       const off = names.map((name) => {

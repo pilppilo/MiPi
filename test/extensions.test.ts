@@ -86,7 +86,7 @@ describe("resolveExtensions", () => {
         { replaced: "web-fetch", by: "my-fetch", tool: "web_fetch" },
       ]);
       expect(resolved.active.map(({ name }) => name)).not.toContain("web-fetch");
-      expect(resolved.tools.get("web_fetch")).toBe(fetcher.pi.tools![0]);
+      expect(resolved.tools.get("web_fetch")).toBe(fetcher.pi!.tools![0]);
       // Still installed, so what it stored keeps resolving.
       expect(resolved.installed.map(({ name }) => name)).toContain("web-fetch");
     }

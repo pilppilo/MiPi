@@ -22,6 +22,7 @@ Coordinate through Linear and GitHub, not chat memory. Set the issue to In Progr
 - **One agent, many doors.** Web, Telegram, relay and future channels are interchangeable ways into the same agent. Caching, context, compaction, time and identity live in `src/agent/`, never in one door.
 - **MiPi is its own agent.** The original Pi Durable sample was a one-time seed; don't preserve its behaviour for its own sake. Pi Durable is the only dependency expected to break.
 - **No default tools.** Tools come only from explicit profiles (`default`, `empty`, `pidu`), and each is opt-in. Never add Pi Durable's coding tools (read, write, edit, bash), codemode or tool search.
+- **Providers live at the edge.** Provider-specific code (URLs, key names, response shapes) lives in the provider's optional extension (`src/extensions/optional/<provider>/`) or the model seam (`src/agent/pi/models.ts`), never in core or a door.
 - **Cache-stable prompts.** System sections stay static so the prompt prefix stays cacheable. Anything that changes over time goes on the message itself (`stampInput`).
 - **Fail clearly.** Refusing with a clear message is better than half-running. Back up before anything destructive, and test behaviour, not just types.
 
@@ -50,9 +51,9 @@ Agents work in their own Linux VMs with GitHub and Linear connected; the owner m
 ## Layout
 
 - `src/agent/pi/`: the **only** code that imports `@earendil-works/*` (lint-enforced). New Pi imports go here as named re-exports, and `test/contract.test.ts` calls each one.
-- `src/agent/`: core: the Durable Object (`agent-do.ts`), harness, connectors (wake sources, side calls, untrusted content, input origin, delivery, the gates, answer settlement, conversation visibility), proactive runs, stamps, startup guard, export and restore. Core imports no door or extension (lint-enforced); only the composition root (`agent-do.ts`, `composition.ts`) names them.
+- `src/agent/`: core: the Durable Object (`agent-do.ts`), harness, connectors (wake sources, side calls, untrusted content, input origin, delivery, the gates, answer settlement, conversation visibility, providers), proactive runs, stamps, startup guard, export and restore. Core imports no door or extension (lint-enforced); only the composition root (`agent-do.ts`, `composition.ts`) names them.
 - `src/doors/`: the doors (`telegram/`, `relay/`, `web/`, listed in `index.ts`). Each registers its request-id prefix, delivery adapter and pending inputs with core (`src/agent/connectors.ts`); its runtime is wired by the composition root. A door imports only core, never an extension, and only `src/doors/telegram/` touches Telegram's documents (lint-enforced).
-- `src/extensions/`: built-in extensions (`builtin/<name>/`, listed in `builtins.ts`) and the profile table (`profiles.ts`). An extension is a Pi Durable extension plus MiPi registrations (`src/agent/extensions.ts`), imports only core, and never a door or another extension (`scripts/check-boundaries.ts`).
+- `src/extensions/`: built-in extensions (`builtin/<name>/`, listed in `builtins.ts`), optional extensions (`optional/<name>/`, listed in `optional.ts`) and the profile table (`profiles.ts`). An extension is a Pi Durable extension plus MiPi registrations (`src/agent/extensions.ts`), imports only core, and never a door or another extension (`scripts/check-boundaries.ts`).
 - `src/worker/`: HTTP routes, Cloudflare Access and fallback authentication, admin API.
 - `src/lib/`: small helpers with no Pi imports and no door in them.
 - `src/protocol.ts`: WebSocket command/event protocol and wire validation.

@@ -28,6 +28,7 @@ import { AnswerSettlement } from "../src/agent/answers.ts";
 import { PROFILES } from "./mipi.ts";
 import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
 import { ModelList } from "../src/agent/model-list.ts";
+import { goModelListSource } from "../src/extensions/optional/opencode-go/models.ts";
 import { Proactive } from "../src/agent/proactive.ts";
 import { Spend } from "../src/agent/spend.ts";
 import { RelayRuntime } from "../src/doors/relay/relay.ts";
@@ -120,7 +121,9 @@ async function seed(): Promise<void> {
       profile: startingProfile("telegram", "default"),
       profiles: PROFILES,
       version: MIPI_VERSION,
-      modelList: new ModelList(async () => ["deepseek-v4.1-flash"]),
+      modelList: new ModelList([
+        { ...goModelListSource(() => undefined), liveIds: async () => ["deepseek-v4.1-flash"] },
+      ]),
       send: async () => ({ kind: "sent", messageId: 1 }),
       delivery: composition.connectors.delivery,
       armAlarm: async () => {},
