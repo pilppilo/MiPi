@@ -16,6 +16,7 @@ import {
 } from "../protocol.ts";
 import type { ConversationSnapshot } from "./session-state.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
+import { Markdown } from "./Markdown.tsx";
 import { MessageText, TranscriptList } from "./Transcript.tsx";
 import { usePiSession } from "./usePiSession.ts";
 
@@ -406,7 +407,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               {activeConversation.live.text.length === 0 ? (
                 <p className="responding">Responding…</p>
               ) : (
-                <MessageText text={activeConversation.live.text} />
+                <Markdown text={activeConversation.live.text} />
               )}
               {activeConversation.live.retry === undefined ? null : (
                 <p role="status">Retrying: {activeConversation.live.retry.error}</p>
