@@ -1,11 +1,13 @@
 /**
  * The Durable Object's one alarm. A Durable Object has a single alarm, and several parts of the agent need it: Pi
- * Durable's next sleep (`onWake`), the Telegram door (a burst window's deadline, the outbox's next send), and a
- * recovery heartbeat while work can run, so an evicted instance is woken to go on. The alarm is set to the earliest of
- * them, and deleted when none needs it.
+ * Durable's next sleep (`onWake`), the registered wake sources (`wake-sources.ts`: a door's deadlines, a background
+ * job's next run), and a recovery heartbeat while work can run, so an evicted instance is woken to go on. The alarm is
+ * set to the earliest of them, and deleted when none needs it. Core code: it names no door or extension.
  */
 import type { Wake } from "./pi/durable.ts";
-import type { TelegramWake } from "./telegram.ts";
+import { earliestWake, type SourceWake } from "./wake-sources.ts";
+
+export { earliestWake };
 
 /** While work can run, the alarm stays this far ahead, so an evicted instance is woken to resume it. */
 export const HEARTBEAT_MS = 60_000;
@@ -19,47 +21,40 @@ export interface AlarmStorage {
 /** The earliest time anything needs the alarm, or undefined when nothing does. */
 export function alarmTime(
   wake: Wake,
-  telegram: TelegramWake | undefined,
+  sources: SourceWake | undefined,
   now: number,
 ): number | undefined {
-  const heartbeat = wake.active || telegram?.active === true ? now + HEARTBEAT_MS : undefined;
-  // `wake.at` is on the Harness clock, which is the default `Date.now`, as is the outbox's.
-  const times = [heartbeat, wake.at, telegram?.at].filter(
+  const heartbeat = wake.active || sources?.active === true ? now + HEARTBEAT_MS : undefined;
+  // `wake.at` is on the Harness clock, which is the default `Date.now`, as are the sources'.
+  const times = [heartbeat, wake.at, sources?.at].filter(
     (value): value is number => value !== undefined,
   );
   return times.length === 0 ? undefined : Math.min(...times);
 }
 
-/** The earliest of several doors' wakes, active when any is. */
-export function earliestWake(...wakes: readonly (TelegramWake | undefined)[]): TelegramWake {
-  const times = wakes.flatMap((wake) => (wake?.at === undefined ? [] : [wake.at]));
-  const active = wakes.some((wake) => wake?.active === true);
-  return times.length === 0 ? { active } : { at: Math.min(...times), active };
-}
-
 export class AlarmScheduler {
   readonly #storage: AlarmStorage;
-  readonly #telegram: () => TelegramWake | undefined;
+  readonly #sources: () => SourceWake | undefined;
   readonly #now: () => number;
   #writes: Promise<void> = Promise.resolve();
 
   constructor(
     storage: AlarmStorage,
-    telegram: () => TelegramWake | undefined,
+    sources: () => SourceWake | undefined,
     now: () => number = Date.now,
   ) {
     this.#storage = storage;
-    this.#telegram = telegram;
+    this.#sources = sources;
     this.#now = now;
   }
 
   /**
-   * Sets the alarm for `wake` and the Telegram door's wake, read when the write runs so it is the newest. Writes are
+   * Sets the alarm for `wake` and the sources' wake, read when the write runs so it is the newest. Writes are
    * serialized, so an older wake can't overwrite a newer, earlier deadline.
    */
   schedule(wake: Wake): Promise<void> {
     const write = this.#writes.then(async () => {
-      const at = alarmTime(wake, this.#telegram(), this.#now());
+      const at = alarmTime(wake, this.#sources(), this.#now());
       if (at === undefined) await this.#storage.deleteAlarm();
       else await this.#storage.setAlarm(at);
     });

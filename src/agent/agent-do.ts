@@ -33,16 +33,8 @@ import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
-import { parseDailyRunCap, Proactive, PROACTIVE_DOC_KIND } from "./proactive.ts";
-import {
-  holdOf,
-  measureSpend,
-  PAUSED_REPLY,
-  parsePaused,
-  parseSpendCap,
-  Spend,
-  SPEND_DOC_KIND,
-} from "./spend.ts";
+import { parseDailyRunCap, Proactive } from "./proactive.ts";
+import { holdOf, measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
 import { readUsage, usageText } from "./usage.ts";
 import { ProviderUsageCache, usageSources } from "./usage-sources.ts";
 import {
@@ -82,9 +74,9 @@ import {
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import type { TelegramInbound } from "../lib/telegram-update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
-import { AlarmScheduler, earliestWake, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
-import { MemoryPassRuntime } from "./memory-pass.ts";
-import { MEMORY_DOC_KIND } from "./memory.ts";
+import { AlarmScheduler, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
+import { WakeSources } from "./wake-sources.ts";
+import { isMemoryPassChange, MemoryPassRuntime } from "./memory-pass.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "./telegram.ts";
 import { botApiSender } from "./telegram-outbox.ts";
 import { RelayRuntime, type RelayResult } from "./relay.ts";
@@ -247,16 +239,17 @@ export class MipiAgent extends DurableObject<Env> {
   readonly #views = new Map<WebSocket, WatchHandle<ConversationView>>();
   readonly #typingConnections = new Set<WebSocket>();
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
-  /** The one alarm, for Pi Durable's sleeps, the Telegram door and the heartbeat (`alarm.ts`). */
-  readonly #alarm = new AlarmScheduler(this.ctx.storage, () =>
-    earliestWake(this.#telegram?.wake(), this.#memoryPass?.wake()),
-  );
+  /**
+   * The parts that need the alarm besides Pi Durable (`wake-sources.ts`): registered while the harness opens
+   * (`#initialize`), cleared when it closes (`#shutdown`).
+   */
+  readonly #wakeSources = new WakeSources(reportError);
+  /** The one alarm, for Pi Durable's sleeps, the wake sources and the heartbeat (`alarm.ts`). */
+  readonly #alarm = new AlarmScheduler(this.ctx.storage, () => this.#wakeSources.wake());
   /** The Telegram door's admissions, replies and outbox; present while the harness is open. */
   #telegram: TelegramChannelRuntime | undefined;
   /** The PiDu relay's admissions and results (M7); present while the harness is open. */
   #relay: RelayRuntime | undefined;
-  /** The background memory pass over idle conversations (M8); present while the harness is open. */
-  #memoryPass: MemoryPassRuntime | undefined;
   /** Each provider's own usage figures for the readout (M9), cached in memory only. */
   #providerUsage = new ProviderUsageCache([]);
 
@@ -334,12 +327,11 @@ export class MipiAgent extends DurableObject<Env> {
       await this.#stopView(socket);
     }
     this.#typingConnections.clear();
-    this.#telegram?.close();
+    // Closes the Telegram door and the memory pass, and empties the list for the next open.
+    this.#wakeSources.close();
     this.#telegram = undefined;
     this.#relay?.close();
     this.#relay = undefined;
-    this.#memoryPass?.close();
-    this.#memoryPass = undefined;
     await this.#activity.stop();
     await this.#harness.close(BACKGROUND_CONTEXT);
     await this.#alarm.settled();
@@ -674,22 +666,8 @@ export class MipiAgent extends DurableObject<Env> {
       // Notify connected clients when their conversation records are committed.
       harness.observeCommits({
         advance: (publication) => {
-          // A reminder (M6) records its Telegram answers in the door's document from inside its own task.
-          if (isTelegramChange(publication)) this.#telegram?.refresh();
-          // New entries move a conversation's idle time, and so the memory pass's next wake (M8).
-          // Memory, the run cap and the spend cap decide whether a pass can run at all: forgetting a lesson, resuming
-          // the runs or a new day brings it back.
-          if (
-            publication.changes.some(
-              (change) =>
-                change.type === "entry" ||
-                (change.type === "document" &&
-                  (change.record?.kind === MEMORY_DOC_KIND ||
-                    change.record?.kind === PROACTIVE_DOC_KIND ||
-                    change.record?.kind === SPEND_DOC_KIND)),
-            )
-          )
-            this.#memoryPass?.refresh();
+          // Each source decides which commits make it look again (`WakeSource.observes`).
+          this.#wakeSources.observe(publication);
           for (const change of publication.changes) {
             if (change.type !== "conversation" || change.value.owner === undefined) continue;
             this.#broadcast({
@@ -731,7 +709,7 @@ export class MipiAgent extends DurableObject<Env> {
         report: reportError,
       });
       this.#telegram = telegram;
-      this.#memoryPass = new MemoryPassRuntime({
+      const memoryPass = new MemoryPassRuntime({
         harness,
         models: this.#models,
         onWakeChange: () =>
@@ -739,6 +717,26 @@ export class MipiAgent extends DurableObject<Env> {
             .schedule(harness.wake())
             .catch(() => this.ctx.abort("Alarm write failed")),
         report: reportError,
+      });
+      // Each part that needs the alarm, once. The alarm runs them in this order, after Pi Durable's resume.
+      this.#wakeSources.register({
+        name: "Telegram door",
+        wake: () => telegram.wake(),
+        // Telegram windows, replies, deferred commands and sends that are due.
+        run: () => telegram.recover(),
+        // A reminder (M6) records its Telegram answers in the door's document from inside its own task.
+        observes: isTelegramChange,
+        refresh: () => telegram.refresh(),
+        close: () => telegram.close(),
+      });
+      this.#wakeSources.register({
+        name: "memory pass",
+        wake: () => memoryPass.wake(),
+        // Idle conversations' memory passes that are due (M8).
+        run: () => memoryPass.run(),
+        observes: isMemoryPassChange,
+        refresh: () => memoryPass.refresh(),
+        close: () => memoryPass.close(),
       });
       this.#relay = new RelayRuntime({
         harness,
@@ -750,7 +748,7 @@ export class MipiAgent extends DurableObject<Env> {
       });
       // The memory pass's first look, before the alarm is set: its wake is in the first write, and nothing of it is in
       // flight once opening is over.
-      await this.#memoryPass.start();
+      await memoryPass.start();
       // Armed before `resume()` runs anything, as for any call that can start work.
       await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
@@ -760,6 +758,11 @@ export class MipiAgent extends DurableObject<Env> {
         .start()
         .catch((error) => reportError("Starting the Telegram door failed", error));
     } catch (error) {
+      // A failed open leaves no source behind for the next one to register again.
+      this.#wakeSources.close();
+      this.#telegram = undefined;
+      this.#relay?.close();
+      this.#relay = undefined;
       await activity?.stop();
       await harness.close(BACKGROUND_CONTEXT);
       throw error;
@@ -907,10 +910,8 @@ export class MipiAgent extends DurableObject<Env> {
       [
         // Continue work a lost instance left, and make due sleeps runnable.
         ["Pi Durable resume", () => harness.resume()],
-        // Telegram windows, replies, deferred commands and sends that are due.
-        ["Telegram door", () => this.#telegram?.recover()],
-        // Idle conversations' memory passes that are due (M8).
-        ["memory pass", () => this.#memoryPass?.run()],
+        // Then each wake source, in registration order.
+        ...this.#wakeSources.consumers(),
       ],
       reportError,
       // Alarms are at-least-once, and `onWake` repeats no unchanged wake: an early or spurious alarm would otherwise

@@ -36,6 +36,7 @@ import {
   type TelegramSend,
 } from "./telegram-outbox.ts";
 import { TELEGRAM_DOC_KIND, TelegramChannel, type TelegramChannelState } from "./telegram-state.ts";
+import type { CommitChanges } from "./wake-sources.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import { telegramBatchRequest, telegramRequest } from "../lib/requests.ts";
 import {
@@ -69,12 +70,7 @@ export { type StagedWindow, TelegramChannel, type TelegramChannelState } from ".
  * Whether a commit changed the door's document: then another part of the agent (a reminder) may have recorded an input
  * for the door to answer, and `refresh()` picks it up.
  */
-export function isTelegramChange(publication: {
-  readonly changes: readonly {
-    readonly type: string;
-    readonly record?: { readonly kind: string };
-  }[];
-}): boolean {
+export function isTelegramChange(publication: CommitChanges): boolean {
   return publication.changes.some(
     (change) =>
       change.type === "document" &&
