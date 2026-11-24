@@ -22,6 +22,7 @@ Coordinate through Linear and GitHub, not chat memory. Set the issue to In Progr
 - **One agent, many doors.** Web, Telegram, relay and future channels are interchangeable ways into the same agent. Caching, context, compaction, time and identity live in `src/agent/`, never in one door.
 - **MiPi is its own agent.** The original Pi Durable sample was a one-time seed; don't preserve its behaviour for its own sake. Pi Durable is the only dependency expected to break.
 - **No default tools.** Tools come only from explicit profiles (`default`, `empty`, `pidu`), and each is opt-in. Never add Pi Durable's coding tools (read, write, edit, bash), codemode or tool search.
+- **Features are extensions.** A new feature is an extension plus one line in `builtins.ts` or `optional.ts`; wiring it anywhere else is a review finding. A feature goes in core only if the connectors themselves depend on it (as with bots) or it's a gate.
 - **Providers live at the edge.** Provider-specific code (URLs, key names, response shapes) lives in the provider's optional extension (`src/extensions/optional/<provider>/`) or the model seam (`src/agent/pi/models.ts`), never in core or a door.
 - **Cache-stable prompts.** System sections stay static so the prompt prefix stays cacheable. Anything that changes over time goes on the message itself (`stampInput`).
 - **Fail clearly.** Refusing with a clear message is better than half-running. Back up before anything destructive, and test behaviour, not just types.
