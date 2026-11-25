@@ -210,7 +210,17 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
       }
       if (parsed.type === "conversation.ops") {
         const view = viewsRef.current.get(parsed.conversationId);
-        if (view !== undefined) showView(parsed.conversationId, applyImmutable(view, parsed.ops));
+        if (view !== undefined) {
+          const next = applyImmutable(view, parsed.ops);
+          const failure = next.docs["pi.live"]?.runFailure;
+          if (
+            failure !== undefined &&
+            JSON.stringify(failure) !== JSON.stringify(view.docs["pi.live"]?.runFailure)
+          ) {
+            requestUsage(true);
+          }
+          showView(parsed.conversationId, next);
+        }
         return;
       }
       // Work ran, or the owner's message was admitted: the agent is awake, so the usage line can catch up.

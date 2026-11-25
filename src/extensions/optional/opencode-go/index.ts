@@ -6,10 +6,18 @@
 import type { MipiExtension } from "../../../agent/extensions.ts";
 import { MODEL_PROVIDER } from "../../../agent/pi/models.ts";
 import { goModelListSource } from "./models.ts";
+import { goLimit } from "./limit.ts";
 import { goUsageSource } from "./usage.ts";
 
 export const opencodeGoExtension: MipiExtension = {
   name: "opencode-go",
   tier: "optional",
-  providers: [{ provider: MODEL_PROVIDER, usage: goUsageSource, models: goModelListSource }],
+  providers: [
+    {
+      provider: MODEL_PROVIDER,
+      usage: goUsageSource,
+      models: goModelListSource,
+      limit: { label: "OpenCode Go", parse: goLimit },
+    },
+  ],
 };

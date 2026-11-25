@@ -79,6 +79,14 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Upstream:** Pi Durable 1.6.0 links an input one way: its submission record names the entry it was placed as (`submission.entry`), but a `pi.user` entry carries no submission id or request id, and there is no submission scan. So nothing can ask "which input, from which door, wrote this entry?"
 - **MiPi:** nothing yet. The memory pass still leaves reminders' deliveries out of what it reads by recognising their text (`passLines`, `parseScheduledInstruction`), where it would rather use their origin (automated, `src/agent/origin.ts`). When upstream exposes the link (a request id on the entry, or a submission scan by conversation), `passLines` uses origin and keeps the text check only for entries whose origin is unknown (COD-211).
 
+### L9 · Record provider limits before a failed input settles
+
+- **Kind:** workaround
+- **Since:** 0.1.0-beta.3
+- **Upstream:** pi-ai 1.6.0 exposes the provider error as text without structured status or reset metadata. Pi Durable awaits `afterResponse`, but the observer has no write or task API and `afterRun` does not execute on failure.
+- **MiPi:** the provider extension recognizes its own plan limits. Core's `provider-limits` observer awaits one bound callback that reads usage and commits the provider's record off the Session line.
+- **Remove when:** pi-ai exposes structured limit information and a Pi Durable hook on failed responses can write or request a task.
+
 ## Closed
 
 None yet.

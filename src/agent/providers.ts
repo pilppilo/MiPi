@@ -1,6 +1,6 @@
 /**
  * The providers connector (COD-212): what a model provider adds beyond Pi's provider wiring (`pi/models.ts`), as
- * extensions register it. Two pieces, each optional per provider:
+ * extensions register it. The pieces are optional per provider:
  *
  * - its own usage figures (M9), beside MiPi's own estimate. MiPi's estimate (`spend.ts`) works for every provider; a
  *   provider's figures show only where an extension can read them, with a key that has usage permission. A provider
@@ -41,15 +41,22 @@ export interface ModelListSource {
  * caught when the agent composes, before any setting is read. The pieces are built from the settings when the agent
  * opens: `usage` returns undefined when there is no key to read with.
  */
+export type LimitParser = {
+  readonly label: string;
+  readonly parse: (text: string, now: number) => { resetAt?: number } | undefined;
+};
+
 export interface ProviderRegistration {
   /** pi-ai's provider id; the pieces it builds must name the same. */
   readonly provider: string;
   readonly usage?: (readEnv: ReadEnv) => UsageSource | undefined;
   readonly models?: (readEnv: ReadEnv) => ModelListSource;
+  readonly limit?: LimitParser;
 }
 
 /** The registered providers, as the agent composed them. */
 export interface Providers {
+  readonly limitParsers: readonly (LimitParser & { readonly provider: string })[];
   /** Every provider with a usage reader and a key for it, in default extension order (slot, then name). */
   usageSources(readEnv: ReadEnv): UsageSource[];
   /** Every provider with a model list, in default extension order (slot, then name). */
@@ -64,7 +71,11 @@ export function createProviders(
   registrations: readonly { readonly owner: string; readonly registration: ProviderRegistration }[],
 ): Providers {
   const claimed = new Map<string, string>();
-  const claim = (owner: string, provider: string, piece: "usage reader" | "model list") => {
+  const claim = (
+    owner: string,
+    provider: string,
+    piece: "usage reader" | "model list" | "limit parser",
+  ) => {
     const key = `${provider}/${piece}`;
     const other = claimed.get(key);
     if (other !== undefined) {
@@ -74,7 +85,12 @@ export function createProviders(
     }
     claimed.set(key, owner);
   };
+  const limitParsers: Array<LimitParser & { provider: string }> = [];
   for (const { owner, registration } of registrations) {
+    if (registration.limit !== undefined) {
+      claim(owner, registration.provider, "limit parser");
+      limitParsers.push({ ...registration.limit, provider: registration.provider });
+    }
     if (registration.usage !== undefined) claim(owner, registration.provider, "usage reader");
     if (registration.models !== undefined) claim(owner, registration.provider, "model list");
   }
@@ -91,6 +107,7 @@ export function createProviders(
     return [piece];
   };
   return {
+    limitParsers,
     usageSources: (readEnv) =>
       registrations.flatMap(({ registration }) =>
         built(registration, registration.usage?.(readEnv)),
@@ -129,29 +146,48 @@ export class ProviderUsageCache {
 
   read(now: number = Date.now()): Promise<ProviderUsage[]> {
     return Promise.all(
-      this.#sources.map(async (source) => {
+      this.#sources.map((source) => {
         const cached = this.#cached.get(source.provider);
         if (cached !== undefined && now - cached.at < USAGE_CACHE_MS) return cached.usage;
-        const reading = this.#reading.get(source.provider);
-        if (reading !== undefined) return reading;
-        const read = (async (): Promise<ProviderUsage> => {
-          let usage: ProviderUsage;
-          try {
-            usage = await source.read(this.#fetcher);
-          } catch (error) {
-            usage = {
-              provider: source.provider,
-              label: source.label,
-              status: "unavailable",
-              reason: error instanceof Error ? error.message : String(error),
-            };
-          }
-          this.#cached.set(source.provider, { at: now, usage });
-          return usage;
-        })().finally(() => this.#reading.delete(source.provider));
-        this.#reading.set(source.provider, read);
-        return read;
+        return this.#read(source, now);
       }),
     );
+  }
+
+  readFresh(provider: string, now: number = Date.now()): Promise<ProviderUsage | undefined> {
+    const source = this.#sources.find((candidate) => candidate.provider === provider);
+    return source === undefined ? Promise.resolve(undefined) : this.#read(source, now);
+  }
+
+  #read(source: UsageSource, now: number): Promise<ProviderUsage> {
+    const reading = this.#reading.get(source.provider);
+    if (reading !== undefined) return reading;
+    const read = (async (): Promise<ProviderUsage> => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let usage: ProviderUsage;
+      try {
+        const request = source.read(this.#fetcher);
+        void request.catch(() => undefined);
+        usage = await Promise.race([
+          request,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Usage read timed out")), 5_000);
+          }),
+        ]);
+      } catch (error) {
+        usage = {
+          provider: source.provider,
+          label: source.label,
+          status: "unavailable",
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      } finally {
+        clearTimeout(timer);
+      }
+      this.#cached.set(source.provider, { at: now, usage });
+      return usage;
+    })().finally(() => this.#reading.delete(source.provider));
+    this.#reading.set(source.provider, read);
+    return read;
   }
 }

@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { connectedCore } from "./mipi.ts";
 import { describe, expect, it, vi } from "vitest";
+import { ProviderLimits } from "../src/agent/limits.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
 import {
   DeliverScheduledInstruction,
@@ -213,6 +214,7 @@ describe("scheduled instructions", () => {
         instruction: "Check the oven",
         runAt: expect.any(Number),
         recurrence,
+        previousRequestId: "schedule:recurring",
       });
       expect(next.runAt).toBeGreaterThanOrEqual(now + 59_000);
       expect(next.runAt).toBeLessThanOrEqual(Date.now() + 60_000);
@@ -361,6 +363,63 @@ describe("scheduled instructions", () => {
       }
     }
   });
+
+  it.each([3, 4])(
+    "keeps held legacy deliveries on cadence when the reset is %i minutes after the missed slot",
+    async (minutes) => {
+      const minute = 60_000;
+      const due = Date.UTC(2026, 10, 24, 18);
+      const now = due + 1;
+      const resetAt = due + minutes * minute;
+      const registry = createRegistry();
+      registry.install(connectedCore());
+      registry.install(defineExtension({ name: "schedule", tasks: [DeliverScheduledInstruction] }));
+      const harness = await Harness.open(
+        new MemoryStorage(),
+        { models: createModels(), registry, now: () => now, onWake: () => {} },
+        context,
+      );
+      try {
+        const root = await harness.root(context);
+        const ids = await root.commit(async (tx) => {
+          (await tx.doc(ProviderLimits)).entries.faux = { label: "OpenCode Go", at: now, resetAt };
+          const deliveries = [
+            { id: "schedule:once" },
+            {
+              id: "schedule:repeat",
+              recurrence: { cadence: { unit: "minute" as const, interval: 2 }, timezone: "UTC" },
+            },
+          ];
+          return Promise.all(
+            deliveries.map((delivery) =>
+              tx.createTask(
+                DeliverScheduledInstruction,
+                { ...delivery, conversationId: root.id, instruction: "Check the oven", runAt: due },
+                { ownership: { kind: "conversation" }, background: true },
+              ),
+            ),
+          );
+        }, context);
+        harness.resume();
+        await Promise.all(ids.map((id) => harness.waitForTask(id, context)));
+        const successors = (await harness.inspect(context)).tasks.map(({ record }) => record.input);
+        expect(successors).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: `schedule:once~${resetAt}`, runAt: resetAt }),
+            expect.objectContaining({
+              id: `schedule:repeat~${due + 4 * minute}`,
+              runAt: due + 4 * minute,
+            }),
+          ]),
+        );
+        expect(
+          (await root.context(context)).messages.filter(({ role }) => role === "user"),
+        ).toEqual([]);
+      } finally {
+        await harness.close(context);
+      }
+    },
+  );
 
   it("cleans up an active delivery when submission fails unexpectedly", async () => {
     const registry = createRegistry();

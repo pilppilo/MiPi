@@ -1,10 +1,10 @@
 import { type ConversationId, defineDoc, defineTask } from "../../../agent/pi/durable.ts";
 import { formatScheduledInstruction } from "../../../protocol.ts";
 import { connectorsOf } from "../../../agent/connectors.ts";
-import { holdNow, tellHeld } from "../../../agent/gates.ts";
+import { heldUntil, holdNow, tellHeld } from "../../../agent/gates.ts";
 import { AgentSettings } from "../../../agent/settings.ts";
 import { localTime } from "../../../agent/stamp.ts";
-import { afterNextChicagoMidnight } from "../../../lib/cap-day.ts";
+import { isTransientModelFailure, TRANSIENT_REMINDER_COOLDOWN_MS } from "../../../agent/limits.ts";
 
 export type ScheduleCadence = {
   readonly unit: "minute" | "hour" | "day" | "week" | "month";
@@ -25,6 +25,8 @@ export type ScheduledInstruction = {
   /** Unix timestamp in milliseconds. */
   readonly runAt: number;
   readonly recurrence?: ScheduleRecurrence;
+  /** The legacy delivery that created this recurring successor. */
+  readonly previousRequestId?: string;
 };
 
 type DeliveryState = { phase: "wait" } | { phase: "mark" } | { phase: "deliver" };
@@ -206,6 +208,7 @@ export const ScheduleDeliveries = defineDoc<{
     recurrence?: ScheduleRecurrence;
     successor?: ScheduledInstruction;
   }>;
+  transientFailures?: Array<{ requestId: string; until: number }>;
 }>({
   kind: "app.schedule-deliveries",
   version: 1,
@@ -240,10 +243,9 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
       }, context);
     },
     deliver: async (task, runtime, context) => {
-      // M9: paused or over the spend cap, the delivery is held as reminders are. This task's checkpoint has no time of
-      // its own to wait for, so a successor carries it instead: a repeating schedule's next time, or a one-time one's
-      // next look past Chicago midnight. This occurrence is not delivered. One already submitted (a restart in the
-      // middle of this phase) is never held: it went out.
+      // A hold creates a successor because the checkpoint has no deadline. One-time deliveries wait until the hold
+      // ends. Repeats skip held occurrences and keep their cadence. A delivery already submitted before a restart
+      // has already gone out.
       const now = runtime.now();
       let held = false;
       await runtime.commit(async (tx) => {
@@ -252,16 +254,41 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
         ) {
           return undefined;
         }
+        const { conversationId, previousRequestId, recurrence } = task.input;
         const hold = await holdNow(tx, now);
-        if (hold === undefined) return undefined;
+        let runAt: number | undefined;
+        if (hold !== undefined) {
+          // A pause tells nothing. This older kind has no destination of its own.
+          await tellHeld(tx, connectorsOf(runtime.registry).delivery, hold, undefined, now);
+          const until = await heldUntil(tx, hold, now);
+          runAt =
+            recurrence === undefined
+              ? until
+              : nextRecurrenceRunAt(
+                  task.input.runAt,
+                  recurrence,
+                  hold === "paused" ? now : Math.max(now, until - 1),
+                );
+        } else if (recurrence !== undefined && previousRequestId !== undefined) {
+          const previous = await tx.submissionByRequest(conversationId, previousRequestId);
+          if (previous?.status === "queued" || previous?.status === "placed") {
+            runAt = nextRecurrenceRunAt(task.input.runAt, recurrence, now);
+          } else if (previous !== undefined && isTransientModelFailure(previous)) {
+            const deliveries = await tx.doc(ScheduleDeliveries);
+            const known = deliveries.transientFailures?.find(
+              ({ requestId }) => requestId === previousRequestId,
+            );
+            const until = known?.until ?? now + TRANSIENT_REMINDER_COOLDOWN_MS;
+            if (known === undefined) {
+              rememberTransientFailure(deliveries, previousRequestId, until);
+            }
+            if (task.input.runAt < until) {
+              runAt = nextRecurrenceRunAt(task.input.runAt, recurrence, Math.max(now, until - 1));
+            }
+          }
+        }
+        if (runAt === undefined) return undefined;
         held = true;
-        // At the spend cap, today's one notice, as for reminders; a pause tells nothing. This older kind has no
-        // destination of its own, so the notice goes wherever delivery says the owner is.
-        await tellHeld(tx, connectorsOf(runtime.registry).delivery, hold, undefined, now);
-        const runAt =
-          task.input.recurrence === undefined
-            ? afterNextChicagoMidnight(now)
-            : nextRecurrenceRunAt(task.input.runAt, task.input.recurrence, now);
         await tx.createTask(DeliverScheduledInstruction, heldSuccessor(task.input, runAt), {
           ownership: { kind: "conversation" },
           conversationId: task.input.conversationId,
@@ -290,7 +317,33 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
             },
             context,
           );
-          await submission.wait(context);
+          const settled = await submission.wait(context);
+          const recurrence = task.input.recurrence;
+          if (recurrence !== undefined && isTransientModelFailure(settled)) {
+            const settledAt = runtime.now();
+            await runtime.commit(async (tx) => {
+              const deliveries = await tx.doc(ScheduleDeliveries);
+              const source = deliveries.active.find(
+                ({ scheduleId }) => scheduleId === task.input.id,
+              );
+              if (source === undefined) return undefined;
+              const until = settledAt + TRANSIENT_REMINDER_COOLDOWN_MS;
+              rememberTransientFailure(deliveries, task.input.id, until);
+              if (source.successor !== undefined) return undefined;
+              const at = nextRecurrenceRunAt(task.input.runAt, recurrence, until - 1);
+              const successor = {
+                ...heldSuccessor(task.input, at),
+                previousRequestId: task.input.id,
+              };
+              await tx.createTask(DeliverScheduledInstruction, successor, {
+                ownership: { kind: "conversation" },
+                conversationId: task.input.conversationId,
+                background: true,
+              });
+              source.successor = successor;
+              return undefined;
+            }, context);
+          }
         } else {
           runtime.report(
             new Error(
@@ -329,6 +382,9 @@ export function heldSuccessor(input: ScheduledInstruction, runAt: number): Sched
     conversationId: input.conversationId,
     instruction: input.instruction,
     runAt,
+    ...(input.previousRequestId === undefined
+      ? {}
+      : { previousRequestId: input.previousRequestId }),
     ...(input.recurrence === undefined
       ? {}
       : {
@@ -341,6 +397,16 @@ export function heldSuccessor(input: ScheduledInstruction, runAt: number): Sched
           },
         }),
   };
+}
+
+function rememberTransientFailure(
+  deliveries: { transientFailures?: Array<{ requestId: string; until: number }> },
+  requestId: string,
+  until: number,
+): void {
+  const failures = deliveries.transientFailures ?? [];
+  if (failures.some((entry) => entry.requestId === requestId)) return;
+  deliveries.transientFailures = [...failures, { requestId, until }].slice(-100);
 }
 
 const removeDelivery = (

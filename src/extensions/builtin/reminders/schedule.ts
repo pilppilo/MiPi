@@ -90,6 +90,9 @@ function copyScheduledInstruction(scheduled: ScheduledInstruction): ScheduledIns
     conversationId: scheduled.conversationId,
     instruction: scheduled.instruction,
     runAt: scheduled.runAt,
+    ...(scheduled.previousRequestId === undefined
+      ? {}
+      : { previousRequestId: scheduled.previousRequestId }),
     ...(scheduled.recurrence === undefined
       ? {}
       : {
@@ -251,6 +254,7 @@ export const scheduleTool: ToolRegistration = {
           instruction: source.instruction,
           runAt: nextRecurrenceRunAt(source.runAt, sourceRecurrence, now),
           recurrence: sourceRecurrence,
+          previousRequestId: source.scheduleId,
         };
         source.successor = scheduled;
         await tx.createTask(DeliverScheduledInstruction, scheduled, {

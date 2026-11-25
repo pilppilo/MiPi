@@ -281,6 +281,23 @@ describe("the readout", () => {
       "Today: about $2.00 (MiPi's estimate at list prices; no daily cap).",
       "Scheduled runs: 0 of 50 rounds.",
     ]);
+    expect(
+      usageText(
+        {
+          ...base,
+          held: "provider-limit",
+          limits: [
+            {
+              provider: "opencode-go",
+              label: "OpenCode Go",
+              resetAt: NOON,
+              text: "Provider limit",
+            },
+          ],
+        },
+        "America/Chicago",
+      ),
+    ).toMatch(/^OpenCode Go: limit reached, resets .*12:00 CST\.$/m);
     expect(usageText({ ...base, cap: 1, held: "spend-cap" }, undefined)).toContain(
       "Over the spend cap: scheduled runs and background work wait until tomorrow.",
     );

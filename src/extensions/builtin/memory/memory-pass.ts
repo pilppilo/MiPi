@@ -40,7 +40,8 @@ import {
 import {
   GATE_DOC_KINDS,
   heldAsMeasured,
-  heldAsMeasuredNow,
+  backgroundHoldNow,
+  heldUntil,
   measureToday,
   runsOff,
   runsOffNow,
@@ -330,7 +331,8 @@ export async function planPass(
   // Paused (`MIPI_PAUSED`): as above. Over the spend cap: the range waits for Chicago midnight (M9).
   const hold = await heldAsMeasured(tx, now);
   if (hold === "paused") return { kind: "skip", reason: "paused" };
-  if (hold === "spend-cap") return wait(afterNextChicagoMidnight(now), "spend cap");
+  if (hold !== undefined)
+    return wait(await heldUntil(tx, hold, now), hold === "spend-cap" ? "spend cap" : hold);
   // Today's passes used: the range waits for Chicago midnight, so the alarm doesn't come straight back for it.
   const day = chicagoDay(now);
   const used = state.cap?.day === day ? state.cap.count : 0;
@@ -476,9 +478,9 @@ export class MemoryPassRuntime {
     if ((memory?.lessons.length ?? 0) >= MAX_LESSONS) return undefined;
     if (await runsOffNow(harness)) return undefined;
     // Paused: no wake until the agent starts again unpaused. Over the spend cap: nothing before Chicago midnight (M9).
-    const hold = await heldAsMeasuredNow(harness, this.#now());
-    if (hold === "paused") return undefined;
-    const notBefore = hold === "spend-cap" ? afterNextChicagoMidnight(this.#now()) : undefined;
+    const hold = await backgroundHoldNow(harness, this.#now());
+    if (hold.paused) return undefined;
+    const notBefore = hold.until;
     const state = (await harness.snapshot(MemoryPassDoc, context)) ?? { marks: {} };
     // Closed meanwhile (an export or restore began): no commit into a closing harness.
     if (this.#closed) return undefined;
@@ -577,6 +579,7 @@ export class MemoryPassRuntime {
   ): Promise<void> {
     const { harness, models } = this.#options;
     let lessons: string[] | undefined;
+    let planLimited = false;
     try {
       const call = await sideCall(harness, models, conversationId, {
         text: passRequest(plan.lessons, plan.lines),
@@ -584,6 +587,7 @@ export class MemoryPassRuntime {
       });
       if (call === undefined) throw new Error("The conversation's model is not available");
       const { model, reply } = call;
+      planLimited = call.planLimited;
       if (this.#closed) return;
       await harness.commit((tx) => recordUsage(tx, conversationId, model, reply.usage), context);
       const text = reply.content
@@ -591,7 +595,9 @@ export class MemoryPassRuntime {
         .join("");
       lessons = reply.stopReason === "stop" ? parsePassReply(text) : undefined;
       if (lessons === undefined) {
-        throw new Error(`The reply was not the lessons asked for (${reply.stopReason})`);
+        throw new Error(
+          reply.errorMessage ?? `The reply was not the lessons asked for (${reply.stopReason})`,
+        );
       }
     } catch (error) {
       if (this.#closed) return;
@@ -600,6 +606,16 @@ export class MemoryPassRuntime {
         const state = await tx.doc(MemoryPassDoc);
         const mark = markOf(state, conversationId);
         if ((mark?.entry ?? 0) !== plan.from) return;
+        if (planLimited) {
+          const now = this.#now();
+          const hold = await heldAsMeasured(tx, now);
+          setMark(state, conversationId, {
+            ...mark,
+            entry: plan.from,
+            notBefore: hold === undefined ? now : await heldUntil(tx, hold, now),
+          });
+          return;
+        }
         const failures = (mark?.failures ?? 0) + 1;
         // Given up after the last retry: the range is passed over, so it can't fail every day.
         setMark(

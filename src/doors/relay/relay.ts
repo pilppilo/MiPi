@@ -17,6 +17,8 @@ import {
 } from "../../agent/pi/durable.ts";
 import { boundConversation, ChannelBindings } from "../../agent/conversations.ts";
 import { isPaused } from "../../agent/gates.ts";
+import { settledLimit } from "../../agent/limits.ts";
+import type { Providers } from "../../agent/providers.ts";
 import { answerText } from "../../agent/proactive.ts";
 import type { ProfileName, Profiles } from "../../agent/profiles.ts";
 import { stampInput } from "../../agent/stamp.ts";
@@ -121,7 +123,12 @@ export const recentAdmissions = (admitted: readonly number[], now: number): numb
 export const retryAfterSeconds = (recent: readonly number[], now: number): number =>
   Math.max(1, Math.ceil(((recent[0] ?? now) + RELAY_HOUR_MS - now) / 1000));
 
-async function resultOf(tx: Tx, submissionId: SubmissionId): Promise<RelayResult> {
+async function resultOf(
+  tx: Tx,
+  submissionId: SubmissionId,
+  now: number,
+  providers?: Providers,
+): Promise<RelayResult> {
   const stored = await tx.submission(submissionId);
   const record = stored?.type === "input" ? stored : undefined;
   if (record === undefined) return { kind: "unanswered", reason: "its record is gone" };
@@ -131,8 +138,13 @@ async function resultOf(tx: Tx, submissionId: SubmissionId): Promise<RelayResult
       return { kind: "pending" };
     case "done":
       return { kind: "done", answer: answerText(await tx.entry(record.answer)) };
-    case "unanswered":
-      return { kind: "unanswered", reason: record.reason };
+    case "unanswered": {
+      const notice =
+        record.reason === "model_error" && typeof record.detail === "string"
+          ? await settledLimit(tx, providers, record.detail, now)
+          : undefined;
+      return { kind: "unanswered", reason: notice?.text ?? record.reason };
+    }
     default: {
       const _: never = record;
       throw new Error("Unknown submission status");
@@ -165,6 +177,7 @@ export async function openSubmissions(
 
 export interface RelayRuntimeOptions {
   readonly harness: Harness;
+  readonly providers?: Providers;
   readonly timeZone: string | undefined;
   readonly profile: ProfileName;
   /** The profile table, against the installed extensions' tools. */
@@ -315,11 +328,12 @@ export class RelayRuntime {
     if (!isRelayKey(key)) return { kind: "invalid", reason: "The key is not valid" };
     return this.#options.harness.commit(async (tx) => {
       const receipt = (await tx.doc(RelayDoc)).receipts.find((kept) => kept.key === key);
-      if (receipt !== undefined) return resultOf(tx, receipt.submissionId as SubmissionId);
+      const read = (id: SubmissionId) => resultOf(tx, id, this.#now(), this.#options.providers);
+      if (receipt !== undefined) return read(receipt.submissionId as SubmissionId);
       const bound = (await tx.doc(ChannelBindings, RELAY_BINDING, null)).conversationId;
       if (bound === undefined) return { kind: "not-found" };
       const existing = await tx.submissionByRequest(bound as ConversationId, relayRequest(key));
-      return existing === undefined ? { kind: "not-found" } : resultOf(tx, existing.id);
+      return existing === undefined ? { kind: "not-found" } : read(existing.id);
     }, context);
   }
 }

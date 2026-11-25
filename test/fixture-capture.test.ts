@@ -30,6 +30,7 @@ import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/extensions/builtin/mem
 import { ModelList } from "../src/agent/model-list.ts";
 import { goModelListSource } from "../src/extensions/optional/opencode-go/models.ts";
 import { Proactive } from "../src/agent/proactive.ts";
+import { ProviderLimits } from "../src/agent/limits.ts";
 import { Spend } from "../src/agent/spend.ts";
 import { RelayRuntime } from "../src/doors/relay/relay.ts";
 import { AgentSettings, withOwnHost } from "../src/agent/settings.ts";
@@ -169,6 +170,14 @@ async function seed(): Promise<void> {
         settings.timeZone = "America/Chicago";
         settings.ownHosts = withOwnHost(settings.ownHosts, "mipi-staging.example.workers.dev");
         (await tx.doc(Proactive)).limit = 50;
+        (await tx.doc(ProviderLimits)).entries = {
+          "opencode-go": {
+            label: "OpenCode Go",
+            at: clock.now - 60 * 60_000,
+            resetAt: clock.now - 1,
+            resetFrom: "usage",
+          },
+        };
         // The spend cap's day (M9): measured once, with a cap and the notices' days set.
         const spend = await tx.doc(Spend);
         Object.assign(spend, {

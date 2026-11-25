@@ -4,8 +4,8 @@
  * that one and it may cost what nobody agreed to), with the conversation's provider identity and no cache retention,
  * and its spend counts as the conversation's, in `pi.usage`, like Pi Durable's own requests.
  *
- * COD-194 adds the provider-limit check here, so every side call records a limit the same way.
  */
+import { observeSideResponse } from "./limits.ts";
 import type { AssistantMessage, MutableModels, Usage } from "./pi/ai.ts";
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import { type ConversationId, type Harness, ProviderDoc, UsageDoc } from "./pi/durable.ts";
@@ -72,7 +72,14 @@ export async function sideCall(
   models: MutableModels,
   conversationId: ConversationId,
   request: { readonly text: string; readonly maxTokens: number },
-): Promise<{ readonly model: SideCallModel; readonly reply: AssistantMessage } | undefined> {
+): Promise<
+  | {
+      readonly model: SideCallModel;
+      readonly reply: AssistantMessage;
+      readonly planLimited: boolean;
+    }
+  | undefined
+> {
   const conversation = await harness.conversation(conversationId, context);
   const ref = (await conversation?.agent(context))?.model;
   const model = ref === undefined ? undefined : models.getModel(ref.provider, ref.modelId);
@@ -93,5 +100,6 @@ export async function sideCall(
     },
     { maxTokens: request.maxTokens, cacheRetention: "none", sessionId },
   );
-  return { model, reply };
+  const planLimited = (await observeSideResponse(harness, reply)) !== undefined;
+  return { model, reply, planLimited };
 }

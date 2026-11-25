@@ -193,7 +193,13 @@ export interface UsageReadout {
   /** `MIPI_DAILY_SPEND_CAP`, dollars; unset: no cap. */
   readonly cap?: number;
   /** Why background work is held now: paused (`MIPI_PAUSED`) or the spend cap reached. */
-  readonly held?: "paused" | "spend-cap";
+  readonly held?: "paused" | "spend-cap" | "provider-limit";
+  readonly limits?: readonly {
+    readonly provider: string;
+    readonly label: string;
+    readonly resetAt?: number;
+    readonly text: string;
+  }[];
   /** Model rounds scheduled runs took today, of the run cap (`MIPI_DAILY_RUN_CAP`). */
   readonly runs: { readonly used: number; readonly cap: number };
   readonly providers: readonly ProviderUsage[];
@@ -435,7 +441,11 @@ export const parseUsageReadout = (value: unknown): UsageReadout => {
     typeof value.day !== "string" ||
     !isRecord(value.runs) ||
     !Array.isArray(value.providers) ||
-    (value.held !== undefined && value.held !== "paused" && value.held !== "spend-cap")
+    (value.limits !== undefined && !Array.isArray(value.limits)) ||
+    (value.held !== undefined &&
+      value.held !== "paused" &&
+      value.held !== "spend-cap" &&
+      value.held !== "provider-limit")
   ) {
     throw new Error("Usage readout is invalid");
   }
@@ -449,6 +459,28 @@ export const parseUsageReadout = (value: unknown): UsageReadout => {
       cap: finite(value.runs.cap, "usage runs cap"),
     },
     providers: value.providers.map(parseProviderUsage),
+    ...(value.limits === undefined
+      ? {}
+      : {
+          limits: value.limits.map((limit: unknown) => {
+            if (
+              !isRecord(limit) ||
+              typeof limit.provider !== "string" ||
+              typeof limit.label !== "string" ||
+              typeof limit.text !== "string"
+            ) {
+              throw new Error("Provider limit is invalid");
+            }
+            return {
+              provider: limit.provider,
+              label: limit.label,
+              text: limit.text,
+              ...(limit.resetAt === undefined
+                ? {}
+                : { resetAt: finite(limit.resetAt, "provider limit resetAt") }),
+            };
+          }),
+        }),
   };
 };
 

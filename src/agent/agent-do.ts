@@ -34,7 +34,8 @@ import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
-import { holdOf, measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
+import { measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
+import { bindLimitRecorder } from "./limits.ts";
 import { isPausedNow } from "./gates.ts";
 import { AnswerSettlement } from "./answers.ts";
 import { readUsage, usageText } from "./usage.ts";
@@ -647,15 +648,6 @@ export class MipiAgent extends DurableObject<Env> {
     }, BACKGROUND_CONTEXT);
   }
 
-  /** Why work nobody asked for right now (a title written by the model) may not start, with today's spend measured. */
-  #hold(): Promise<"paused" | "spend-cap" | undefined> {
-    const now = Date.now();
-    return this.#harness.commit(
-      async (tx) => holdOf(await measureSpend(tx, now), now),
-      BACKGROUND_CONTEXT,
-    );
-  }
-
   #readUsage(): Promise<UsageReadout> {
     return readUsage(this.#harness, this.#providerUsage, Date.now());
   }
@@ -696,6 +688,14 @@ export class MipiAgent extends DurableObject<Env> {
     let activity: WatchHandle<TaskGraph> | undefined;
     try {
       this.#harness = harness;
+      bindLimitRecorder(
+        composition.limitExtension,
+        harness,
+        composition.providers,
+        this.#providerUsage,
+        Date.now,
+        (error, provider) => reportError("Recording a provider limit failed", error, { provider }),
+      );
       // Tasks (scheduled deliveries) read the owner's time zone from the session, not from module state.
       const timeZone = ownerTimeZone(this.env.MIPI_TIMEZONE);
       await harness.commit(async (tx) => {
@@ -761,6 +761,7 @@ export class MipiAgent extends DurableObject<Env> {
       const answers = new AnswerSettlement({
         harness,
         connectors: composition.connectors,
+        providers: composition.providers,
         // Telegram sends what was queued now, rather than at the next alarm.
         onQueued: () => telegram.refresh(),
         onWakeChange: () =>
@@ -804,6 +805,7 @@ export class MipiAgent extends DurableObject<Env> {
       }
       this.#relay = new RelayRuntime({
         harness,
+        providers: composition.providers,
         timeZone: this.env.MIPI_TIMEZONE,
         profile: startingProfile("relay", profileOrDefault(this.env.MIPI_PROFILE)),
         profiles,
@@ -1397,9 +1399,6 @@ export class MipiAgent extends DurableObject<Env> {
     );
     await this.#broadcastSessionSnapshot();
     if (provisional === undefined) return;
-    // A title from the model is work nobody asked for: not while paused or over the spend cap (M9). The first
-    // message's words stay the title.
-    if ((await this.#hold()) !== undefined) return;
     void writeTitle(this.#harness, this.#models, conversationId, text, provisional, (error) =>
       reportError("Writing a conversation title failed", error, { conversationId }),
     ).then(async (changed) => {

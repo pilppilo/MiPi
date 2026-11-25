@@ -7,6 +7,8 @@ import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import type { Harness } from "./pi/durable.ts";
 import { runCap } from "./gates.ts";
 import { dollars, holdOf, measureSpend, Spend, spentToday } from "./spend.ts";
+import { activeLimits, limitText, ProviderLimits } from "./limits.ts";
+import { AgentSettings } from "./settings.ts";
 import { localTime } from "./stamp.ts";
 import type { ProviderUsageCache } from "./providers.ts";
 import { chicagoDay } from "../lib/cap-day.ts";
@@ -26,13 +28,23 @@ export async function readUsage(
   const day = chicagoDay(now);
   const own = await harness.commit(async (tx) => {
     const spend = options.fresh === false ? await tx.doc(Spend) : await measureSpend(tx, now);
-    const held = holdOf(spend, now);
+    const active = activeLimits(await tx.doc(ProviderLimits), now);
+    const zone = active.length === 0 ? undefined : (await tx.doc(AgentSettings)).timeZone;
+    const limits = active.map(({ provider, entry }) => ({
+      provider,
+      label: entry.label,
+      ...(entry.resetAt === undefined ? {} : { resetAt: entry.resetAt }),
+      text: limitText({ kind: "usage", label: entry.label }, entry, zone),
+    }));
+    const held: UsageReadout["held"] =
+      holdOf(spend, now) ?? (limits.length > 0 ? "provider-limit" : undefined);
     return {
       day,
       spent: spentToday(spend, now),
       ...(spend.limit === undefined ? {} : { cap: spend.limit }),
       ...(held === undefined ? {} : { held }),
       runs: await runCap(tx, now),
+      ...(limits.length === 0 ? {} : { limits }),
     };
   }, BACKGROUND_CONTEXT);
   return {
@@ -52,6 +64,11 @@ export function usageText(readout: UsageReadout, timeZone: string | undefined): 
   if (readout.held === "paused") lines.push("MiPi is paused (MIPI_PAUSED).");
   if (readout.held === "spend-cap") {
     lines.push("Over the spend cap: scheduled runs and background work wait until tomorrow.");
+  }
+  for (const limit of readout.limits ?? []) {
+    lines.push(
+      `${limit.label}: limit reached${limit.resetAt === undefined ? "" : `, resets ${localTime(limit.resetAt, timeZone)}`}.`,
+    );
   }
   for (const provider of readout.providers) {
     switch (provider.status) {

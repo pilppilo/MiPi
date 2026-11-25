@@ -13,6 +13,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it } from "vitest";
+import * as ai from "../src/agent/pi/ai.ts";
 import * as context from "../src/agent/pi/context.ts";
 import * as durable from "../src/agent/pi/durable.ts";
 import * as schema from "../src/agent/pi/schema.ts";
@@ -84,6 +85,9 @@ describe("Pi seam contract", () => {
       "assertValidOp",
     ]);
     expect(runtimeNames(schema)).toEqual(["int", "obj", "oneOf", "opt", "str"]);
+    expect(runtimeNames(ai)).toEqual(["isRetryableErrorText"]);
+    expect(ai.isRetryableErrorText("429 Too Many Requests")).toBe(true);
+    expect(ai.isRetryableErrorText("429 GoUsageLimitError")).toBe(false);
     expect(runtimeNames(context)).toEqual(["BACKGROUND_CONTEXT"]);
     expect(shared.BACKGROUND_CONTEXT).toBe(context.BACKGROUND_CONTEXT);
   });

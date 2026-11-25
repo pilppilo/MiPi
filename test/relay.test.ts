@@ -15,7 +15,10 @@ import { Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { ChannelBindings, ConversationMeta, profileOf } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { bindLimitRecorder } from "../src/agent/limits.ts";
+import { ProviderUsageCache } from "../src/agent/providers.ts";
+import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
+import { composeMipi } from "../src/agent/composition.ts";
 import { PROFILES } from "./mipi.ts";
 import {
   addRelayReceipt,
@@ -57,7 +60,7 @@ interface Relay {
 
 async function openRelay(
   responses: readonly FauxResponseStep[],
-  options: { readonly waitMs?: number } = {},
+  options: { readonly waitMs?: number; readonly planLimits?: boolean } = {},
 ): Promise<Relay> {
   const requests: Message[][] = [];
   const faux = fauxProvider();
@@ -69,14 +72,35 @@ async function openRelay(
   );
   const models = createModels();
   models.setProvider(faux.provider);
-  const harness = await Harness.open(
-    new MemoryStorage(),
-    createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
-    ctx,
-  );
+  const composition = composeMipi({
+    models,
+    model: { provider: "faux", modelId: "faux-1" },
+    ...(options.planLimits
+      ? {
+          extensions: [
+            {
+              name: "faux-limit",
+              tier: "optional",
+              providers: [{ provider: "faux", limit: { label: "OpenCode Go", parse: goLimit } }],
+            },
+          ],
+        }
+      : {}),
+  });
+  const harness = await Harness.open(new MemoryStorage(), composition.options, ctx);
   const clock = { now: Date.UTC(2026, 10, 23, 18, 0) };
+  if (options.planLimits) {
+    bindLimitRecorder(
+      composition.limitExtension,
+      harness,
+      composition.providers,
+      new ProviderUsageCache([]),
+      () => clock.now,
+    );
+  }
   const relay = new RelayRuntime({
     harness,
+    providers: composition.providers,
     timeZone: "America/Chicago",
     profile: "pidu",
     profiles: PROFILES,
@@ -311,6 +335,23 @@ describe("relay admission", () => {
         { kind: "done", answer: "Both" },
       ]);
       expect(agent.requests).toHaveLength(2);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("formats a plan limit without a reset on the admit wait and later polls", async () => {
+    const agent = await openRelay(
+      [fauxAssistantMessage([], { stopReason: "error", errorMessage: "429 GoUsageLimitError" })],
+      { planLimits: true },
+    );
+    try {
+      const result = {
+        kind: "unanswered",
+        reason: "OpenCode Go's usage limit is reached; /usage shows its windows.",
+      };
+      expect(await agent.relay.admit("plan-limit", "hello?")).toEqual(result);
+      expect(await agent.relay.result("plan-limit")).toEqual(result);
     } finally {
       await agent.close();
     }

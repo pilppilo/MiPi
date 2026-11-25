@@ -18,6 +18,10 @@ import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/stora
 import { describe, expect, it } from "vitest";
 import { ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
 import { composeMipi } from "../src/agent/composition.ts";
+import { bindLimitRecorder } from "../src/agent/limits.ts";
+import { ProviderUsageCache } from "../src/agent/providers.ts";
+import { BUILT_IN_EXTENSIONS } from "../src/extensions/builtins.ts";
+import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
 import { AnswerSettlement } from "../src/agent/answers.ts";
 import { earliestWake } from "../src/agent/wake-sources.ts";
 import { PROFILES } from "./mipi.ts";
@@ -71,6 +75,7 @@ interface Agent {
 
 interface AgentOptions {
   readonly responses?: readonly FauxResponseStep[];
+  readonly planResetAt?: number;
   readonly send?: SendBehaviour;
   readonly modelIds?: () => Promise<string[]>;
   readonly onSubmitted?: (conversationId: number, text: string) => Promise<void>;
@@ -100,8 +105,44 @@ async function openAgent(
   faux.setResponses([...(options.responses ?? [])]);
   const models = createModels();
   models.setProvider(faux.provider);
-  const composition = composeMipi({ models, model: { provider: "faux", modelId: "faux-1" } });
+  const composition = composeMipi({
+    models,
+    model: { provider: "faux", modelId: "faux-1" },
+    ...(options.planResetAt === undefined
+      ? {}
+      : {
+          extensions: [
+            ...BUILT_IN_EXTENSIONS,
+            {
+              name: "faux-limit",
+              tier: "optional",
+              providers: [{ provider: "faux", limit: { label: "OpenCode Go", parse: goLimit } }],
+            },
+          ],
+        }),
+  });
   const harness = await Harness.open(await storage(), composition.options, ctx);
+  const resetsAt = options.planResetAt;
+  if (resetsAt !== undefined) {
+    bindLimitRecorder(
+      composition.limitExtension,
+      harness,
+      composition.providers,
+      new ProviderUsageCache([
+        {
+          provider: "faux",
+          label: "OpenCode Go",
+          read: async () => ({
+            provider: "faux",
+            label: "OpenCode Go",
+            status: "ok",
+            windows: [{ name: "monthly", limited: true, percent: 100, resetsAt }],
+          }),
+        },
+      ]),
+      () => clock.now,
+    );
+  }
   const sent: Sent[] = [];
   /** What this agent's channel reported: `settle()` fails on anything but a refused send. */
   const reports: string[] = [];
@@ -138,6 +179,7 @@ async function openAgent(
   const answers = new AnswerSettlement({
     harness,
     connectors: composition.connectors,
+    providers: composition.providers,
     onQueued: () => channel.refresh(),
     onWakeChange: () => {},
     report: (message, error) => {
@@ -343,6 +385,37 @@ describe("Telegram admission", () => {
         agent = await agent.restart();
         await agent.settle();
         expect(agent.sent).toEqual([{ chatId: CHAT, text: "Recovered" }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("recovers a plan-limit notice with its reset time after a restart", () =>
+    inObject(async (storage) => {
+      const planResetAt = clock.now + 60 * 60_000;
+      let agent = await openAgent(storage, {
+        planResetAt,
+        responses: [
+          fauxAssistantMessage([], { stopReason: "error", errorMessage: "429 GoUsageLimitError" }),
+        ],
+      });
+      try {
+        await agent.channel.admit(text(1, "Hi"));
+        agent.answers.close();
+        await endWindow(agent);
+        agent.channel.close();
+        await agent.harness.waitForIdle(ctx);
+        expect((await outbox(agent.harness)).replies).toEqual([]);
+        agent = await agent.restart({ planResetAt });
+        await agent.settle();
+        expect(agent.sent).toEqual([
+          {
+            chatId: CHAT,
+            text: expect.stringMatching(
+              /^OpenCode Go's usage limit is reached; it resets at .+\.$/,
+            ),
+          },
+        ]);
       } finally {
         await agent.close();
       }

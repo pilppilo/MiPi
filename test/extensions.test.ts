@@ -62,6 +62,7 @@ describe("resolveExtensions", () => {
     expect(resolved.selection.map(({ name }) => name)).toEqual([
       "chat",
       "proactive",
+      "provider-limits",
       "history-search",
       "reminders",
       "web-fetch",
@@ -312,7 +313,7 @@ describe("switching an extension off for one conversation", () => {
     const { harness, composition, create } = await openRecording();
     try {
       const conversation = await create();
-      for (const name of ["chat", "proactive", "conversation-search"]) {
+      for (const name of ["chat", "proactive", "provider-limits", "conversation-search"]) {
         await expect(
           harness.commit((tx) => composition.switchOff(tx, conversation.id, [name]), ctx),
         ).rejects.toThrow(/can't be switched off/);
