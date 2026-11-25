@@ -12,7 +12,12 @@ import {
   fauxText,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
+import type { Message, SystemMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { createBot } from "../src/agent/bots.ts";
+import { createHarnessOptions } from "../src/agent/composition.ts";
+import { CORE_PREAMBLE } from "../src/agent/harness.ts";
+import { PROFILES } from "./mipi.ts";
 import * as ai from "../src/agent/pi/ai.ts";
 import * as context from "../src/agent/pi/context.ts";
 import * as durable from "../src/agent/pi/durable.ts";
@@ -475,6 +480,99 @@ describe("Pi seam contract", () => {
         expect(stopped.status).toBe(TERMINATED_STATUS);
         expect((await harness.snapshot(Seen, ctx))?.rounds).toHaveLength(2);
         expect(faux.state.callCount).toBe(3);
+      } finally {
+        await harness.close(ctx);
+      }
+    });
+    await evictDurableObject(stub);
+  });
+
+  it("renders a bot's purpose as one section after the rest, and keeps its prefix turn to turn (COD-197)", async () => {
+    const stub = env.AGENT.getByName("contract-purpose");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      // Every request, as the model got it: two for each bot, a turn apart.
+      const requests: Array<{ readonly system: SystemMessage[]; readonly messages: Message[] }> =
+        [];
+      const faux = fauxProvider();
+      faux.setResponses(
+        Array.from({ length: 4 }, (_, index) => (request: { messages: Message[] }) => {
+          const messages = structuredClone(request.messages);
+          requests.push({
+            system: messages.filter(
+              (message): message is SystemMessage => message.role === "system",
+            ),
+            messages,
+          });
+          return fauxAssistantMessage([fauxText(`Reply ${index + 1}`)]);
+        }),
+      );
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const harness = await durable.Harness.open(
+        await openDurableObjectSqliteStorage(state.storage),
+        createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+        ctx,
+      );
+      try {
+        const make = (name: string, purpose?: string) =>
+          harness.commit(
+            (tx) =>
+              createBot(
+                tx,
+                {
+                  kind: "bot",
+                  name,
+                  ...(purpose === undefined ? {} : { purpose }),
+                  profile: "default",
+                  createdBy: "owner",
+                },
+                PROFILES,
+              ),
+            ctx,
+          );
+        const ask = async (id: durable.ConversationId, content: string) => {
+          const conversation = (await harness.conversation(id, ctx))!;
+          await (await conversation.submit({ type: "input", content }, ctx)).wait(ctx);
+          await harness.waitForIdle(ctx);
+        };
+        const plain = await make("Plain");
+        const groceries = await make("Groceries", "Keep the shopping list.");
+        await ask(plain, "Hello");
+        await ask(groceries, "Hello");
+        await ask(groceries, "Add milk");
+        await ask(plain, "Still there?");
+
+        const sectionsOf = (system: readonly SystemMessage[]) =>
+          Object.assign({}, ...system.map(({ sections }) => sections ?? {})) as Record<
+            string,
+            string | null
+          >;
+        const [plainFirst, groceriesFirst, groceriesSecond, plainSecond] = requests;
+        const plainSections = sectionsOf(plainFirst!.system);
+        const purposeSections = sectionsOf(groceriesFirst!.system);
+        // The preamble and its stamp rule, exactly as every conversation has them.
+        expect(plainSections["preamble"]).toBe(CORE_PREAMBLE);
+        expect(plainSections["instructions"]).toBeUndefined();
+        // The purpose is one more section, after every extension section; the rest is the plain bot's, unchanged.
+        expect(Object.keys(purposeSections)).toEqual([
+          ...Object.keys(plainSections),
+          "instructions",
+        ]);
+        // Pi Durable renders it between tags of its own: pinned, so an upgrade that changes the form fails here.
+        expect(purposeSections).toEqual({
+          ...plainSections,
+          instructions: "<instructions>\nKeep the shopping list.\n</instructions>",
+        });
+        // Turn to turn, each bot's earlier request is an exact prefix of its next: the purpose is part of the
+        // cacheable prefix, not a message that moves.
+        for (const [first, second] of [
+          [plainFirst!, plainSecond!],
+          [groceriesFirst!, groceriesSecond!],
+        ] as const) {
+          expect(second.messages.slice(0, first.messages.length)).toEqual(first.messages);
+          expect(second.system).toEqual(first.system);
+        }
       } finally {
         await harness.close(ctx);
       }
