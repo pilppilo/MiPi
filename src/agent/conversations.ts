@@ -177,6 +177,7 @@ export async function boundConversation(
   const binding = await tx.doc(ChannelBindings, key, null);
   const bots = await tx.doc(Bots);
   if (options.rebind !== true) {
+    // pi-ledger L10: an unmarked binding moves to MiPi here, on its first read, since bindings can't be listed.
     const target = binding.bots === true ? binding.conversationId : bots.mainId;
     const current = target ?? binding.conversationId;
     if (current !== undefined) {
@@ -198,6 +199,17 @@ export async function boundConversation(
   binding.conversationId = id;
   if (bots.mainId !== undefined) binding.bots = true;
   return id;
+}
+
+/** Binds a channel key to a conversation, marked as chosen since bots: it stays there across restarts (`/bot`). */
+export async function bindChannel(
+  tx: Tx,
+  key: string,
+  conversationId: ConversationId,
+): Promise<void> {
+  const binding = await tx.doc(ChannelBindings, key, null);
+  binding.conversationId = conversationId;
+  binding.bots = true;
 }
 
 /**

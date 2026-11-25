@@ -130,3 +130,41 @@ export async function renameBot(tx: Tx, id: ConversationId, name: string): Promi
   bots.names = names;
   meta.name = trimmed;
 }
+
+/** A live bot, as a door lists it. */
+export type LiveBot = {
+  readonly id: ConversationId;
+  readonly kind: "main" | "bot";
+  readonly name: string;
+  readonly purpose?: string;
+};
+
+/**
+ * The live bots in the web list's order: MiPi first, then the purpose bots as they were made. From the name index, so
+ * it never scans conversations; an archived bot (COD-198) drops out.
+ */
+export async function liveBots(tx: Tx): Promise<LiveBot[]> {
+  const bots = await tx.doc(Bots);
+  const ids = [...new Set(Object.values(bots.names ?? {}))].sort((left, right) => left - right);
+  const found: LiveBot[] = [];
+  for (const id of ids) {
+    const meta = await tx.doc(ConversationMeta, id as ConversationId);
+    if (meta.archivedAt !== undefined || meta.name === undefined) continue;
+    if (meta.kind !== "main" && meta.kind !== "bot") continue;
+    found.push({
+      id: id as ConversationId,
+      kind: meta.kind,
+      name: meta.name,
+      ...(meta.purpose === undefined ? {} : { purpose: meta.purpose }),
+    });
+  }
+  return found.sort((left, right) =>
+    left.kind === right.kind ? left.id - right.id : left.kind === "main" ? -1 : 1,
+  );
+}
+
+/** The live bot named `name` (the whole name, ignoring case and surrounding space), if there is one. */
+export async function findLiveBot(tx: Tx, name: string): Promise<LiveBot | undefined> {
+  const id = (await tx.doc(Bots)).names?.[botNameKey(name)];
+  return id === undefined ? undefined : (await liveBots(tx)).find((bot) => bot.id === id);
+}

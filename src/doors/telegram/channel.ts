@@ -21,7 +21,9 @@ import {
   type SubmissionId,
   type Tx,
 } from "../../agent/pi/durable.ts";
+import { findLiveBot, type LiveBot, liveBots } from "../../agent/bots.ts";
 import {
+  bindChannel,
   boundConversation,
   ConversationMeta,
   profileOf,
@@ -91,11 +93,31 @@ export const telegramBinding = (chatId: number): string => `tg:${chatId}`;
 
 export const HELP_TEXT =
   "Hi, I'm MiPi. Send me a message and I'll answer here.\n\n" +
+  "/bot lists the bots; /bot <name> switches this chat to one\n" +
   "/new starts a new conversation\n" +
   "/profile shows or sets the tool profile\n" +
   "/model shows or sets the model\n" +
   "/usage shows today's spend and usage\n" +
   "/version shows the version";
+
+/** A purpose as `/bot` lists it: its first line, cut at 80 characters. */
+const shortPurpose = (purpose: string): string => {
+  const line = purpose.split("\n")[0]!.trim();
+  return [...line].length > 80 ? `${[...line].slice(0, 79).join("")}…` : line;
+};
+
+/** `/bot`'s answer: the live bots in the web list's order, this chat's marked, and how to switch. */
+export function botList(bots: readonly LiveBot[], current: number): string {
+  const lines = bots.map(
+    (bot) =>
+      `${bot.id === current ? "▸" : "•"} ${bot.name}` +
+      (bot.purpose === undefined ? "" : ` — ${shortPurpose(bot.purpose)}`),
+  );
+  const here = bots.some((bot) => bot.id === current)
+    ? []
+    : ["", "This chat is on a conversation of its own (from /new)."];
+  return ["Bots:", ...lines, ...here, "", "Switch with /bot <name>."].join("\n");
+}
 
 export const NON_TEXT_HINT = "I can only read text messages for now.";
 
@@ -568,59 +590,39 @@ export class TelegramChannelRuntime {
         await this.#reply(updateId, chatId, () => text);
         return;
       }
-      case "new": {
-        // Messages waiting in the chat's window belong to the old conversation: they go there first, in the same
-        // commit, before the chat is rebound (the admit before any table write, the new conversation's included).
-        const window = await this.#commit(async (tx) => {
-          const open = (await tx.doc(TelegramChannel)).staged?.find(
-            (staged) => staged.chatId === chatId,
-          );
-          return open === undefined
-            ? undefined
-            : {
-                conversationId: open.conversationId as ConversationId,
-                firstUpdateId: open.firstUpdateId,
-              };
-        });
-        const previous =
-          window === undefined ? undefined : await this.#conversation(window.conversationId);
-        if (window !== undefined) await this.#options.armAlarm();
-        let submitted: { id: SubmissionId; text: string } | undefined;
-        await this.#reply(updateId, chatId, async (tx) => {
-          const state = await tx.doc(TelegramChannel);
-          const open = state.staged?.find(
-            (staged) => staged.chatId === chatId && staged.firstUpdateId === window?.firstUpdateId,
-          );
-          // Paused: the waiting messages are refused, not sent to the old conversation.
-          const refused = open !== undefined && (await this.#refuseWhilePaused(tx, state, open));
-          if (!refused && open !== undefined && previous !== undefined) {
-            const messages = open.messages.map((staged) => ({ ...staged }));
-            const id = await this.#submitBatch(tx, previous, open.firstUpdateId, messages);
-            this.#unstage(state, open.chatId, open.firstUpdateId);
-            if (id !== undefined) {
-              state.inputs.push({
-                updateId: open.firstUpdateId,
-                chatId,
-                conversationId: previous.id,
-                submissionId: id,
-              });
-              submitted = { id, text: batchText(messages) };
-            }
-          }
-          await boundConversation(
-            tx,
-            telegramBinding(chatId),
-            this.#options.profile,
-            this.#options.profiles,
-            { rebind: true },
-          );
-          return "Started a new conversation.";
-        });
-        if (submitted !== undefined && previous !== undefined) {
-          await this.#submitted(previous.id, submitted);
-        }
+      case "new":
+        await this.#switchChat(updateId, chatId, async () => ({
+          reply: "Started a new conversation.",
+          rebind: async (tx) => {
+            await boundConversation(
+              tx,
+              telegramBinding(chatId),
+              this.#options.profile,
+              this.#options.profiles,
+              { rebind: true },
+            );
+          },
+        }));
         return;
-      }
+      case "bot":
+        await this.#switchChat(updateId, chatId, async (tx) => {
+          const bots = await liveBots(tx);
+          if (argument.length === 0) return { reply: botList(bots, conversationId) };
+          const bot = await findLiveBot(tx, argument);
+          if (bot === undefined) {
+            return {
+              reply: `There's no bot named ${argument}.\n\n${botList(bots, conversationId)}`,
+            };
+          }
+          // Already here: nothing to send on or rebind.
+          if (bot.id === conversationId)
+            return { reply: `This chat is already talking to ${bot.name}.` };
+          return {
+            reply: `Now talking to ${bot.name}.`,
+            rebind: (tx) => bindChannel(tx, telegramBinding(chatId), bot.id),
+          };
+        });
+        return;
       case "profile":
         await this.#reply(updateId, chatId, async (tx) => {
           if (argument.length === 0) {
@@ -682,6 +684,67 @@ export class TelegramChannelRuntime {
    * One command's effect and reply in one commit, with its receipt: a replay finds the receipt and does nothing, and a
    * crash before the commit leaves nothing done, so Telegram's retry runs it again.
    */
+  /**
+   * Moves this chat to another conversation (`/new`, `/bot <name>`), once `choose` says where; or only answers, when
+   * it names nowhere to go. Messages waiting in the chat's window belong to the conversation they were written to: they
+   * go there first, in the same commit, before the chat is rebound (the admit before any table write, the new
+   * conversation's included). `choose` only reads.
+   */
+  async #switchChat(
+    updateId: number,
+    chatId: number,
+    choose: (tx: Tx) => Promise<{
+      readonly reply: string;
+      readonly rebind?: (tx: Tx) => Promise<void>;
+    }>,
+  ): Promise<void> {
+    const window = await this.#commit(async (tx) => {
+      const open = (await tx.doc(TelegramChannel)).staged?.find(
+        (staged) => staged.chatId === chatId,
+      );
+      return open === undefined
+        ? undefined
+        : {
+            conversationId: open.conversationId as ConversationId,
+            firstUpdateId: open.firstUpdateId,
+          };
+    });
+    const previous =
+      window === undefined ? undefined : await this.#conversation(window.conversationId);
+    if (window !== undefined) await this.#options.armAlarm();
+    let submitted: { id: SubmissionId; text: string } | undefined;
+    await this.#reply(updateId, chatId, async (tx) => {
+      const choice = await choose(tx);
+      const rebind = choice.rebind;
+      if (rebind === undefined) return choice.reply;
+      const state = await tx.doc(TelegramChannel);
+      const open = state.staged?.find(
+        (staged) => staged.chatId === chatId && staged.firstUpdateId === window?.firstUpdateId,
+      );
+      // Paused: the waiting messages are refused, not sent to the old conversation.
+      const refused = open !== undefined && (await this.#refuseWhilePaused(tx, state, open));
+      if (!refused && open !== undefined && previous !== undefined) {
+        const messages = open.messages.map((staged) => ({ ...staged }));
+        const id = await this.#submitBatch(tx, previous, open.firstUpdateId, messages);
+        this.#unstage(state, open.chatId, open.firstUpdateId);
+        if (id !== undefined) {
+          state.inputs.push({
+            updateId: open.firstUpdateId,
+            chatId,
+            conversationId: previous.id,
+            submissionId: id,
+          });
+          submitted = { id, text: batchText(messages) };
+        }
+      }
+      await rebind(tx);
+      return choice.reply;
+    });
+    if (submitted !== undefined && previous !== undefined) {
+      await this.#submitted(previous.id, submitted);
+    }
+  }
+
   async #reply(
     updateId: number,
     chatId: number,

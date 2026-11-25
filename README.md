@@ -27,13 +27,15 @@ All three lead to the same assistant, with the same memory and reminders.
 
 ### Telegram commands
 
-| Command    | What it does                            |
-| ---------- | --------------------------------------- |
-| `/new`     | Start a new conversation                |
-| `/model`   | Show or change the model MiPi uses      |
-| `/profile` | Show or change which tools MiPi may use |
-| `/usage`   | Show today's spend and usage            |
-| `/version` | Show which version of MiPi is running   |
+| Command       | What it does                                         |
+| ------------- | ---------------------------------------------------- |
+| `/bot`        | List your bots                                       |
+| `/bot <name>` | Talk to that bot in this chat, until you switch back |
+| `/new`        | Start a new conversation                             |
+| `/model`      | Show or change the model this chat's bot uses        |
+| `/profile`    | Show or change which tools this chat's bot may use   |
+| `/usage`      | Show today's spend and usage                         |
+| `/version`    | Show which version of MiPi is running                |
 
 ## Your data and privacy
 

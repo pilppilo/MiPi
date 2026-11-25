@@ -4,7 +4,15 @@
  * everything else is acknowledged and dropped.
  */
 
-export const TELEGRAM_COMMANDS = ["start", "new", "version", "profile", "model", "usage"] as const;
+export const TELEGRAM_COMMANDS = [
+  "start",
+  "new",
+  "bot",
+  "version",
+  "profile",
+  "model",
+  "usage",
+] as const;
 export type TelegramCommandName = (typeof TELEGRAM_COMMANDS)[number];
 
 /** An update the agent admits. `chatId` is a private chat, so it is also the sender's user id. */

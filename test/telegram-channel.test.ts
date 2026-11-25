@@ -16,7 +16,10 @@ import {
 import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
-import { ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
+import { createBot, renameBot } from "../src/agent/bots.ts";
+import { Bots, ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
+import { stampInput } from "../src/agent/stamp.ts";
+import { webRequest } from "../src/doors/web/index.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import { bindLimitRecorder } from "../src/agent/limits.ts";
 import { ProviderUsageCache } from "../src/agent/providers.ts";
@@ -449,6 +452,159 @@ describe("Telegram admission", () => {
         await agent.channel.admit({ kind: "non-text", updateId: 3, chatId: CHAT });
         await agent.settle();
         expect(agent.sent).toEqual([{ chatId: CHAT, text: NON_TEXT_HINT }]);
+      } finally {
+        await agent.close();
+      }
+    }));
+});
+
+/** Makes a purpose bot as the web's `bot.create` does. */
+const makeBot = (harness: Harness, name: string, purpose: string): Promise<number> =>
+  harness.commit(
+    (tx) =>
+      createBot(
+        tx,
+        { kind: "bot", name, purpose, profile: "default", createdBy: "owner" },
+        PROFILES,
+      ),
+    ctx,
+  );
+
+const mainId = async (harness: Harness): Promise<number> =>
+  (await harness.commit(async (tx) => (await tx.doc(Bots)).mainId, ctx))!;
+
+describe("Telegram /bot (COD-197)", () => {
+  it("lists the bots, switches by whole name in any case, refuses others, and keeps the choice across a restart", () =>
+    inObject(async (storage) => {
+      let agent = await openAgent(storage, { responses: answers("Hi from the digest") });
+      try {
+        const main = await mainId(agent.harness);
+        const digest = await makeBot(
+          agent.harness,
+          "Daily Digest",
+          "Summarise my day.\nKeep it short.",
+        );
+        await agent.channel.admit(command(1, "bot"));
+        await agent.channel.admit(command(2, "bot", "nope"));
+        await agent.channel.admit(command(3, "bot", "daily DIGEST"));
+        await agent.channel.admit(command(4, "bot", "Daily Digest"));
+        await agent.settle();
+        const [listed, unknown, switched, already] = agent.sent.map(({ text: sent }) => sent);
+        const list =
+          "Bots:\n▸ MiPi\n• Daily Digest — Summarise my day.\n\nSwitch with /bot <name>.";
+        expect(listed).toBe(list);
+        expect(unknown).toBe(`There's no bot named nope.\n\n${list}`);
+        expect(switched).toBe("Now talking to Daily Digest.");
+        expect(already).toBe("This chat is already talking to Daily Digest.");
+        expect(await agent.harness.snapshot(ChannelBindings, `tg:${CHAT}`, ctx)).toEqual({
+          conversationId: digest,
+          bots: true,
+        });
+
+        // A restart keeps the choice: the next message goes to the digest, not MiPi.
+        agent = await agent.restart({ responses: answers("Hi from the digest") });
+        await agent.channel.admit(text(5, "hello"));
+        await agent.settle();
+        expect(await userTexts(agent.harness, digest)).toEqual(["hello"]);
+        expect(await userTexts(agent.harness, main)).toEqual([]);
+
+        // A renamed MiPi answers to its new name; a chat on a conversation of its own (/new) says so.
+        await agent.harness.commit((tx) => renameBot(tx, main as never, "Mia"), ctx);
+        await agent.channel.admit(command(6, "new"));
+        await agent.channel.admit(command(7, "bot"));
+        await agent.channel.admit(command(8, "bot", "mia"));
+        await agent.settle();
+        const [, , ownChat, toMia] = agent.sent.slice(-4).map(({ text: sent }) => sent);
+        expect(ownChat).toBe(
+          "Bots:\n• Mia\n• Daily Digest — Summarise my day.\n\n" +
+            "This chat is on a conversation of its own (from /new).\n\nSwitch with /bot <name>.",
+        );
+        expect(toMia).toBe("Now talking to Mia.");
+        expect(await boundId(agent.harness)).toBe(main);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("sends a waiting window to the bot it was written to before switching", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, { responses: answers("MiPi here", "Groceries here") });
+      try {
+        const main = await mainId(agent.harness);
+        const groceries = await makeBot(agent.harness, "Groceries", "Keep the shopping list.");
+        await agent.channel.admit(text(1, "for mipi"));
+        await agent.channel.admit(command(2, "bot", "groceries"));
+        expect((await channelState(agent.harness)).staged ?? []).toEqual([]);
+        await agent.channel.admit(text(3, "for groceries"));
+        await agent.settle();
+        expect(await userTexts(agent.harness, main)).toEqual(["for mipi"]);
+        expect(await userTexts(agent.harness, groceries)).toEqual(["for groceries"]);
+        expect(agent.sent.map(({ text: sent }) => sent).sort()).toEqual(
+          ["Groceries here", "MiPi here", "Now talking to Groceries."].sort(),
+        );
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("shares one conversation between Telegram and the web on the same bot, both ways", () =>
+    inObject(async (storage) => {
+      // What the model got on each turn.
+      const seen: string[][] = [];
+      const reply =
+        (text: string): FauxResponseStep =>
+        (context) => {
+          seen.push(
+            context.messages.flatMap((message) =>
+              message.role === "user" && typeof message.content === "string"
+                ? [message.content]
+                : [],
+            ),
+          );
+          return fauxAssistantMessage([fauxText(text)]);
+        };
+      const agent = await openAgent(storage, {
+        responses: [reply("Milk noted."), reply("Eggs noted."), reply("Milk and eggs.")],
+      });
+      try {
+        const groceries = await makeBot(agent.harness, "Groceries", "Keep the shopping list.");
+        await agent.channel.admit(command(1, "bot", "Groceries"));
+        // Telegram, then the web (as the web door's `prompt.submit` does), then Telegram again.
+        await agent.channel.admit(text(2, "Add milk"));
+        await agent.settle();
+        const conversation = (await agent.harness.conversation(groceries as never, ctx))!;
+        await (
+          await conversation.submit(
+            {
+              type: "input",
+              content: stampInput("jerome", "Add eggs", "America/Chicago", clock.now),
+              requestId: webRequest("web-eggs"),
+            },
+            ctx,
+          )
+        ).wait(ctx);
+        await agent.settle();
+        await agent.channel.admit(text(3, "What's on the list?"));
+        await agent.settle();
+
+        // One transcript, both doors' messages in order, as the web shows it.
+        expect(await userTexts(agent.harness, groceries)).toEqual([
+          "Add milk",
+          "Add eggs",
+          "What's on the list?",
+        ]);
+        // The last Telegram turn saw the web's message: one context.
+        expect(seen.at(-1)!.map((content) => content.replace(/^\[[^\]]*\]\n/, ""))).toEqual([
+          "Add milk",
+          "Add eggs",
+          "What's on the list?",
+        ]);
+        // Telegram got the answers to its own messages; the web's answer stayed in the transcript.
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
+          "Now talking to Groceries.",
+          "Milk noted.",
+          "Milk and eggs.",
+        ]);
       } finally {
         await agent.close();
       }
