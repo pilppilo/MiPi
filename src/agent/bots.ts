@@ -111,3 +111,22 @@ export async function ensureBots(
     return true;
   }, BACKGROUND_CONTEXT);
 }
+
+/** Renames a bot (MiPi included) in the caller's commit: its name and the index, never its purpose or prompt. */
+export async function renameBot(tx: Tx, id: ConversationId, name: string): Promise<void> {
+  const meta = await tx.doc(ConversationMeta, id);
+  if (meta.kind === undefined || meta.archivedAt !== undefined) {
+    throw new Error("Only a bot can be renamed.");
+  }
+  const bots = await tx.doc(Bots);
+  const refused = botNameRefusal(bots, name, id);
+  if (refused !== undefined) throw new Error(refused);
+  const trimmed = name.trim();
+  const names = { ...bots.names };
+  if (meta.name !== undefined && names[botNameKey(meta.name)] === id) {
+    delete names[botNameKey(meta.name)];
+  }
+  names[botNameKey(trimmed)] = id;
+  bots.names = names;
+  meta.name = trimmed;
+}

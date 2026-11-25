@@ -9,8 +9,11 @@ import {
   useState,
 } from "react";
 import {
+  MAX_BOT_NAME_CHARACTERS,
+  MAX_BOT_PURPOSE_CHARACTERS,
   MAX_PROMPT_CHARACTERS,
   type ConversationSummary,
+  mainConversationId,
   type Options,
   ROOT_CONVERSATION_ID,
   type UsageReadout,
@@ -127,6 +130,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [draft, setDraft] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [newBotOpen, setNewBotOpen] = useState(false);
   const activityToggleRef = useRef<HTMLButtonElement | null>(null);
   const activityCloseRef = useRef<HTMLButtonElement | null>(null);
   const conversationHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -238,8 +242,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   useEffect(() => () => stopAutoScroll(), []);
 
   const openLinkedConversation = useEffectEvent(() => {
-    const conversationId = conversationIdFromLocation() ?? ROOT_CONVERSATION_ID;
+    const conversationId =
+      conversationIdFromLocation() ?? mainConversationId(session.conversations);
     if (
+      conversationId !== undefined &&
       conversationId !== activeConversationId &&
       session.conversations.some(({ id }) => id === conversationId)
     ) {
@@ -351,10 +357,30 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
         <nav className="conversation-navigation" aria-labelledby="conversations-heading">
           <div className="conversation-navigation-header">
             <h2 id="conversations-heading">Conversations</h2>
-            <button type="button" onClick={session.createConversation} disabled={!isConnected}>
-              New conversation
+            <button
+              type="button"
+              aria-expanded={newBotOpen}
+              aria-controls="new-bot-form"
+              onClick={() => setNewBotOpen((open) => !open)}
+              disabled={!isConnected}
+            >
+              New bot
             </button>
           </div>
+          {newBotOpen ? (
+            <NewBotForm
+              profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
+                ({ id }) => id,
+              )}
+              disabled={!isConnected}
+              onCreate={async (bot) => {
+                const created = await session.createBot(bot);
+                if (created) setNewBotOpen(false);
+                return created;
+              }}
+              onCancel={() => setNewBotOpen(false)}
+            />
+          ) : null}
           <div className="conversation-list" tabIndex={0}>
             {session.conversations.length === 0 ? (
               <p className="conversation-list-empty">No conversations yet.</p>
@@ -562,6 +588,82 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
         }}
       />
     </div>
+  );
+}
+
+/** "New bot": a name and a purpose (its fixed instructions), on a profile the pickers offer (COD-197). */
+function NewBotForm({
+  profiles,
+  disabled,
+  onCreate,
+  onCancel,
+}: {
+  readonly profiles: readonly string[];
+  readonly disabled: boolean;
+  readonly onCreate: (bot: {
+    readonly name: string;
+    readonly purpose: string;
+    readonly profile: string;
+  }) => Promise<boolean>;
+  readonly onCancel: () => void;
+}) {
+  const [name, setName] = useState("");
+  const [purpose, setPurpose] = useState("");
+  const [profile, setProfile] = useState(profiles[0] ?? "default");
+  const [creating, setCreating] = useState(false);
+  const ready = name.trim().length > 0 && purpose.trim().length > 0 && !creating && !disabled;
+  const submit = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!ready) return;
+    setCreating(true);
+    try {
+      await onCreate({ name: name.trim(), purpose: purpose.trim(), profile });
+    } finally {
+      setCreating(false);
+    }
+  };
+  return (
+    <form id="new-bot-form" className="new-bot-form" aria-label="New bot" onSubmit={submit}>
+      <label>
+        Name
+        <input
+          value={name}
+          maxLength={MAX_BOT_NAME_CHARACTERS}
+          onChange={(event) => setName(event.currentTarget.value)}
+          required
+          autoFocus
+        />
+      </label>
+      <label>
+        Purpose
+        <textarea
+          value={purpose}
+          maxLength={MAX_BOT_PURPOSE_CHARACTERS}
+          rows={3}
+          placeholder="What this bot is for. It can't be changed later."
+          onChange={(event) => setPurpose(event.currentTarget.value)}
+          required
+        />
+      </label>
+      <label>
+        Profile
+        <select value={profile} onChange={(event) => setProfile(event.currentTarget.value)}>
+          {profiles.map((id) => (
+            <option key={id} value={id}>
+              {id}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="new-bot-actions">
+        <button type="submit" disabled={!ready}>
+          {creating ? "Creating…" : "Create"}
+        </button>
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
 

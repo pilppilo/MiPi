@@ -2,7 +2,14 @@ import { describe, expect, it } from "vitest";
 import { CommandOutbox } from "../src/client/command-outbox.ts";
 import { KeyedSerialQueue } from "../src/lib/serial.ts";
 
-const create = (requestId: string) => ({ type: "conversation.create", requestId }) as const;
+const create = (requestId: string) =>
+  ({
+    type: "bot.create",
+    requestId,
+    name: "Groceries",
+    purpose: "Keep the list.",
+    profile: "default",
+  }) as const;
 
 const prompt = (requestId: string) =>
   ({ type: "prompt.submit", requestId, conversationId: 1, content: "Hello" }) as const;
@@ -26,7 +33,7 @@ describe("multiplayer command recovery", () => {
     expect(
       outbox.acknowledge({
         type: "command.result",
-        command: "conversation.create",
+        command: "bot.create",
         requestId: "create-1",
         ok: true,
         conversationId: 2,

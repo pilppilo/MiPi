@@ -22,6 +22,7 @@ import {
   boundConversation,
   clearBotFields,
   ConversationMeta,
+  type ConversationMetaState,
   profileOf,
   setProfile,
   startingProfile,
@@ -30,7 +31,7 @@ import {
 import { ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
 import { isProfileName, PICKABLE_PROFILES, profileOrDefault } from "./profiles.ts";
-import { ensureBots } from "./bots.ts";
+import { createBot, ensureBots, renameBot } from "./bots.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
@@ -114,8 +115,14 @@ const CONVERSATION_PAGE_SIZE = 100;
 
 type ConversationCommandReceipt =
   | {
+      // Stored by builds before bots, which had `conversation.create`: kept so their receipts still read.
       command: "conversation.create";
       conversationId: ConversationId;
+    }
+  | {
+      command: "bot.create";
+      conversationId: ConversationId;
+      name: string;
     }
   | {
       command: "conversation.fork";
@@ -196,11 +203,18 @@ const reciprocateClose = (socket: WebSocket, code: number, reason: string): void
 
 const conversationSummary = (
   conversation: ConversationRecord,
-  meta?: { readonly title?: string; readonly profile?: string },
+  meta?: Readonly<ConversationMetaState> & { readonly profile?: string },
+  latestEntryId?: number,
 ): ConversationSummary => ({
   id: conversation.id,
   ...(meta?.title === undefined ? {} : { title: meta.title }),
   ...(meta?.profile === undefined ? {} : { profile: meta.profile }),
+  ...(meta?.kind === undefined ? {} : { kind: meta.kind }),
+  ...(meta?.name === undefined ? {} : { name: meta.name }),
+  ...(meta?.purpose === undefined ? {} : { purpose: meta.purpose }),
+  ...(meta?.bot === undefined ? {} : { bot: meta.bot }),
+  ...(meta?.archivedAt === undefined ? {} : { archivedAt: meta.archivedAt }),
+  ...(latestEntryId === undefined ? {} : { latestEntryId }),
   ...(conversation.parent === undefined
     ? {}
     : {
@@ -751,12 +765,21 @@ export class MipiAgent extends DurableObject<Env> {
         advance: (publication) => {
           // Each source decides which commits make it look again (`WakeSource.observes`).
           this.#wakeSources.observe(publication);
+          // Each conversation's newest stored entry: the list's unread dots, from the commit itself (COD-197).
+          const heads = new Map<number, number>();
           for (const change of publication.changes) {
+            if (change.type === "entry") {
+              const { conversationId, id } = change.value;
+              heads.set(conversationId, Math.max(id, heads.get(conversationId) ?? 0));
+            }
             if (change.type !== "conversation" || change.value.owner === undefined) continue;
             this.#broadcast({
               type: "conversation.created",
               conversation: conversationSummary(change.value),
             });
+          }
+          for (const [conversationId, latestEntryId] of heads) {
+            this.#broadcast({ type: "conversation.head", conversationId, latestEntryId });
           }
         },
         end: () => {},
@@ -1202,24 +1225,36 @@ export class MipiAgent extends DurableObject<Env> {
         });
         return;
       }
-      case "conversation.create": {
+      case "bot.create": {
+        const profile = command.profile;
+        // A purpose bot runs on a profile the pickers offer: never MiPi's `main`, nor the relay's old `pidu`.
+        if (!isProfileName(profile) || !PICKABLE_PROFILES.includes(profile)) {
+          throw new Error(
+            `${profile} can't be a bot's profile: pick one of ${PICKABLE_PROFILES.join(", ")}`,
+          );
+        }
         const conversationId = await this.#harness.commit(async (tx) => {
           const doc = await tx.doc(ConversationCommandReceipts, command.requestId, null);
           const existing = doc.receipt;
           if (existing !== undefined) {
-            if (existing.command !== command.type) {
-              throw new Error(
-                `Request ${command.requestId} was already used for ${existing.command}`,
-              );
+            if (existing.command !== command.type || existing.name !== command.name) {
+              throw new Error(`Request ${command.requestId} was already used for another command`);
             }
             return existing.conversationId;
           }
-          const conversation = await tx.createConversation({ ownership: { kind: "ownerless" } });
-          doc.receipt = {
-            command: command.type,
-            conversationId: conversation.id,
-          };
-          return conversation.id;
+          const id = await createBot(
+            tx,
+            {
+              kind: "bot",
+              name: command.name,
+              purpose: command.purpose,
+              profile,
+              createdBy: "owner",
+            },
+            this.#composition!.profiles,
+          );
+          doc.receipt = { command: command.type, conversationId: id, name: command.name };
+          return id;
         }, BACKGROUND_CONTEXT);
         await this.#watchConversation(socket, conversationId);
         await this.#broadcastSessionSnapshot();
@@ -1229,6 +1264,24 @@ export class MipiAgent extends DurableObject<Env> {
           requestId: command.requestId,
           ok: true,
           conversationId,
+        });
+        return;
+      }
+      case "bot.rename": {
+        const conversation = await this.#requireConversation(
+          command.conversationId as ConversationId,
+        );
+        await this.#harness.commit(
+          (tx) => renameBot(tx, conversation.id, command.name),
+          BACKGROUND_CONTEXT,
+        );
+        await this.#broadcastSessionSnapshot();
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId: conversation.id,
         });
         return;
       }
@@ -1413,10 +1466,11 @@ export class MipiAgent extends DurableObject<Env> {
           }
           const meta = await tx.doc(ConversationMeta, record.id);
           conversations.push(
-            conversationSummary(record, {
-              ...(meta.title === undefined ? {} : { title: meta.title }),
-              profile: profileOf(meta),
-            }),
+            conversationSummary(
+              record,
+              { ...meta, profile: profileOf(meta) },
+              await tx.latestEntryId(record.id),
+            ),
           );
         }
         cursor = page.next;

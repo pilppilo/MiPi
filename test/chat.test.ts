@@ -426,11 +426,14 @@ describe("chat application", () => {
     socket.close(1000, "test complete");
   });
 
-  it("acknowledges and deduplicates retried conversation creation", async () => {
+  it("acknowledges and deduplicates retried bot creation", async () => {
     const sessionId = "retried-conversation-create";
     const command = JSON.stringify({
-      type: "conversation.create",
+      type: "bot.create",
       requestId: "stable-create-request",
+      name: "Groceries",
+      purpose: "Keep the shopping list.",
+      profile: "default",
     });
     const response = await openSession(sessionSocketUrl(sessionId, "Alice", "create-retry-client"));
     const socket = response.webSocket!;
@@ -486,8 +489,17 @@ describe("chat application", () => {
       type: string;
       session: { conversations: Array<{ id: number }> };
     }>();
-    // MiPi and the new conversation.
-    expect(snapshot.session.conversations).toHaveLength(2);
+    // MiPi and the new bot, which survived the restart as a bot (COD-197).
+    expect(snapshot.session.conversations).toEqual([
+      expect.objectContaining({ kind: "main", name: "MiPi", profile: "main" }),
+      {
+        id: first.conversationId,
+        kind: "bot",
+        name: "Groceries",
+        purpose: "Keep the shopping list.",
+        profile: "default",
+      },
+    ]);
     for (let index = 0; index < 2; index++) await reopenedMessages.next();
 
     reopenedSocket.send(command);
@@ -500,6 +512,96 @@ describe("chat application", () => {
       conversationId: first.conversationId,
     });
     reopenedSocket.close(1000, "test complete");
+  });
+
+  it("names bots uniquely, keeps main and pidu off them, renames them, and tells the list of new entries", async () => {
+    const sessionId = "bots-over-websocket";
+    const main = await configureOfflineModel(sessionId);
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "bots-client"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Result = {
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      conversationId?: number;
+      error?: { message: string };
+    };
+    const run = async (command: Record<string, unknown>): Promise<Result> => {
+      const requestId = crypto.randomUUID();
+      socket.send(JSON.stringify({ ...command, requestId }));
+      return messages.nextMatching<Result>(
+        (message) => message.type === "command.result" && message.requestId === requestId,
+      );
+    };
+    const bot = (name: string, profile = "default") =>
+      run({ type: "bot.create", name, purpose: "Keep the shopping list.", profile });
+
+    const created = await bot("Groceries");
+    expect(created.ok).toBe(true);
+    // Names are unique ignoring case, MiPi's included; `main` and `pidu` are no bot's profile.
+    expect(await bot("  groceries ")).toMatchObject({
+      ok: false,
+      error: { message: "There is already a bot named groceries." },
+    });
+    expect(await bot("mipi")).toMatchObject({ ok: false });
+    for (const profile of ["main", "pidu"]) {
+      expect(await bot("Other", profile)).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining("can't be a bot's profile") },
+      });
+    }
+
+    // Renaming keeps the purpose and frees the old name.
+    expect(
+      await run({ type: "bot.rename", conversationId: created.conversationId, name: "Shopping" }),
+    ).toMatchObject({ ok: true });
+    expect((await bot("Groceries")).ok).toBe(true);
+    // MiPi can be renamed too; a chat from before bots can't.
+    const older = await configureOfflineModel(sessionId, "root");
+    expect(
+      await run({ type: "bot.rename", conversationId: older, name: "Old chat" }),
+    ).toMatchObject({ ok: false, error: { message: "Only a bot can be renamed." } });
+
+    // A new entry tells every list its conversation's newest entry, with no snapshot.
+    socket.send(
+      JSON.stringify({
+        type: "prompt.submit",
+        requestId: "head-prompt",
+        conversationId: main,
+        content: "Hello",
+      }),
+    );
+    const head = await messages.nextMatching<{
+      type: string;
+      conversationId?: number;
+      latestEntryId?: number;
+    }>((message) => message.type === "conversation.head" && message.conversationId === main);
+    expect(head.latestEntryId).toEqual(expect.any(Number));
+    socket.close(1000, "test complete");
+
+    // A new session's snapshot carries each bot's newest entry, and the rename.
+    const again = await openSession(sessionSocketUrl(sessionId, "Alice", "bots-client-2"));
+    const againSocket = again.webSocket!;
+    const againMessages = jsonMessages(againSocket);
+    againSocket.accept();
+    const snapshot = await againMessages.nextMatching<{
+      type: string;
+      session?: {
+        conversations: Array<{ id: number; name?: string; latestEntryId?: number }>;
+      };
+    }>((message) => message.type === "session.snapshot");
+    const conversations = snapshot.session!.conversations;
+    expect(conversations.find(({ id }) => id === main)?.latestEntryId).toBeGreaterThanOrEqual(
+      head.latestEntryId!,
+    );
+    expect(conversations.find(({ id }) => id === created.conversationId)).toMatchObject({
+      name: "Shopping",
+      purpose: "Keep the shopping list.",
+    });
+    againSocket.close(1000, "test complete");
   });
 
   it("always returns the owner's one session", async () => {
@@ -552,7 +654,7 @@ describe("chat application", () => {
     expect(session).toEqual({
       type: "session.snapshot",
       session: {
-        conversations: [{ id: expect.any(Number), profile: "main" }],
+        conversations: [{ id: expect.any(Number), kind: "main", name: "MiPi", profile: "main" }],
         activity: { tasks: {} },
       },
     });
@@ -591,7 +693,13 @@ describe("chat application", () => {
     await messages.skipConnectFrames();
 
     socket.send(
-      JSON.stringify({ type: "conversation.create", requestId: "create-before-eviction" }),
+      JSON.stringify({
+        type: "bot.create",
+        requestId: "create-before-eviction",
+        name: "Before eviction",
+        purpose: "Survive a restart.",
+        profile: "default",
+      }),
     );
     const created = await messages.nextMatching<{
       type: string;
@@ -803,6 +911,8 @@ describe("chat application", () => {
     expect(forkSummary).toEqual({
       id: forkId,
       parent: { conversationId: 1, at: entryId },
+      // A fork sees its parent's entries up to where it forked.
+      latestEntryId: entryId,
       // A fork keeps its parent's profile.
       profile: "default",
     });
