@@ -44,7 +44,7 @@ Run [`spike-probe.yml`](../.github/workflows/spike-probe.yml) manually to check 
 
 - [`heartbeat.yml`](../.github/workflows/heartbeat.yml) checks both deployed lanes daily at 14:17 UTC. It flags recent lost alarms, unhealthy agent state, and overdue schedules without a hold.
 - [`evals.yml`](../.github/workflows/evals.yml) checks proactive replies against OpenCode Go on Mondays at 15:17 UTC using staging credentials and mocked fetch results.
-- [`canary.yml`](../.github/workflows/canary.yml) exercises the latest Pi Durable release on Mondays at 16:17 UTC. It runs the upgrade, checks, and tests in the runner. If a candidate fails, it creates or updates one open GitHub issue for that version. Use **Run workflow** to check a specific version or leave the input blank to check npm's latest.
+- [`canary.yml`](../.github/workflows/canary.yml) exercises the latest Pi Durable release on Mondays at 16:17 UTC. It runs the upgrade, checks, and tests in the runner. If a candidate fails, it creates or updates one open GitHub issue for that version. Use **Run workflow** to check a specific version or leave the input blank to check npm's latest. A version that isn't published on npm stops the run before the upgrade and opens no issue.
 
 ## Upgrading Pi Durable
 

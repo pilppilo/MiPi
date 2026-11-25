@@ -9,10 +9,37 @@ type CanaryFailure = {
   readonly runUrl: string;
 };
 
-/** Read the registry only when the dispatcher did not supply a version. */
-export function resolveCanaryTarget(override: string | undefined, latest: () => string): string {
-  const version = override?.trim() || latest().trim();
+type CanaryRegistry = {
+  /** `npm view <package> version`: the latest tag. */
+  readonly latest: () => string;
+  /** `npm view <package> versions --json`: every published version. */
+  readonly published: () => string;
+};
+
+/** Read npm's published versions. npm prints a bare string when only one version exists. */
+export function parsePublishedVersions(json: string): readonly string[] {
+  const parsed: unknown = JSON.parse(json);
+  const versions = typeof parsed === "string" ? [parsed] : parsed;
+  if (!Array.isArray(versions) || !versions.every((v) => typeof v === "string")) {
+    throw new Error("npm returned an invalid list of Pi Durable versions.");
+  }
+  return versions;
+}
+
+/**
+ * Use the dispatcher's version if given, otherwise npm's latest tag. A manual version must
+ * already be published, so a typo stops here instead of failing the upgrade and opening an issue.
+ */
+export function resolveCanaryTarget(
+  override: string | undefined,
+  registry: CanaryRegistry,
+): string {
+  const manual = override?.trim();
+  const version = manual || registry.latest().trim();
   if (!isPiVersion(version)) throw new Error("Expected a Pi Durable SemVer version.");
+  if (manual && !parsePublishedVersions(registry.published()).includes(version)) {
+    throw new Error(`Pi Durable ${version} is not published on npm.`);
+  }
   return version;
 }
 

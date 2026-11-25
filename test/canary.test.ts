@@ -1,19 +1,46 @@
 import { describe, expect, it, vi } from "vitest";
-import { planCanaryReport, resolveCanaryTarget } from "../scripts/canary-report.ts";
+import {
+  parsePublishedVersions,
+  planCanaryReport,
+  resolveCanaryTarget,
+} from "../scripts/canary-report.ts";
 import { isPiVersion } from "../scripts/pi-version.ts";
 
 describe("Pi Durable canary target", () => {
-  it("uses an override without reading the registry", () => {
-    const latest = vi.fn(() => "1.7.0");
-    expect(resolveCanaryTarget(" 1.8.0-beta.2 ", latest)).toBe("1.8.0-beta.2");
-    expect(latest).not.toHaveBeenCalled();
+  const registry = (latest: string, published: unknown = ["1.6.0", "1.7.0", "1.8.0-beta.2"]) => ({
+    latest: vi.fn(() => latest),
+    published: vi.fn(() => JSON.stringify(published)),
   });
 
-  it("trims the registry result for absent or blank overrides", () => {
-    expect(resolveCanaryTarget(undefined, () => "1.7.0\n")).toBe("1.7.0");
-    expect(resolveCanaryTarget("  ", () => "1.7.0\n")).toBe("1.7.0");
-    expect(() => resolveCanaryTarget(undefined, () => "latest")).toThrow(/SemVer/);
-    expect(() => resolveCanaryTarget("^1.7.0", () => "1.7.0")).toThrow(/SemVer/);
+  it("uses a published override without reading the latest tag", () => {
+    const npm = registry("1.7.0");
+    expect(resolveCanaryTarget(" 1.8.0-beta.2 ", npm)).toBe("1.8.0-beta.2");
+    expect(npm.latest).not.toHaveBeenCalled();
+    expect(npm.published).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an override npm has never published, before any upgrade runs", () => {
+    expect(() => resolveCanaryTarget("9.9.9", registry("1.7.0"))).toThrow(
+      "Pi Durable 9.9.9 is not published on npm.",
+    );
+    // npm prints a bare string when a package has a single version.
+    expect(resolveCanaryTarget("1.6.0", registry("1.6.0", "1.6.0"))).toBe("1.6.0");
+    expect(() => resolveCanaryTarget("1.7.0", registry("1.6.0", "1.6.0"))).toThrow(/not published/);
+  });
+
+  it("rejects a malformed npm versions list", () => {
+    expect(() => parsePublishedVersions('{"error":"E404"}')).toThrow(/invalid list/);
+    expect(() => parsePublishedVersions("[1.6]")).toThrow(/invalid list/);
+    expect(parsePublishedVersions('["1.6.0","1.7.0"]')).toEqual(["1.6.0", "1.7.0"]);
+  });
+
+  it("trims the latest tag for absent or blank overrides without listing versions", () => {
+    const npm = registry("1.7.0\n");
+    expect(resolveCanaryTarget(undefined, npm)).toBe("1.7.0");
+    expect(resolveCanaryTarget("  ", npm)).toBe("1.7.0");
+    expect(npm.published).not.toHaveBeenCalled();
+    expect(() => resolveCanaryTarget(undefined, registry("latest"))).toThrow(/SemVer/);
+    expect(() => resolveCanaryTarget("^1.7.0", registry("1.7.0"))).toThrow(/SemVer/);
   });
 
   it("accepts exact SemVer and rejects ranges, tags, and invalid identifiers", () => {

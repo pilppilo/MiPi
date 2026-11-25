@@ -19,12 +19,16 @@ switch (mode) {
     if (current === undefined || !isPiVersion(current)) {
       throw new Error("Expected an exact Pi Durable version in package.json.");
     }
-    const target = resolveCanaryTarget(process.env.VERSION_OVERRIDE, () =>
-      execFileSync("npm", ["view", PI_DURABLE_PACKAGE, "version"], {
+    const npmView = (...args: string[]): string =>
+      execFileSync("npm", ["view", PI_DURABLE_PACKAGE, ...args], {
         encoding: "utf8",
         shell: process.platform === "win32",
-      }),
-    );
+      });
+    const target = resolveCanaryTarget(process.env.VERSION_OVERRIDE, {
+      latest: () => npmView("version"),
+      published: () => npmView("versions", "--json"),
+    });
+    console.log(`Pi Durable canary: ${current} → ${target}`);
     appendFileSync(requiredEnv("GITHUB_OUTPUT"), `current=${current}\ntarget=${target}\n`);
     break;
   }
@@ -44,27 +48,23 @@ switch (mode) {
       { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 },
     );
     const report = planCanaryReport(JSON.parse(list), { current, target, stage, runUrl });
+    // Print where the report went; utf8 keeps gh's stderr readable if a write fails.
+    const post = (path: string, payload: object): string =>
+      execFileSync("gh", ["api", "--method", "POST", path, "--input", "-", "--jq", ".html_url"], {
+        encoding: "utf8",
+        input: JSON.stringify(payload),
+      }).trim();
     switch (report.kind) {
-      case "create":
-        execFileSync("gh", ["api", "--method", "POST", endpoint, "--input", "-", "--silent"], {
-          input: JSON.stringify({ title: report.title, body: report.body }),
-        });
+      case "create": {
+        const url = post(endpoint, { title: report.title, body: report.body });
+        console.log(`Created ${url} for the ${stage} failure.`);
         break;
-      case "comment":
-        execFileSync(
-          "gh",
-          [
-            "api",
-            "--method",
-            "POST",
-            `${endpoint}/${report.issueNumber}/comments`,
-            "--input",
-            "-",
-            "--silent",
-          ],
-          { input: JSON.stringify({ body: report.body }) },
-        );
+      }
+      case "comment": {
+        const url = post(`${endpoint}/${report.issueNumber}/comments`, { body: report.body });
+        console.log(`Commented on #${report.issueNumber} for the ${stage} failure: ${url}`);
         break;
+      }
       default: {
         const _: never = report;
         throw new Error("Unknown canary report.");
