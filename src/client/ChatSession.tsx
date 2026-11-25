@@ -1,6 +1,7 @@
 import {
   type KeyboardEvent,
   type MouseEvent,
+  type ReactNode,
   type SubmitEvent,
   useEffect,
   useEffectEvent,
@@ -27,6 +28,7 @@ import {
   listedBots,
   loadLastRead,
   saveLastRead,
+  unreadByBot,
   unreadIds,
 } from "./bots-list.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
@@ -166,6 +168,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [submitting, setSubmitting] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [newBotOpen, setNewBotOpen] = useState(false);
+  const [newCobotUnder, setNewCobotUnder] = useState<number>();
+  const [renamingCobot, setRenamingCobot] = useState<number>();
   const activityToggleRef = useRef<HTMLButtonElement | null>(null);
   const activityCloseRef = useRef<HTMLButtonElement | null>(null);
   const conversationHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -185,7 +189,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const activeSummary = session.conversations.find(({ id }) => id === activeConversationId);
   const listed = listedBots(session.conversations);
   const activity = activityByBot(session.conversations, session.activity);
-  const unread = useUnread(sessionId, session.conversations, activeConversationId);
+  const ownUnread = useUnread(sessionId, session.conversations, activeConversationId);
+  const unread = unreadByBot(session.conversations, ownUnread);
   const activityCount = Object.keys(session.activity?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
   const canSubmit =
@@ -351,6 +356,38 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     }
   };
 
+  const renderConversationLink = (summary: ConversationSummary) => (
+    <a
+      href={`?conversation=${summary.id}`}
+      className={summary.kind === "main" ? "bot-link bot-link--main" : "bot-link"}
+      aria-current={summary.id === activeConversationId ? "page" : undefined}
+      onClick={(event) => followConversationLink(event, summary.id)}
+    >
+      <span className="bot-name">
+        {conversationLabel(summary)}
+        <BotDots activity={activity.get(summary.id)} unread={unread.has(summary.id)} />
+      </span>
+      {summary.kind !== "bot" || summary.purpose === undefined ? null : (
+        <span className="bot-purpose">{summary.purpose}</span>
+      )}
+    </a>
+  );
+
+  const renderChildren = (id: number): ReactNode => {
+    const children = listed.children.get(id);
+    if (children === undefined) return null;
+    return (
+      <ul className="bot-children">
+        {children.map((child) => (
+          <li key={child.id}>
+            {renderConversationLink(child)}
+            {renderChildren(child.id)}
+          </li>
+        ))}
+      </ul>
+    );
+  };
+
   const compactActivityLayout = (): boolean => window.matchMedia("(width < 75rem)").matches;
 
   const toggleActivity = (): void => {
@@ -427,20 +464,38 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 {[listed.main, ...listed.bots].map((bot) =>
                   bot === undefined ? null : (
                     <li key={bot.id}>
-                      <a
-                        href={`?conversation=${bot.id}`}
-                        className={bot.kind === "main" ? "bot-link bot-link--main" : "bot-link"}
-                        aria-current={bot.id === activeConversationId ? "page" : undefined}
-                        onClick={(event) => followConversationLink(event, bot.id)}
+                      {renderConversationLink(bot)}
+                      {listed.children.has(bot.id) ? (
+                        <details className="bot-tree" open>
+                          <summary>Side chats and subagents</summary>
+                          {renderChildren(bot.id)}
+                        </details>
+                      ) : null}
+                      <button
+                        className="text-button bot-tree"
+                        type="button"
+                        aria-expanded={newCobotUnder === bot.id}
+                        onClick={() =>
+                          setNewCobotUnder(newCobotUnder === bot.id ? undefined : bot.id)
+                        }
+                        disabled={!isConnected}
                       >
-                        <span className="bot-name">
-                          {conversationLabel(bot)}
-                          <BotDots activity={activity.get(bot.id)} unread={unread.has(bot.id)} />
-                        </span>
-                        {bot.purpose === undefined ? null : (
-                          <span className="bot-purpose">{bot.purpose}</span>
-                        )}
-                      </a>
+                        New cobot
+                      </button>
+                      {newCobotUnder === bot.id ? (
+                        <CobotNameForm
+                          label="New cobot"
+                          disabled={!isConnected}
+                          onSave={async (name) => {
+                            if (await session.createCobot(bot.id, name)) {
+                              setNewCobotUnder((current) =>
+                                current === bot.id ? undefined : current,
+                              );
+                            }
+                          }}
+                          onCancel={() => setNewCobotUnder(undefined)}
+                        />
+                      ) : null}
                     </li>
                   ),
                 )}
@@ -467,6 +522,29 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               Activity <span aria-hidden="true">{activityCount}</span>
             </button>
           </div>
+          {activeSummary?.kind !== "cobot" ||
+          activeSummary.archivedAt !== undefined ? null : renamingCobot === activeSummary.id ? (
+            <CobotNameForm
+              key={activeSummary.id}
+              label="Rename cobot"
+              name={activeSummary.name ?? ""}
+              disabled={!isConnected}
+              onSave={(name) => {
+                session.renameBot(activeSummary.id, name);
+                setRenamingCobot(undefined);
+              }}
+              onCancel={() => setRenamingCobot(undefined)}
+            />
+          ) : (
+            <button
+              className="text-button"
+              type="button"
+              disabled={!isConnected}
+              onClick={() => setRenamingCobot(activeSummary.id)}
+            >
+              Rename cobot
+            </button>
+          )}
           {activeConversation === undefined ? null : (
             <ConversationDetails
               conversation={activeConversation}
@@ -657,6 +735,56 @@ function BotDots({
         <span className="bot-dot bot-dot--unread" role="img" aria-label="Unread" title="Unread" />
       ) : null}
     </>
+  );
+}
+
+function CobotNameForm({
+  label,
+  name,
+  disabled,
+  onSave,
+  onCancel,
+}: {
+  readonly label: string;
+  readonly name?: string;
+  readonly disabled: boolean;
+  readonly onSave: (name: string) => void | Promise<void>;
+  readonly onCancel: () => void;
+}) {
+  const [draft, setDraft] = useState(name ?? "");
+  const [saving, setSaving] = useState(false);
+  const ready = !disabled && !saving && draft.trim().length > 0;
+  const submit = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!ready) return;
+    setSaving(true);
+    try {
+      await onSave(draft.trim());
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form className="new-bot-form" aria-label={label} onSubmit={submit}>
+      <label>
+        Name
+        <input
+          value={draft}
+          maxLength={MAX_BOT_NAME_CHARACTERS}
+          onChange={(event) => setDraft(event.currentTarget.value)}
+          required
+          autoFocus
+        />
+      </label>
+      <div className="new-bot-actions">
+        <button type="submit" disabled={!ready}>
+          {name === undefined ? "Create" : "Save"}
+        </button>
+        <button type="button" onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </form>
   );
 }
 

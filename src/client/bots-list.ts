@@ -5,18 +5,60 @@
 import type { TaskGraph, TaskGraphNode } from "../agent/pi/shared.ts";
 import type { ConversationSummary } from "../protocol.ts";
 
-/** MiPi first, then the live purpose bots in the order they were made. Archived chats and subagents aren't listed. */
+/** MiPi first, then purpose bots. Cobots and subagents hang from their parent conversations. */
 export function listedBots(conversations: readonly ConversationSummary[]): {
   readonly main: ConversationSummary | undefined;
   readonly bots: readonly ConversationSummary[];
+  readonly children: ReadonlyMap<number, readonly ConversationSummary[]>;
 } {
-  const live = conversations.filter(
-    ({ archivedAt, owner }) => archivedAt === undefined && owner === undefined,
-  );
+  const live = conversations.filter(({ archivedAt }) => archivedAt === undefined);
+  const roots = live.filter(({ owner }) => owner === undefined);
+  const children = new Map<number, ConversationSummary[]>();
+  for (const summary of live) {
+    const parent = sidebarParent(summary);
+    if (parent === undefined) continue;
+    const siblings = children.get(parent);
+    if (siblings === undefined) children.set(parent, [summary]);
+    else siblings.push(summary);
+  }
   return {
-    main: live.find(({ kind }) => kind === "main"),
-    bots: live.filter(({ kind }) => kind === "bot").sort((left, right) => left.id - right.id),
+    main: roots.find(({ kind }) => kind === "main"),
+    bots: roots.filter(({ kind }) => kind === "bot").sort((left, right) => left.id - right.id),
+    children,
   };
+}
+
+function sidebarParent(summary: ConversationSummary | undefined): number | undefined {
+  return summary?.owner?.conversationId ?? (summary?.kind === "cobot" ? summary.bot : undefined);
+}
+
+/** The row itself and each parent that should indicate its activity or unread entries. */
+function branchOf(
+  summaries: ReadonlyMap<number, ConversationSummary>,
+  id: number,
+): ReadonlySet<number> {
+  const branch = new Set([id]);
+  let parent = sidebarParent(summaries.get(id));
+  while (parent !== undefined) {
+    if (branch.has(parent)) return new Set([id]);
+    branch.add(parent);
+    parent = sidebarParent(summaries.get(parent));
+  }
+  return branch;
+}
+
+export function unreadByBot(
+  conversations: readonly ConversationSummary[],
+  unread: ReadonlySet<number>,
+): ReadonlySet<number> {
+  const summaries = new Map(conversations.map((summary) => [summary.id, summary]));
+  const result = new Set<number>();
+  for (const id of unread) {
+    const branch = branchOf(summaries, id);
+    if ([...branch].some((parent) => summaries.get(parent)?.archivedAt !== undefined)) continue;
+    for (const parent of branch) result.add(parent);
+  }
+  return result;
 }
 
 /** What a bot is doing: working (a task pending, running or finishing), or waiting on others. */
@@ -33,16 +75,6 @@ export function activityByBot(
 ): ReadonlyMap<number, BotActivity> {
   const summaries = new Map(conversations.map((summary) => [summary.id, summary]));
   const tasks = activity?.tasks ?? {};
-  const topOf = (conversationId: number): number => {
-    const seen = new Set<number>();
-    let current = conversationId;
-    for (;;) {
-      seen.add(current);
-      const owner = summaries.get(current)?.owner?.conversationId;
-      if (owner === undefined || seen.has(owner)) return current;
-      current = owner;
-    }
-  };
   /** The conversation a task works for: its own, or (for one whose conversation the list hasn't got) its owner's. */
   const conversationOf = (task: TaskGraphNode): number => {
     const seen = new Set<string>();
@@ -59,8 +91,9 @@ export function activityByBot(
   for (const task of Object.values(tasks)) {
     const state = taskActivity(task);
     if (state === undefined) continue;
-    const bot = topOf(conversationOf(task));
-    if (state === "running" || result.get(bot) === undefined) result.set(bot, state);
+    for (const id of branchOf(summaries, conversationOf(task))) {
+      if (state === "running" || result.get(id) === undefined) result.set(id, state);
+    }
   }
   return result;
 }

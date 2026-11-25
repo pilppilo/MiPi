@@ -214,11 +214,17 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
     case "command.result":
       if (!event.ok) return { ...state, error: event.error.message };
       return event.conversationId === undefined ||
-        (event.command !== "bot.create" && event.command !== "conversation.fork")
+        (event.command !== "bot.create" &&
+          event.command !== "cobot.create" &&
+          event.command !== "conversation.fork")
         ? state
         : { ...state, activeConversationId: event.conversationId, error: undefined };
     case "error":
       return { ...state, error: event.error.message };
+    default: {
+      const _: never = event;
+      return state;
+    }
   }
 }
 

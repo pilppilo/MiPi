@@ -31,7 +31,7 @@ All three lead to the same assistant, with the same memory and reminders.
 | ------------- | ---------------------------------------------------- |
 | `/bot`        | List your bots                                       |
 | `/bot <name>` | Talk to that bot in this chat, until you switch back |
-| `/new`        | Start a new conversation                             |
+| `/new [name]` | Start a side chat (cobot) under the current bot      |
 | `/model`      | Show or change the model this chat's bot uses        |
 | `/profile`    | Show or change which tools this chat's bot may use   |
 | `/usage`      | Show today's spend and usage                         |

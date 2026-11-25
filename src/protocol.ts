@@ -272,7 +272,14 @@ export type ClientCommand =
       readonly profile: string;
     }
   | {
-      /** Renames a bot. Its purpose, and so its prompt, stays. */
+      /** Makes a side chat under a live bot (COD-200). */
+      readonly type: "cobot.create";
+      readonly requestId: string;
+      readonly bot: number;
+      readonly name: string;
+    }
+  | {
+      /** Renames a bot or cobot. Its purpose, and so its prompt, stays. */
       readonly type: "bot.rename";
       readonly requestId: string;
       readonly conversationId: number;
@@ -572,6 +579,7 @@ const commandTypes = new Set<ClientCommandType>([
   "conversation.open",
   "conversation.entries",
   "bot.create",
+  "cobot.create",
   "bot.bind",
   "bot.rename",
   "bot.archive",
@@ -772,6 +780,13 @@ export function parseClientCommand(message: string): ClientCommand {
         profile,
       };
     }
+    case "cobot.create":
+      return {
+        type: value.type,
+        requestId,
+        bot: requireId(value.bot, "bot"),
+        name: botText(value.name, "name", MAX_BOT_NAME_CHARACTERS),
+      };
     case "bot.rename":
       return {
         type: value.type,

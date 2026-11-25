@@ -37,7 +37,7 @@ export type ConversationMetaState = {
   // (names, the main bot) is the session's `app.bots` (`bots.ts`).
   /** `main` (MiPi), `bot` (a purpose bot) or `cobot`. Absent: a chat from before bots. */
   kind?: BotKind;
-  /** A bot's name, as its owner wrote it. Unique among bots, ignoring case. */
+  /** A bot or cobot's display name. Only top-level bot names are unique, ignoring case. */
   name?: string;
   /** A purpose bot's purpose: also its `instructions`, so it is fixed and its prompt prefix stays cached. */
   purpose?: string;
@@ -143,7 +143,7 @@ export function profileRefusal(
 export type BotsState = {
   /** MiPi, the main bot. Unset until the first start of a build with bots. */
   mainId?: number;
-  /** Every bot's name, lowercased, to its conversation. */
+  /** Every top-level bot's name, lowercased, to its conversation. */
   names?: Record<string, number>;
   /** When MiPi was made, and older chats archived. */
   madeAt?: number;
@@ -195,7 +195,7 @@ export const Bots = defineDoc<BotsState>({
  * Once MiPi exists (`Bots.mainId`), a binding written before bots, or none at all, moves to its bot on its first read
  * and is marked `bots`: so every door, the relay's too, reaches MiPi without core having to list the doors' keys, which
  * Pi Durable can't do for a document family. A binding marked `bots` stays where it is (a `/bot` choice survives a
- * restart). `rebind` binds a new chat of its own, as Telegram's `/new` does until cobots (COD-200).
+ * restart). `rebind` explicitly binds a new ownerless chat.
  *
  * Before MiPi exists (an agent opened without `ensureBots`), an unbound key gets a new conversation on `profile`.
  */

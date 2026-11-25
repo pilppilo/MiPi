@@ -20,6 +20,9 @@ vi.mock("../src/client/usePiSession.ts", () => ({
         purpose: "Keep the shopping list.",
         profile: "default",
       },
+      { id: 7, kind: "cobot", bot: 6, name: "Dinner" },
+      { id: 8, owner: { conversationId: 7 } },
+      { id: 10, owner: { conversationId: 1 } },
     ],
     activeConversationId: 4,
     activeConversation: {
@@ -39,7 +42,7 @@ vi.mock("../src/client/usePiSession.ts", () => ({
         "9": {
           id: 9,
           kind: "pi.generation",
-          conversationId: 6,
+          conversationId: 8,
           background: false,
           abortRequested: false,
           state: { status: "running", phase: "generate" },
@@ -61,7 +64,12 @@ it("lists the main bot by its own name first, then purpose bots with their dots,
     expect(html.indexOf(">Mia<")).toBeGreaterThan(-1);
     expect(html.indexOf(">Mia<")).toBeLessThan(html.indexOf(">Groceries<"));
     expect(html).toContain('<span class="bot-purpose">Keep the shopping list.</span>');
-    expect(html).toContain('aria-label="Working"');
+    expect(html.match(/aria-label="Working"/g)).toHaveLength(3);
+    expect(html.match(/>New cobot<\/button>/g)).toHaveLength(2);
+    expect(html).toMatch(
+      /Groceries.*<details[^>]*>.*<ul class="bot-children">.*Dinner.*<ul class="bot-children">.*Subagent \(id: 8, owner: 7\)/,
+    );
+    expect(html).not.toContain("Subagent (id: 10");
     // The archived chat from before bots isn't listed.
     expect(html).not.toContain("Old chat");
     // MiPi's profile is shown as text: no picker that would fall back to another profile.

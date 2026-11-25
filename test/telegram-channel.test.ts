@@ -353,10 +353,7 @@ describe("Telegram admission", () => {
         await agent.settle();
         expect(await boundId(agent.harness)).toBe(after);
         expect(await userTexts(agent.harness, after)).toEqual([]);
-        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
-          "First",
-          "Started a new conversation.",
-        ]);
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual(["First", "Started a new cobot."]);
       } finally {
         await agent.close();
       }
@@ -376,7 +373,7 @@ describe("Telegram admission", () => {
         release.resolve();
         await agent.settle();
         expect(agent.sent).toEqual([
-          { chatId: CHAT, text: "Started a new conversation." },
+          { chatId: CHAT, text: "Started a new cobot." },
           { chatId: CHAT, text: "Late answer" },
         ]);
       } finally {
@@ -517,16 +514,32 @@ describe("Telegram /bot (COD-197)", () => {
         expect(await userTexts(agent.harness, digest)).toEqual(["hello"]);
         expect(await userTexts(agent.harness, main)).toEqual([]);
 
-        // A renamed MiPi answers to its new name; a chat on a conversation of its own (/new) says so.
+        // A renamed MiPi answers to its new name. /new from a cobot keeps the same parent.
         await agent.harness.commit((tx) => renameBot(tx, main as never, "Mia"), ctx);
-        await agent.channel.admit(command(6, "new"));
-        await agent.channel.admit(command(7, "bot"));
-        await agent.channel.admit(command(8, "bot", "mia"));
+        await agent.channel.admit(command(6, "new", "Morning"));
+        const first = await boundId(agent.harness);
+        await agent.channel.admit(command(7, "new", "Evening"));
+        const second = await boundId(agent.harness);
+        expect(first).not.toBe(second);
+        for (const [id, name] of [
+          [first, "Morning"],
+          [second, "Evening"],
+        ] as const) {
+          expect(await agent.harness.snapshot(ConversationMeta, id as never, ctx)).toMatchObject({
+            kind: "cobot",
+            bot: digest,
+            name,
+            purpose: "Summarise my day.\nKeep it short.",
+            profile: "default",
+          });
+        }
+        await agent.channel.admit(command(8, "bot"));
+        await agent.channel.admit(command(9, "bot", "mia"));
         await agent.settle();
         const [, , ownChat, toMia] = agent.sent.slice(-4).map(({ text: sent }) => sent);
         expect(ownChat).toBe(
           "Bots:\n• Mia\n• Daily Digest — Summarise my day.\n\n" +
-            "This chat is on a conversation of its own (from /new).\n\nSwitch with /bot <name>.",
+            "This chat is on Evening, a cobot under Daily Digest.\n\nSwitch with /bot <name>.",
         );
         expect(toMia).toBe("Now talking to Mia.");
         expect(await boundId(agent.harness)).toBe(main);
@@ -1165,7 +1178,7 @@ describe("Telegram bursts (COD-174)", () => {
         expect(await userTexts(agent.harness, before)).toEqual(["old"]);
         expect(await userTexts(agent.harness, after)).toEqual(["new"]);
         expect(agent.sent.map(({ text: sent }) => sent).sort()).toEqual(
-          ["New answer", "Old answer", "Started a new conversation."].sort(),
+          ["New answer", "Old answer", "Started a new cobot."].sort(),
         );
       } finally {
         await agent.close();
@@ -1192,7 +1205,7 @@ describe("Telegram bursts (COD-174)", () => {
         await agent.settle();
         const texts = agent.sent
           .map(({ text: sent }) => sent)
-          .filter((sent) => sent !== "Started a new conversation.");
+          .filter((sent) => sent !== "Started a new cobot.");
         expect(texts.slice(0, 2)).toEqual([BUSY_REPLY, BUSY_REPLY]);
         expect(texts[2]).toMatch(/^Profile: default /);
         expect(texts.slice(3)).toEqual([BUSY_REPLY, "Done", "Profile set to empty."]);

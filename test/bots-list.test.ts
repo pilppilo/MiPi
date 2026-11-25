@@ -7,6 +7,7 @@ import {
   loadLastRead,
   NOTHING_READ,
   saveLastRead,
+  unreadByBot,
   unreadIds,
 } from "../src/client/bots-list.ts";
 import type { TaskGraph } from "../src/agent/pi/shared.ts";
@@ -69,9 +70,40 @@ describe("the bots list (COD-197)", () => {
     expect(activity).toEqual(
       new Map([
         [9, "running"],
+        [20, "running"],
         [7, "running"],
       ]),
     );
+  });
+
+  it("nests a cobot and successive task-owned conversations and rolls their indicators up", () => {
+    const cobot: ConversationSummary = { id: 14, kind: "cobot", bot: GROCERIES.id, name: "Dinner" };
+    const helper: ConversationSummary = { id: 16, owner: { conversationId: cobot.id } };
+    const child: ConversationSummary = { id: 17, owner: { conversationId: helper.id } };
+    const conversations = [MIPI, GROCERIES, TRAVEL, cobot, helper, child];
+    const listed = listedBots(conversations);
+    expect(listed.bots).toEqual([TRAVEL, GROCERIES]);
+    expect(listed.children.get(GROCERIES.id)).toEqual([cobot]);
+    expect(listed.children.get(cobot.id)).toEqual([helper]);
+    expect(listed.children.get(helper.id)).toEqual([child]);
+    const activity = activityByBot(
+      conversations,
+      graph(task(1, child.id, { status: "waiting", phase: "tools", on: [], policy: "allSettled" })),
+    );
+    expect(activity).toEqual(
+      new Map([
+        [child.id, "waiting"],
+        [helper.id, "waiting"],
+        [cobot.id, "waiting"],
+        [GROCERIES.id, "waiting"],
+      ]),
+    );
+    expect(unreadByBot(conversations, new Set([child.id]))).toEqual(new Set(activity.keys()));
+    const archived = conversations.map((item) =>
+      item.id === GROCERIES.id ? { ...item, archivedAt: 1 } : item,
+    );
+    expect(listedBots(archived).bots).toEqual([TRAVEL]);
+    expect(unreadByBot(archived, new Set([child.id])).size).toBe(0);
   });
 
   it("guards owner loops", () => {

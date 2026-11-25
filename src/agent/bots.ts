@@ -16,8 +16,14 @@ import {
   type Tx,
 } from "./pi/durable.ts";
 import { archivedIn, backfillArchived } from "./archive.ts";
-import { Bots, type BotsState, ConversationMeta, setProfile } from "./conversations.ts";
-import { MAIN_PROFILE, PICKABLE_PROFILES, type ProfileName, type Profiles } from "./profiles.ts";
+import { Bots, type BotsState, ConversationMeta, profileOf, setProfile } from "./conversations.ts";
+import {
+  DEFAULT_PROFILE,
+  MAIN_PROFILE,
+  PICKABLE_PROFILES,
+  type ProfileName,
+  type Profiles,
+} from "./profiles.ts";
 
 export const ACTIVE_BOT_LIMIT = 20;
 
@@ -30,16 +36,28 @@ export const BOT_NAME_MAX = 40;
 /** A name as the index compares it: trimmed, lowercased. */
 export const botNameKey = (name: string): string => name.trim().toLowerCase();
 
+/** A cobot's display name is independent of the top-level bot name index. */
+export function cobotNameRefusal(name: string): string | undefined {
+  return nameRefusal(name, "cobot");
+}
+
+function nameRefusal(name: string, kind: "bot" | "cobot"): string | undefined {
+  const trimmed = name.trim();
+  if (trimmed.length === 0) return `A ${kind} needs a name.`;
+  if ([...trimmed].length > BOT_NAME_MAX)
+    return `A ${kind}'s name is at most ${BOT_NAME_MAX} characters.`;
+  return undefined;
+}
+
 /** Why `name` can't name a new bot (or a renamed one, other than `self`), or undefined when it can. */
 export function botNameRefusal(
   bots: Readonly<BotsState>,
   name: string,
   self?: number,
 ): string | undefined {
+  const refused = nameRefusal(name, "bot");
+  if (refused !== undefined) return refused;
   const trimmed = name.trim();
-  if (trimmed.length === 0) return "A bot needs a name.";
-  if ([...trimmed].length > BOT_NAME_MAX)
-    return `A bot's name is at most ${BOT_NAME_MAX} characters.`;
   const taken = bots.names?.[botNameKey(trimmed)];
   if (taken !== undefined && taken !== self) {
     // An archived bot keeps its name (COD-198), so restoring it never collides: say why, since it isn't listed.
@@ -77,12 +95,72 @@ export async function createBot(
     if (active.length >= ACTIVE_BOT_LIMIT)
       throw new Error(`There are already ${ACTIVE_BOT_LIMIT} active purpose bots.`);
   }
+  const id = await createBotConversation(tx, bot, profiles);
+  bots.names = { ...bots.names, [botNameKey(bot.name)]: id };
+  return id;
+}
+
+/** Opens an independent side chat on the bot's purpose and profile as they are now. */
+export async function createCobot(
+  tx: Tx,
+  bot: ConversationId,
+  name: string,
+  profiles: Profiles,
+): Promise<ConversationId> {
+  return (await prepareCobot(tx, bot, name, profiles))();
+}
+
+/** Read the parent before a caller admits an input or makes another table write in the same commit. */
+export async function prepareCobot(
+  tx: Tx,
+  bot: ConversationId,
+  name: string,
+  profiles: Profiles,
+): Promise<() => Promise<ConversationId>> {
+  const refused = cobotNameRefusal(name);
+  if (refused !== undefined) throw new Error(refused);
+  const record = await tx.conversation(bot);
+  if (record === undefined || record.owner !== undefined) {
+    throw new Error("A cobot needs a live parent bot.");
+  }
+  const parent = await tx.doc(ConversationMeta, bot);
+  if (
+    (parent.kind !== "main" && parent.kind !== "bot") ||
+    parent.archivedAt !== undefined ||
+    archivedIn(await tx.doc(Bots), bot)
+  ) {
+    throw new Error("A cobot needs a live parent bot.");
+  }
+  const purpose = parent.purpose;
+  const profile = parent.kind === "main" ? DEFAULT_PROFILE : profileOf(parent);
+  return () =>
+    createBotConversation(
+      tx,
+      { kind: "cobot", bot, name, purpose, profile, createdBy: "owner" },
+      profiles,
+    );
+}
+
+async function createBotConversation(
+  tx: Tx,
+  bot: {
+    readonly name: string;
+    readonly purpose?: string | undefined;
+    readonly profile: ProfileName;
+    readonly createdBy: string;
+  } & (
+    | { readonly kind: "main" | "bot" }
+    | { readonly kind: "cobot"; readonly bot: ConversationId }
+  ),
+  profiles: Profiles,
+): Promise<ConversationId> {
   const name = bot.name.trim();
   const purpose = bot.purpose?.trim();
   const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
   const meta = await tx.doc(ConversationMeta, id);
   // The kind first: only MiPi may run on `main` (`profileRefusal`).
   meta.kind = bot.kind;
+  if (bot.kind === "cobot") meta.bot = bot.bot;
   meta.name = name;
   meta.createdBy = bot.createdBy;
   if (purpose !== undefined && purpose.length > 0) {
@@ -91,7 +169,6 @@ export async function createBot(
     await configure(tx, id, { instructions: purpose });
   }
   await setProfile(tx, id, bot.profile, profiles);
-  bots.names = { ...bots.names, [botNameKey(name)]: id };
   return id;
 }
 
@@ -137,11 +214,17 @@ export async function ensureBots(
   }, BACKGROUND_CONTEXT);
 }
 
-/** Renames a bot (MiPi included) in the caller's commit: its name and the index, never its purpose or prompt. */
+/** Renames a bot or cobot in the caller’s commit. Only top-level bot names are indexed. */
 export async function renameBot(tx: Tx, id: ConversationId, name: string): Promise<void> {
   const meta = await tx.doc(ConversationMeta, id);
   if (meta.kind === undefined || meta.archivedAt !== undefined) {
     throw new Error("Only a bot can be renamed.");
+  }
+  if (meta.kind === "cobot") {
+    const refused = cobotNameRefusal(name);
+    if (refused !== undefined) throw new Error(refused);
+    meta.name = name.trim();
+    return;
   }
   const bots = await tx.doc(Bots);
   const refused = botNameRefusal(bots, name, id);

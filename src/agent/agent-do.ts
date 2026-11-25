@@ -38,7 +38,7 @@ import {
   PICKABLE_PROFILES,
   profileOrDefault,
 } from "./profiles.ts";
-import { createBot, ensureBots, renameBot } from "./bots.ts";
+import { createBot, createCobot, ensureBots, renameBot } from "./bots.ts";
 import { bindBotDoor, BOT_LIST_CHANGE } from "./bot-tools.ts";
 import {
   abortArchived,
@@ -138,6 +138,12 @@ type ConversationCommandReceipt =
   | {
       command: "bot.create";
       conversationId: ConversationId;
+      name: string;
+    }
+  | {
+      command: "cobot.create";
+      conversationId: ConversationId;
+      bot: ConversationId;
       name: string;
     }
   | {
@@ -800,7 +806,9 @@ export class MipiAgent extends DurableObject<Env> {
           if (
             this.#connections().length > 0 &&
             publication.changes.some(
-              (change) => change.type === "document" && change.record?.kind === BOT_LIST_CHANGE,
+              (change) =>
+                (change.type === "document" && change.record?.kind === BOT_LIST_CHANGE) ||
+                (change.type === "conversation" && change.value.owner === undefined),
             )
           ) {
             this.ctx.waitUntil(
@@ -1318,6 +1326,37 @@ export class MipiAgent extends DurableObject<Env> {
         });
         return;
       }
+      case "cobot.create": {
+        const bot = command.bot as ConversationId;
+        const conversationId = await this.#harness.commit(async (tx) => {
+          const doc = await tx.doc(ConversationCommandReceipts, command.requestId, null);
+          const existing = doc.receipt;
+          if (existing !== undefined) {
+            if (
+              existing.command !== command.type ||
+              existing.bot !== bot ||
+              existing.name !== command.name
+            ) {
+              throw new Error(`Request ${command.requestId} was already used for another command`);
+            }
+            if (await isArchived(tx, existing.conversationId)) throw new Error(ARCHIVED_REPLY);
+            return existing.conversationId;
+          }
+          const id = await createCobot(tx, bot, command.name, this.#composition!.profiles);
+          doc.receipt = { command: command.type, conversationId: id, bot, name: command.name };
+          return id;
+        }, BACKGROUND_CONTEXT);
+        await this.#watchConversation(socket, conversationId);
+        await this.#broadcastSessionSnapshot();
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId,
+        });
+        return;
+      }
       case "bot.bind": {
         const conversationId = command.conversationId as ConversationId;
         await this.#harness.commit(
@@ -1590,18 +1629,15 @@ export class MipiAgent extends DurableObject<Env> {
       do {
         const page = await tx.scanConversations({}, CONVERSATION_PAGE_SIZE, cursor);
         for (const record of page.items) {
-          // Subagents' conversations carry no meta of their own.
+          const latestEntryId = await tx.latestEntryId(record.id);
+          // Subagents carry the owning conversation from the Pi record and have no bot meta.
           if (record.owner !== undefined) {
-            conversations.push(conversationSummary(record));
+            conversations.push(conversationSummary(record, undefined, latestEntryId));
             continue;
           }
           const meta = await tx.doc(ConversationMeta, record.id);
           conversations.push(
-            conversationSummary(
-              record,
-              { ...meta, profile: profileOf(meta) },
-              await tx.latestEntryId(record.id),
-            ),
+            conversationSummary(record, { ...meta, profile: profileOf(meta) }, latestEntryId),
           );
         }
         cursor = page.next;

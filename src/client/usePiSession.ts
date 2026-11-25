@@ -69,6 +69,7 @@ export interface PiSession {
     readonly purpose: string;
     readonly profile: string;
   }): Promise<boolean>;
+  createCobot(bot: number, name: string): Promise<boolean>;
   renameBot(conversationId: number, name: string): void;
   forkConversation(conversationId: number, entryId: number): void;
   setTyping(conversationId: number, typing: boolean): void;
@@ -304,7 +305,9 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
           acknowledged !== undefined &&
           parsed.ok &&
           parsed.conversationId !== undefined &&
-          (acknowledged.type === "bot.create" || acknowledged.type === "conversation.fork")
+          (acknowledged.type === "bot.create" ||
+            acknowledged.type === "cobot.create" ||
+            acknowledged.type === "conversation.fork")
         ) {
           selectedConversationRef.current = parsed.conversationId;
         }
@@ -392,6 +395,21 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
       new Promise<boolean>((resolve) => {
         if (
           !sendRetriable({ type: "bot.create", requestId: crypto.randomUUID(), ...bot }, resolve)
+        ) {
+          resolve(false);
+        }
+      }),
+    [sendRetriable],
+  );
+
+  const createCobot = useCallback(
+    (bot: number, name: string) =>
+      new Promise<boolean>((resolve) => {
+        if (
+          !sendRetriable(
+            { type: "cobot.create", requestId: crypto.randomUUID(), bot, name },
+            resolve,
+          )
         ) {
           resolve(false);
         }
@@ -490,6 +508,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     configureConversation,
     openConversation,
     createBot,
+    createCobot,
     renameBot,
     forkConversation,
     setTyping,

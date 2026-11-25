@@ -21,6 +21,6 @@ The deploy stops with an error naming what is missing if only some are set.
 
 **5. Verify.**
 
-- Open the bot, press **Start**, send `hi`: one reply. `/version` answers the version, `/new` answers "Started a new conversation.".
+- Open the bot, press **Start**, send `hi`: one reply. `/version` answers the version, `/new` opens a cobot under the current bot and answers "Started a new cobot." Use `/new <name>` to name it.
 - `curl -X POST <worker>/api/telegram` answers 401 `{"error":"Unauthorized"}` (the Worker's own check, so the bypass works); a `GET` answers 405.
 - A message from another account, or in a group, gets no answer.

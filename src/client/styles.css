@@ -110,6 +110,21 @@ body:has(.session-workspace) {
   font-weight: 600;
 }
 
+.bot-tree {
+  margin-block-start: 0.3rem;
+  margin-inline-start: 0.85rem;
+  font-size: 0.85rem;
+}
+
+.bot-tree summary {
+  cursor: pointer;
+}
+
+.conversation-list .bot-children {
+  padding-inline-start: 0.85rem;
+  margin-block-start: 0.25rem;
+}
+
 .bot-name {
   display: flex;
   align-items: center;
