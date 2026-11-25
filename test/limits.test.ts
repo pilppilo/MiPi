@@ -5,12 +5,13 @@ import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai/providers/faux";
 import { defineExtension, Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { composeMipi } from "../src/agent/composition.ts";
 import { heldAsMeasured, heldUntil } from "../src/agent/gates.ts";
 import { bindLimitRecorder, limitOf, ProviderLimits } from "../src/agent/limits.ts";
 import { BACKGROUND_CONTEXT as ctx } from "../src/agent/pi/context.ts";
 import { createProviders, ProviderUsageCache } from "../src/agent/providers.ts";
+import { sideCall } from "../src/agent/side-calls.ts";
 import { Spend } from "../src/agent/spend.ts";
 import { readUsage } from "../src/agent/usage.ts";
 import { opencodeGoExtension } from "../src/extensions/optional/opencode-go/index.ts";
@@ -60,6 +61,8 @@ describe("provider limits", () => {
     ).toBe("usage");
     for (const text of [
       "402 billing: add available balance",
+      "available balance",
+      "418 available balance",
       "401 Unauthorized",
       "400 Bad Request",
     ]) {
@@ -247,6 +250,56 @@ describe("provider limits", () => {
       expect(await harness.commit((tx) => heldUntil(tx, "provider-limit", now), ctx)).toBe(
         now + 5 * 60_000,
       );
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+
+  it("uses the bound clock for side calls, reports recorder failures, and clears the hold after success", async () => {
+    const faux = fauxProvider();
+    const failure = fauxAssistantMessage([], { stopReason: "error", errorMessage: GO_ERROR });
+    faux.setResponses([failure, failure, fauxAssistantMessage([fauxText("Recovered")])]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const composition = compose(models);
+    const harness = await Harness.open(new MemoryStorage(), composition.options, ctx);
+    const parse = vi.fn((value: string, _at: number) => goLimit(value));
+    const providers = createProviders([
+      { owner: "test", registration: { provider, limit: { label, parse } } },
+    ]);
+    const report = vi.fn();
+    try {
+      bindLimitRecorder(
+        composition.limitExtension,
+        harness,
+        providers,
+        new ProviderUsageCache([]),
+        () => now,
+        report,
+      );
+      const root = await harness.root(ctx);
+      const request = { text: "Check status", maxTokens: 64 };
+      const limited = { planLimited: true, reply: { errorMessage: GO_ERROR } };
+      expect(await sideCall(harness, models, root.id, request)).toMatchObject(limited);
+      expect(parse).toHaveBeenCalledWith(GO_ERROR, now);
+      expect((await harness.snapshot(ProviderLimits, ctx))?.entries[provider]).toMatchObject({
+        at: now,
+      });
+
+      const error = new Error("Maintenance began");
+      const commit = vi.spyOn(harness, "commit").mockRejectedValueOnce(error);
+      try {
+        expect(await sideCall(harness, models, root.id, request)).toMatchObject(limited);
+        expect(report).toHaveBeenCalledWith(error, provider);
+      } finally {
+        commit.mockRestore();
+      }
+
+      expect(await sideCall(harness, models, root.id, request)).toMatchObject({
+        planLimited: false,
+        reply: { stopReason: "stop" },
+      });
+      expect((await harness.snapshot(ProviderLimits, ctx))?.entries).toEqual({});
     } finally {
       await harness.close(ctx);
     }

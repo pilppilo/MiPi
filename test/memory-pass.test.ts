@@ -26,7 +26,10 @@ import { obj, str } from "@earendil-works/pi-schema";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { setProfile } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { bindLimitRecorder } from "../src/agent/limits.ts";
+import { createProviders, ProviderUsageCache } from "../src/agent/providers.ts";
+import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
+import { composeMipi } from "../src/agent/composition.ts";
 import { PROFILES } from "./mipi.ts";
 import { addLesson, MAX_LESSONS, MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import {
@@ -151,7 +154,10 @@ const fakeWebFetch: ToolRegistration = {
 };
 const fetchExtension = defineExtension({ name: "test-fetch", tools: [fakeWebFetch] });
 
-async function openAgent(responses: readonly FauxResponseStep[]): Promise<Agent> {
+async function openAgent(
+  responses: readonly FauxResponseStep[],
+  planHoldMs?: number,
+): Promise<Agent> {
   const requests: string[] = [];
   const faux = fauxProvider();
   faux.setResponses(
@@ -162,10 +168,37 @@ async function openAgent(responses: readonly FauxResponseStep[]): Promise<Agent>
   );
   const models = createModels();
   models.setProvider(faux.provider);
-  const options = createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } });
-  (options.registry as ReturnType<typeof createRegistry>).install(fetchExtension);
-  const harness = await Harness.open(new MemoryStorage(), options, ctx);
+  const provider = "faux";
+  const label = "OpenCode Go";
+  const composition = composeMipi({ models, model: { provider, modelId: "faux-1" } });
+  (composition.options.registry as ReturnType<typeof createRegistry>).install(fetchExtension);
+  const harness = await Harness.open(new MemoryStorage(), composition.options, ctx);
   const clock = { now: Date.now() };
+  if (planHoldMs !== undefined) {
+    const providers = createProviders([
+      { owner: "test", registration: { provider, limit: { label, parse: goLimit } } },
+    ]);
+    bindLimitRecorder(
+      composition.limitExtension,
+      harness,
+      providers,
+      new ProviderUsageCache([
+        {
+          provider,
+          label,
+          read: async () => ({
+            provider,
+            label,
+            status: "ok",
+            windows: [
+              { name: "weekly", percent: 100, limited: true, resetsAt: clock.now + planHoldMs },
+            ],
+          }),
+        },
+      ]),
+      () => clock.now,
+    );
+  }
   const reports: string[] = [];
   const pass = new MemoryPassRuntime({
     harness,
@@ -413,6 +446,42 @@ describe("the memory pass", () => {
       expect(await agent.pass.pass(conversation.id)).toBe(false);
       expect((await memory(agent.harness)).lessons).toEqual([]);
       expect(agent.reports.length).toBe(1 + PASS_MAX_FAILURES);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("defers a plan-limited pass to the reset without consuming a failure", async () => {
+    const hold = 20 * 60_000;
+    const agent = await openAgent(
+      [
+        say("Noted."),
+        fauxAssistantMessage([], {
+          stopReason: "error",
+          errorMessage: "Monthly usage limit reached",
+        }),
+        lessons("My sister is Ana."),
+      ],
+      hold,
+    );
+    try {
+      const conversation = await chat(agent, "My sister is Ana.", "web:1");
+      idle(agent);
+      const resetAt = agent.clock.now + hold;
+      expect(await agent.pass.pass(conversation.id)).toBe(true);
+      expect((await marks(agent.harness))[conversation.id]).toEqual({
+        entry: 0,
+        notBefore: resetAt,
+      });
+      await agent.pass.run();
+      expect(agent.pass.wake().at).toBe(resetAt);
+      agent.clock.now = resetAt - 1;
+      expect(await agent.pass.pass(conversation.id)).toBe(false);
+      expect(agent.requests).toHaveLength(2);
+      agent.clock.now = resetAt;
+      expect(await agent.pass.pass(conversation.id)).toBe(true);
+      expect(agent.requests).toHaveLength(3);
+      expect((await memory(agent.harness)).lessons).toHaveLength(1);
     } finally {
       await agent.close();
     }

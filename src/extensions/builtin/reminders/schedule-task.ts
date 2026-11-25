@@ -1,7 +1,7 @@
 import { type ConversationId, defineDoc, defineTask } from "../../../agent/pi/durable.ts";
 import { formatScheduledInstruction } from "../../../protocol.ts";
 import { connectorsOf } from "../../../agent/connectors.ts";
-import { heldUntil, holdNow, providerHoldUntil, tellHeld } from "../../../agent/gates.ts";
+import { heldUntil, holdNow, tellHeld } from "../../../agent/gates.ts";
 import { AgentSettings } from "../../../agent/settings.ts";
 import { localTime } from "../../../agent/stamp.ts";
 import { isTransientModelFailure, TRANSIENT_REMINDER_COOLDOWN_MS } from "../../../agent/limits.ts";
@@ -243,10 +243,9 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
       }, context);
     },
     deliver: async (task, runtime, context) => {
-      // M9: paused or over the spend cap, the delivery is held as reminders are. This task's checkpoint has no time of
-      // its own to wait for, so a successor carries it instead: a repeating schedule's next time, or a one-time one's
-      // next look past Chicago midnight. This occurrence is not delivered. One already submitted (a restart in the
-      // middle of this phase) is never held: it went out.
+      // A hold creates a successor because the checkpoint has no deadline. One-time deliveries wait until the hold
+      // ends. Repeats skip held occurrences and keep their cadence. A delivery already submitted before a restart
+      // has already gone out.
       const now = runtime.now();
       let held = false;
       await runtime.commit(async (tx) => {
@@ -261,11 +260,15 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
         if (hold !== undefined) {
           // A pause tells nothing. This older kind has no destination of its own.
           await tellHeld(tx, connectorsOf(runtime.registry).delivery, hold, undefined, now);
+          const until = await heldUntil(tx, hold, now);
           runAt =
-            recurrence === undefined ||
-            (hold !== "paused" && (await providerHoldUntil(tx, now)) !== undefined)
-              ? await heldUntil(tx, hold, now)
-              : nextRecurrenceRunAt(task.input.runAt, recurrence, now);
+            recurrence === undefined
+              ? until
+              : nextRecurrenceRunAt(
+                  task.input.runAt,
+                  recurrence,
+                  hold === "paused" ? now : Math.max(now, until - 1),
+                );
         } else if (recurrence !== undefined && previousRequestId !== undefined) {
           const previous = await tx.submissionByRequest(conversationId, previousRequestId);
           if (previous?.status === "queued" || previous?.status === "placed") {

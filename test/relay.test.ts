@@ -348,7 +348,7 @@ describe("relay admission", () => {
     try {
       const result = {
         kind: "unanswered",
-        reason: "OpenCode Go's usage limit is reached. /usage shows its windows.",
+        reason: "OpenCode Go's usage limit is reached; /usage shows its windows.",
       };
       expect(await agent.relay.admit("plan-limit", "hello?")).toEqual(result);
       expect(await agent.relay.result("plan-limit")).toEqual(result);

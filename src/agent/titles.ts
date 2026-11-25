@@ -9,6 +9,7 @@ import type { MutableModels } from "./pi/ai.ts";
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import type { ConversationId, Harness } from "./pi/durable.ts";
 import { ConversationMeta } from "./conversations.ts";
+import { holdNow } from "./gates.ts";
 import { recordUsage, sideCall } from "./side-calls.ts";
 import {
   cleanTitle,
@@ -49,6 +50,8 @@ export async function writeTitle(
   report: (error: unknown) => void = () => {},
 ): Promise<boolean> {
   try {
+    const now = Date.now();
+    if ((await harness.commit((tx) => holdNow(tx, now), context)) !== undefined) return false;
     const call = await sideCall(harness, models, conversationId, {
       text: `${TITLE_PROMPT}\n\n<message>\n${text.slice(0, TITLE_READ_CHARS)}\n</message>`,
       maxTokens: 1024,

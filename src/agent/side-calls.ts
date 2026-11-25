@@ -100,6 +100,6 @@ export async function sideCall(
     },
     { maxTokens: request.maxTokens, cacheRetention: "none", sessionId },
   );
-  const planLimited = (await observeSideResponse(harness, reply, Date.now())) !== undefined;
+  const planLimited = (await observeSideResponse(harness, reply)) !== undefined;
   return { model, reply, planLimited };
 }

@@ -36,7 +36,7 @@ import { checkStoredData } from "./guard.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
 import { measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
 import { bindLimitRecorder } from "./limits.ts";
-import { type Hold, holdNow, isPausedNow } from "./gates.ts";
+import { isPausedNow } from "./gates.ts";
 import { AnswerSettlement } from "./answers.ts";
 import { readUsage, usageText } from "./usage.ts";
 import { ProviderUsageCache } from "./providers.ts";
@@ -648,12 +648,6 @@ export class MipiAgent extends DurableObject<Env> {
     }, BACKGROUND_CONTEXT);
   }
 
-  /** Why work nobody asked for right now (a title written by the model) may not start, with today's spend measured. */
-  #hold(): Promise<Hold | undefined> {
-    const now = Date.now();
-    return this.#harness.commit((tx) => holdNow(tx, now), BACKGROUND_CONTEXT);
-  }
-
   #readUsage(): Promise<UsageReadout> {
     return readUsage(this.#harness, this.#providerUsage, Date.now());
   }
@@ -699,6 +693,8 @@ export class MipiAgent extends DurableObject<Env> {
         harness,
         composition.providers,
         this.#providerUsage,
+        Date.now,
+        (error, provider) => reportError("Recording a provider limit failed", error, { provider }),
       );
       // Tasks (scheduled deliveries) read the owner's time zone from the session, not from module state.
       const timeZone = ownerTimeZone(this.env.MIPI_TIMEZONE);
@@ -1403,9 +1399,6 @@ export class MipiAgent extends DurableObject<Env> {
     );
     await this.#broadcastSessionSnapshot();
     if (provisional === undefined) return;
-    // A title from the model is work nobody asked for: not while paused or over the spend cap (M9). The first
-    // message's words stay the title.
-    if ((await this.#hold()) !== undefined) return;
     void writeTitle(this.#harness, this.#models, conversationId, text, provisional, (error) =>
       reportError("Writing a conversation title failed", error, { conversationId }),
     ).then(async (changed) => {

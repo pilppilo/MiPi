@@ -18,6 +18,10 @@ import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { ChannelBindings } from "../src/agent/conversations.ts";
 import { composeMipi } from "../src/agent/composition.ts";
+import { bindLimitRecorder } from "../src/agent/limits.ts";
+import { ProviderUsageCache } from "../src/agent/providers.ts";
+import { BUILT_IN_EXTENSIONS } from "../src/extensions/builtins.ts";
+import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
 import { AnswerSettlement } from "../src/agent/answers.ts";
 import { WakeSources } from "../src/agent/wake-sources.ts";
 import { PROFILES } from "./mipi.ts";
@@ -72,12 +76,26 @@ export async function openAgent(
   /** The Telegram door's `/usage` readout (M9); unset, as in a door without one. */
   usage?: () => Promise<string>,
   disableRetry = false,
+  planResetAt?: number,
 ): Promise<Agent> {
   const faux = fauxProvider();
   faux.setResponses([...responses]);
   const models = createModels();
   models.setProvider(faux.provider);
-  const composition = composeMipi({ models, model: { provider: "faux", modelId: "faux-1" } });
+  const provider = "faux";
+  const label = "OpenCode Go";
+  const composition = composeMipi({
+    models,
+    model: { provider, modelId: "faux-1" },
+    extensions: [
+      ...BUILT_IN_EXTENSIONS,
+      {
+        name: "test-plan-limits",
+        tier: "optional",
+        providers: [{ provider, limit: { label, parse: goLimit } }],
+      },
+    ],
+  });
   const baseSettings = composition.options.settings;
   const settings = typeof baseSettings === "function" ? baseSettings() : baseSettings;
   const harness = await Harness.open(
@@ -91,6 +109,26 @@ export async function openAgent(
     },
     ctx,
   );
+  if (planResetAt !== undefined) {
+    bindLimitRecorder(
+      composition.limitExtension,
+      harness,
+      composition.providers,
+      new ProviderUsageCache([
+        {
+          provider,
+          label,
+          read: async () => ({
+            provider,
+            label,
+            status: "ok",
+            windows: [{ name: "weekly", percent: 100, limited: true, resetsAt: planResetAt }],
+          }),
+        },
+      ]),
+      () => clock.now,
+    );
+  }
   const sent: Array<{ chatId: number; text: string }> = [];
   /** What the door reported: `settle()` fails on any. */
   const reports: string[] = [];
@@ -120,6 +158,7 @@ export async function openAgent(
   const answers = new AnswerSettlement({
     harness,
     connectors: composition.connectors,
+    providers: composition.providers,
     onQueued: () => door.refresh(),
     onWakeChange: () => {},
     report,
@@ -174,7 +213,7 @@ export async function openAgent(
     },
     restart: async (next = []) => {
       await agent.close();
-      return openAgent(storage, next, usage, disableRetry);
+      return openAgent(storage, next, usage, disableRetry, planResetAt);
     },
     close: async () => {
       sources.close();

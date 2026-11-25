@@ -618,12 +618,18 @@ export async function reconcileAnswers(
         ]);
       }
       if (notice?.limit.kind === "usage") {
-        await tellProviderLimit(tx, delivery, destination, now, notice.limit.provider);
-        continue;
+        const status = await tellProviderLimit(
+          tx,
+          delivery,
+          destination,
+          now,
+          notice.limit.provider,
+        );
+        if (status === "active") continue;
       }
     }
     if (destination === undefined) continue;
-    if (item.source === "proactive" && notice?.limit.kind === "usage") {
+    if (item.source === "proactive" && !item.input.repeating && notice?.limit.kind === "usage") {
       await send(destination, {
         id: `reminder-limit:${item.input.submissionId}`,
         text: `Reminder: ${item.input.instruction} (sent without MiPi: ${notice.text.replace(/\.$/, "")}).`,

@@ -412,7 +412,7 @@ describe("Telegram admission", () => {
           {
             chatId: CHAT,
             text: expect.stringMatching(
-              /^OpenCode Go's usage limit is reached\. It resets at .+\.$/,
+              /^OpenCode Go's usage limit is reached; it resets at .+\.$/,
             ),
           },
         ]);

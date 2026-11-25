@@ -117,8 +117,8 @@ export function limitText(
     return `${limit.label} is rate limiting MiPi or temporarily unavailable. Try again in a minute.`;
   const reset = entry?.resetAt;
   return reset === undefined
-    ? `${limit.label}'s usage limit is reached. /usage shows its windows.`
-    : `${limit.label}'s usage limit is reached. It resets at ${localTime(reset, zone)}.`;
+    ? `${limit.label}'s usage limit is reached; /usage shows its windows.`
+    : `${limit.label}'s usage limit is reached; it resets at ${localTime(reset, zone)}.`;
 }
 
 export async function settledLimit(
@@ -146,12 +146,14 @@ export async function tellProviderLimit(
   prefer: DeliveryDestination | undefined,
   now: number,
   providerId?: string,
-): Promise<boolean> {
+): Promise<"active" | "inactive"> {
   const state = await tx.doc(ProviderLimits);
   const zone = (await tx.doc(AgentSettings)).timeZone;
-  let sent = false;
+  let status: "active" | "inactive" = "inactive";
   for (const { provider, entry } of activeLimits(state, now)) {
-    if ((providerId !== undefined && provider !== providerId) || entry.told) continue;
+    if (providerId !== undefined && provider !== providerId) continue;
+    status = "active";
+    if (entry.told) continue;
     if (
       await delivery.tellOwner(
         tx,
@@ -164,15 +166,14 @@ export async function tellProviderLimit(
       )
     ) {
       entry.told = true;
-      sent = true;
     }
   }
-  return sent;
+  return status;
 }
 
 type Observation = PlanLimit | { kind: "success"; provider: string };
 type RecordLimit = (observation: Observation) => Promise<void>;
-type Binding = { providers?: Providers; recordLimit?: RecordLimit };
+type Binding = { providers?: Providers; recordLimit?: RecordLimit; now?: () => number };
 const extensionBindings = new WeakMap<Extension, Binding>();
 const sideCallBindings = new WeakMap<Harness, Binding>();
 
@@ -220,6 +221,7 @@ export function bindLimitRecorder(
   providers: Providers,
   usage: ProviderUsageCache,
   now: () => number = Date.now,
+  report?: (error: unknown, provider: string) => void,
 ): void {
   const binding = extensionBindings.get(extension);
   if (binding === undefined) throw new Error("Missing provider limit extension binding");
@@ -270,11 +272,17 @@ export function bindLimitRecorder(
         state.entries = { ...state.entries, [provider]: entry };
       }, BACKGROUND_CONTEXT);
     };
-    await pending.run(provider, record);
+    try {
+      await pending.run(provider, record);
+    } catch (error) {
+      report?.(error, provider);
+    }
   };
-  sideCallBindings.set(harness, { providers, recordLimit: binding.recordLimit });
+  sideCallBindings.set(harness, { providers, recordLimit: binding.recordLimit, now });
 }
 
-export function observeSideResponse(harness: Harness, message: AssistantMessage, now: number) {
-  return observeResponse(sideCallBindings.get(harness), message, now);
+export function observeSideResponse(harness: Harness, message: AssistantMessage) {
+  const binding = sideCallBindings.get(harness);
+  if (binding?.now === undefined) return;
+  return observeResponse(binding, message, binding.now());
 }

@@ -5,6 +5,7 @@ import { Harness, UsageDoc } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { ConversationMeta } from "../src/agent/conversations.ts";
+import { ProviderLimits } from "../src/agent/limits.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import { nameFromFirstMessage, writeTitle } from "../src/agent/titles.ts";
 import { cleanTitle, firstTitle, wantsTitle } from "../src/lib/titles.ts";
@@ -87,6 +88,22 @@ describe("conversation titles", () => {
       ))!;
       expect(await writeTitle(harness, models, root.id, long, provisional)).toBe(false);
       expect((await harness.snapshot(ConversationMeta, root.id, ctx))?.title).toBe(provisional);
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+
+  it("keeps the provisional title while a provider hold is active", async () => {
+    const { harness, models } = await openWithReply("Austin Trip");
+    try {
+      const root = await harness.root(ctx);
+      const provisional = await harness.commit(async (tx) => {
+        (await tx.doc(ProviderLimits)).entries.faux = { label: "OpenCode Go", at: Date.now() };
+        return (await nameFromFirstMessage(tx, root.id, long))!;
+      }, ctx);
+      expect(await writeTitle(harness, models, root.id, long, provisional)).toBe(false);
+      expect((await harness.snapshot(ConversationMeta, root.id, ctx))?.title).toBe(provisional);
+      expect((await harness.snapshot(UsageDoc, root.id, ctx))?.models ?? {}).toEqual({});
     } finally {
       await harness.close(ctx);
     }

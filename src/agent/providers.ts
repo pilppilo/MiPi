@@ -166,8 +166,10 @@ export class ProviderUsageCache {
       let timer: ReturnType<typeof setTimeout> | undefined;
       let usage: ProviderUsage;
       try {
+        const request = source.read(this.#fetcher);
+        void request.catch(() => undefined);
         usage = await Promise.race([
-          source.read(this.#fetcher),
+          request,
           new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new Error("Usage read timed out")), 5_000);
           }),

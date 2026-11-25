@@ -175,17 +175,6 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         } satisfies ClientCommand),
       );
     };
-    const renderView = (conversationId: number, view: ConversationView) => {
-      const previous = viewsRef.current.get(conversationId)?.docs["pi.live"];
-      const failure = view.docs["pi.live"]?.runFailure;
-      if (
-        failure !== undefined &&
-        JSON.stringify(failure) !== JSON.stringify(previous?.runFailure)
-      ) {
-        requestUsage(true);
-      }
-      showView(conversationId, view);
-    };
     const onVisible = () => {
       if (document.visibilityState === "visible") requestUsage();
     };
@@ -216,12 +205,22 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
       }
 
       if (parsed.type === "conversation.view") {
-        renderView(parsed.conversationId, parsed.view);
+        showView(parsed.conversationId, parsed.view);
         return;
       }
       if (parsed.type === "conversation.ops") {
         const view = viewsRef.current.get(parsed.conversationId);
-        if (view !== undefined) renderView(parsed.conversationId, applyImmutable(view, parsed.ops));
+        if (view !== undefined) {
+          const next = applyImmutable(view, parsed.ops);
+          const failure = next.docs["pi.live"]?.runFailure;
+          if (
+            failure !== undefined &&
+            JSON.stringify(failure) !== JSON.stringify(view.docs["pi.live"]?.runFailure)
+          ) {
+            requestUsage(true);
+          }
+          showView(parsed.conversationId, next);
+        }
         return;
       }
       // Work ran, or the owner's message was admitted: the agent is awake, so the usage line can catch up.
