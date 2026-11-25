@@ -1,0 +1,72 @@
+name: Pi Durable canary
+
+on:
+  schedule:
+    - cron: "17 16 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Pi Durable version override (blank uses the npm latest tag)
+        type: string
+        required: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: canary
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: corepack enable
+      - name: Install the pinned checkout
+        run: pnpm install --frozen-lockfile
+      - name: Resolve the target version
+        id: version
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version }}
+        run: node scripts/canary.ts target
+      - name: Exercise the upgrade
+        id: upgrade
+        env:
+          TARGET: ${{ steps.version.outputs.target }}
+        run: pnpm upgrade:pi "$TARGET"
+      - name: Check the candidate
+        id: check
+        run: pnpm check
+      - name: Test the candidate
+        id: test
+        run: pnpm test
+      - name: Summarize the canary
+        if: always()
+        env:
+          CURRENT: ${{ steps.version.outputs.current }}
+          TARGET: ${{ steps.version.outputs.target }}
+          UPGRADE: ${{ steps.upgrade.outcome }}
+          CHECK: ${{ steps.check.outcome }}
+          TEST: ${{ steps.test.outcome }}
+        run: |
+          printf '### Pi Durable canary\n\nCurrent `%s` → target `%s`\n\n- Upgrade: %s\n- Check: %s\n- Test: %s\n' \
+            "${CURRENT:-unresolved}" "${TARGET:-unresolved}" "${UPGRADE:-skipped}" \
+            "${CHECK:-skipped}" "${TEST:-skipped}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Report a failed candidate
+        if: failure() && (steps.upgrade.outcome == 'failure' || steps.check.outcome == 'failure' || steps.test.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT: ${{ steps.version.outputs.current }}
+          TARGET: ${{ steps.version.outputs.target }}
+          CANARY_UPGRADE_OUTCOME: ${{ steps.upgrade.outcome }}
+          CANARY_CHECK_OUTCOME: ${{ steps.check.outcome }}
+          CANARY_TEST_OUTCOME: ${{ steps.test.outcome }}
+        run: node scripts/canary.ts report

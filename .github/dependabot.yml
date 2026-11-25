@@ -1,0 +1,26 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Signal only. Close this PR and run pnpm upgrade:pi <version> on a branch to keep the pins, workspace
+      # allowlist, src/version.ts, the Pi Durable ledger, and the changeset in sync.
+      pi-durable:
+        patterns:
+          - "@earendil-works/*"
+      npm-dependencies:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@earendil-works/*"
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"

@@ -9,9 +9,10 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
 import { upstreamChanges } from "./release-notes.ts";
+import { isPiVersion, PI_DURABLE_PACKAGE } from "./pi-version.ts";
 
 const target = process.argv[2];
-if (target === undefined || !/^\d+\.\d+\.\d+(-[\w.]+)?$/.test(target)) {
+if (target === undefined || !isPiVersion(target)) {
   console.error("Usage: node scripts/upgrade-pi.ts <version>   e.g. 1.7.0");
   process.exit(2);
 }
@@ -26,7 +27,7 @@ const packageJson = JSON.parse(readFileSync("package.json", "utf8")) as {
 const pinned = Object.keys(packageJson.dependencies).filter((name) =>
   name.startsWith("@earendil-works/"),
 );
-const current = packageJson.dependencies["@earendil-works/pi-durable"];
+const current = packageJson.dependencies[PI_DURABLE_PACKAGE];
 if (current === undefined) throw new Error("@earendil-works/pi-durable is not a dependency");
 console.log(`Pi Durable ${current} → ${target} (${pinned.join(", ")})`);
 
@@ -40,7 +41,8 @@ const workspace = readFileSync("pnpm-workspace.yaml", "utf8").replace(
 );
 writeFileSync("pnpm-workspace.yaml", workspace);
 
-run("pnpm", ["install"]);
+// The manifest changed on purpose, including when the caller is running in CI.
+run("pnpm", ["install", "--no-frozen-lockfile"]);
 run("node", ["scripts/stamp-version.ts"]);
 
 const changelog = readFileSync("node_modules/@earendil-works/pi-durable/CHANGELOG.md", "utf8");
