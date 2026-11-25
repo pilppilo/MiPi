@@ -1,0 +1,10 @@
+{
+  "id": "dentist-reminder",
+  "description": "A one-time reminder always sends a message.",
+  "instruction": "Remind me to call the dentist and move Wednesday's appointment.",
+  "deliveredAt": "Tue, Nov 24, 2026, 09:00 CST",
+  "expect": {
+    "kind": "send",
+    "mustMatch": ["\\bdentist\\b", "\\b(?:call|phone|reschedule|move)\\b"]
+  }
+}

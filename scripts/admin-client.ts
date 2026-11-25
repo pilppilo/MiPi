@@ -22,6 +22,17 @@ export interface ServiceToken {
   readonly clientSecret: string;
 }
 
+/** The deployed lane's credentials, shared by deploy and heartbeat. */
+export function adminClientFromEnv(url: string, env: NodeJS.ProcessEnv): AdminCall {
+  const { CF_ACCESS_CLIENT_ID: clientId, CF_ACCESS_CLIENT_SECRET: clientSecret } = env;
+  return adminClient(
+    url,
+    [env.ADMIN_TOKEN ?? "", env.ADMIN_TOKEN_PREVIOUS ?? ""],
+    fetch,
+    clientId && clientSecret ? { clientId, clientSecret } : undefined,
+  );
+}
+
 /**
  * Calls the admin API with the first token, and on a 401 tries the next ones in order (`ADMIN_TOKEN`, then
  * `ADMIN_TOKEN_PREVIOUS` while a lane's token is being rotated: the running Worker still has the old one). The first

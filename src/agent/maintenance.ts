@@ -15,6 +15,7 @@ export type MetaKey =
   | "pi_durable_version"
   | "schema_version"
   | "task_versions"
+  | "alarm_lost_at"
   | "maintenance"
   /** When the running export or restore began (ms since the epoch). */
   | "maintenance_started_at"
@@ -80,7 +81,7 @@ export interface ExportHeader {
   readonly format: "mipi-export";
   readonly formatVersion: 1;
   readonly exportedAt: string;
-  /** `app_meta` as it was at export, minus maintenance flags. */
+  /** `app_meta` as it was at export, excluding local operational state. */
   readonly meta: Meta;
   readonly schema: readonly SchemaObject[];
 }
@@ -168,6 +169,7 @@ export function exportHeader(sql: SqlStorage, now: Date = new Date()): ExportHea
     maintenance: _maintenance,
     maintenance_started_at: _startedAt,
     restoring: _restoring,
+    alarm_lost_at: _alarmLostAt,
     ...meta
   } = readMeta(sql);
   return {

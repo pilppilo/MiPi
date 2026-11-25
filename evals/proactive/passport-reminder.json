@@ -1,0 +1,16 @@
+{
+  "id": "passport-reminder",
+  "description": "A brief one-time reminder with a saved preference.",
+  "instruction": "Remind me to put my passport in my bag.",
+  "deliveredAt": "Tue, Nov 24, 2026, 09:00 CST",
+  "memory": [
+    {
+      "id": "m1",
+      "text": "For personal reminders, I prefer one brief sentence."
+    }
+  ],
+  "expect": {
+    "kind": "send",
+    "mustMatch": ["\\bpassport\\b"]
+  }
+}

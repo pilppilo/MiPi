@@ -77,7 +77,14 @@ import {
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import type { TelegramInbound } from "../doors/telegram/update.ts";
 import type { TelegramAdmission } from "../worker/telegram.ts";
-import { AlarmScheduler, HEARTBEAT_MS, runAlarmConsumers } from "./alarm.ts";
+import {
+  AlarmScheduler,
+  earliestWake,
+  HEARTBEAT_MS,
+  runAlarmConsumers,
+  suspectLostAlarm,
+} from "./alarm.ts";
+import { type HeartbeatStatus, readHeartbeat } from "./heartbeat.ts";
 import { WakeSources } from "./wake-sources.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../doors/telegram/channel.ts";
 import { botApiSender } from "../doors/telegram/bot-api.ts";
@@ -227,6 +234,7 @@ export interface AdminStatus {
   readonly rows: Readonly<Record<string, number>>;
   /** The usage readout (M9) as last measured, with providers' cached figures, while open; absent if it failed. */
   readonly usage?: UsageReadout;
+  readonly heartbeat?: HeartbeatStatus;
   /** The extensions in use, in default order, and any replaced at startup (COD-209); absent until composed. */
   readonly extensions?: {
     readonly active: readonly string[];
@@ -245,6 +253,7 @@ export class MipiAgent extends DurableObject<Env> {
   #composition: AgentComposition | undefined;
   #modelList!: ModelList;
   #state: AgentState = { kind: "refused", reason: "Starting" };
+  #pendingAlarmLost: number | undefined;
   /** The close in progress before maintenance (`#closeForMaintenance`). */
   #closing: Promise<void> | undefined;
   /** The data's fingerprint when the current export began; a different one at the end means something wrote. */
@@ -269,14 +278,15 @@ export class MipiAgent extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    void ctx.blockConcurrencyWhile(() => this.#start());
+    void ctx.blockConcurrencyWhile(() => this.#start({ checkAlarm: true }));
   }
 
   /** Opens the agent unless maintenance is running or the startup guard refuses the stored data. */
-  async #start(): Promise<void> {
+  async #start({ checkAlarm = false }: { readonly checkAlarm?: boolean } = {}): Promise<void> {
     const sql = this.ctx.storage.sql;
     let meta = readMeta(sql);
-    if (isStaleExport(meta)) {
+    const staleExport = isStaleExport(meta);
+    if (staleExport) {
       // The script that began this export died; nothing is half-written by an export, so the agent opens again.
       reportError("Abandoned a stale export", new Error("The export never ended"), {
         startedAt: meta.maintenance_started_at,
@@ -316,7 +326,7 @@ export class MipiAgent extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       return;
     }
-    await this.#initialize();
+    await this.#initialize(checkAlarm && !staleExport && meta.app_version !== undefined);
     // Recorded only after Pi Durable opened the data successfully.
     writeMeta(sql, {
       app_version: MIPI_VERSION,
@@ -345,6 +355,7 @@ export class MipiAgent extends DurableObject<Env> {
   /** Closes the harness and every connection, so nothing writes while maintenance runs. */
   async #shutdown(): Promise<void> {
     if (this.#state.kind !== "open") return;
+    this.#flushPendingAlarmLost();
     this.#state = { kind: "refused", reason: "Closing" };
     for (const socket of this.#connections()) {
       try {
@@ -382,6 +393,7 @@ export class MipiAgent extends DurableObject<Env> {
   // ---- Admin (called by the Worker's /api/admin routes, which check ADMIN_TOKEN) ----
 
   async adminStatus(): Promise<AdminStatus> {
+    this.#flushPendingAlarmLost();
     let bookmark: string | undefined;
     try {
       bookmark = await this.ctx.storage.getCurrentBookmark();
@@ -389,10 +401,22 @@ export class MipiAgent extends DurableObject<Env> {
       // Point-in-time recovery is not available here.
     }
     let usage: UsageReadout | undefined;
+    let heartbeat: HeartbeatStatus | undefined;
     if (this.#state.kind === "open") {
+      const now = Date.now();
+      try {
+        heartbeat = await readHeartbeat(
+          this.#harness,
+          this.ctx.storage.sql,
+          this.#composition!.extensions.active.flatMap(({ schedules }) => schedules ?? []),
+          now,
+        );
+      } catch (error) {
+        reportError("Reading the heartbeat for the admin status failed", error);
+      }
       try {
         // As stored: no provider is asked and nothing is written, so a deploy's checks never wait or write.
-        usage = await readUsage(this.#harness, this.#providerUsage, Date.now(), { fresh: false });
+        usage = await readUsage(this.#harness, this.#providerUsage, now, { fresh: false });
       } catch (error) {
         reportError("Reading the usage for the admin status failed", error);
       }
@@ -408,6 +432,7 @@ export class MipiAgent extends DurableObject<Env> {
       ...(bookmark === undefined ? {} : { bookmark }),
       rows: rowCounts(this.ctx.storage.sql),
       ...(usage === undefined ? {} : { usage }),
+      ...(heartbeat === undefined ? {} : { heartbeat }),
       ...(this.#composition === undefined
         ? {}
         : {
@@ -652,11 +677,21 @@ export class MipiAgent extends DurableObject<Env> {
     return readUsage(this.#harness, this.#providerUsage, Date.now());
   }
 
-  async #initialize(): Promise<void> {
+  #flushPendingAlarmLost(): void {
+    const at = this.#pendingAlarmLost;
+    if (at === undefined) return;
+    writeMeta(this.ctx.storage.sql, { alarm_lost_at: String(at) });
+    this.#pendingAlarmLost = undefined;
+    reportError("The agent's alarm was missing at startup", new Error("Lost alarm"), { at });
+  }
+
+  async #initialize(checkAlarm: boolean): Promise<void> {
     // A fallback before anything can throw: an object whose open or recovery fails is started again.
     const fallback = Date.now() + HEARTBEAT_MS;
-    const current = await this.ctx.storage.getAlarm();
-    if (current === null || current > fallback) await this.ctx.storage.setAlarm(fallback);
+    const alarmBeforeStart = await this.ctx.storage.getAlarm();
+    if (alarmBeforeStart === null || alarmBeforeStart > fallback) {
+      await this.ctx.storage.setAlarm(fallback);
+    }
 
     const storage = await openDurableObjectSqliteStorage(this.ctx.storage);
     const composition = this.#composition ?? this.#compose();
@@ -816,6 +851,12 @@ export class MipiAgent extends DurableObject<Env> {
       // Each source's first look, before the alarm is set: its wake is in the first write, and nothing of it is in
       // flight once opening is over (the memory pass).
       for (const prepare of prepares) await prepare();
+      if (checkAlarm) {
+        const now = Date.now();
+        const wake = earliestWake(harness.wake(), this.#wakeSources.wake());
+        // The alarm handler gets the first chance to identify an ordinary alarm delivery.
+        if (suspectLostAlarm(alarmBeforeStart, wake, now)) this.#pendingAlarmLost = now;
+      }
       // Armed before `resume()` runs anything, as for any call that can start work.
       await this.#alarm.schedule(harness.wake());
       // Continue work a lost instance left, and make due sleeps runnable.
@@ -850,6 +891,7 @@ export class MipiAgent extends DurableObject<Env> {
    * stored; `unavailable` (maintenance, refused data, a failed commit) makes Telegram deliver it again later.
    */
   async telegramAdmit(update: TelegramInbound, host?: string): Promise<TelegramAdmission> {
+    this.#flushPendingAlarmLost();
     await this.#reopenIfStaleExport();
     const telegram = this.#telegram;
     if (this.#state.kind !== "open" || telegram === undefined) return { kind: "unavailable" };
@@ -886,6 +928,7 @@ export class MipiAgent extends DurableObject<Env> {
     host: string | undefined,
     call: (relay: RelayRuntime) => Promise<RelayResult>,
   ): Promise<RelayResult> {
+    this.#flushPendingAlarmLost();
     await this.#reopenIfStaleExport();
     const relay = this.#relay;
     if (this.#state.kind !== "open" || relay === undefined) return { kind: "unavailable" };
@@ -916,6 +959,7 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    this.#flushPendingAlarmLost();
     await this.#reopenIfStaleExport();
     if (this.#state.kind !== "open") return this.#refusal();
     if (request.method !== "GET") {
@@ -965,6 +1009,7 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
+    this.#pendingAlarmLost = undefined;
     if (this.#state.kind === "maintenance") {
       // Paused, and no alarm writes while an export reads: the run that started maintenance ends it.
       return;

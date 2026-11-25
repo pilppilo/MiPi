@@ -11,6 +11,18 @@ export { earliestWake };
 
 /** While work can run, the alarm stays this far ahead, so an evicted instance is woken to resume it. */
 export const HEARTBEAT_MS = 60_000;
+const ALARM_FUTURE_SKEW_MS = 60_000;
+const ALARM_DELIVERY_GRACE_MS = 5 * 60_000;
+
+/** A missing alarm during startup is also consistent with Cloudflare delivering it. */
+export function suspectLostAlarm(alarm: number | null, wake: SourceWake, now: number): boolean {
+  return (
+    alarm === null &&
+    (wake.active ||
+      (wake.at !== undefined &&
+        (wake.at > now + ALARM_FUTURE_SKEW_MS || now - wake.at > ALARM_DELIVERY_GRACE_MS)))
+  );
+}
 
 /** What the scheduler writes to: the object's storage, or a fake in tests. */
 export interface AlarmStorage {

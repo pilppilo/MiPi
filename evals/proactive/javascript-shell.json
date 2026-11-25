@@ -1,0 +1,16 @@
+{
+  "id": "javascript-shell",
+  "description": "The page returned a shell with no status evidence.",
+  "instruction": "Read https://status.example.com/metrics and check current status. If the page shows an outage, tell me its affected service. Stay quiet if it shows normal service.",
+  "deliveredAt": "Tue, Nov 24, 2026, 09:00 CST",
+  "repeats": "every weekday at 09:00",
+  "fetches": {
+    "https://status.example.com/metrics": {
+      "ok": true,
+      "text": "Please enable JavaScript to view this dashboard."
+    }
+  },
+  "expect": {
+    "kind": "unreadable"
+  }
+}
