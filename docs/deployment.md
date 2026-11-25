@@ -31,3 +31,29 @@ MiPi estimates what it spends from each conversation's recorded usage, at pi-ai'
 | `OPENCODE_ORG_ID`      | Environment variable, optional                     | The OpenCode workspace id, if Go's usage endpoint asks for one.                                                                                                                                                                                                                          |
 
 To pause a lane: GitHub → **Settings → Environments →** the lane **→ Add variable** `MIPI_PAUSED` = `1`, then Actions → **deploy** for that lane. To resume, set it to `0` (or delete it) and deploy again. Setting a variable in the Cloudflare dashboard works too, but the next deploy replaces it. The run cap (`MIPI_DAILY_RUN_CAP`) still applies beside the spend cap. To turn the spend cap off for a lane, set its variable `MIPI_DAILY_SPEND_CAP` to `off`.
+
+### OpenCode Go usage endpoint
+
+MiPi requests `GET https://opencode.ai/zen/go/v1/usage` with a five-second timeout and `Accept: application/json`. The bearer token comes from `OPENCODE_USAGE_KEY` when set and otherwise from `OPENCODE_API_KEY`. If `OPENCODE_ORG_ID` is set, MiPi sends it as `x-opencode-org-id`. Empty values and `off` count as unset. The implementation is in [the Go usage reader](../src/extensions/optional/opencode-go/usage.ts).
+
+The response has a `usage` object with `rolling`, `weekly`, and `monthly` windows. Each window has `status` (`ok` or `rate-limited`), numeric `percent`, and a date string in `resetsAt`. A 401 means the key lacks usage permission. A 403 means the key has no Go plan. Those responses, other HTTP failures, timeouts, and invalid responses make the provider readout unavailable. MiPi still shows its own spend estimate and chat continues. Admin status reads cached provider figures without making a provider call.
+
+Run [`spike-probe.yml`](../.github/workflows/spike-probe.yml) manually to check the live endpoint URLs and response shape from outside the Worker.
+
+## Scheduled checks
+
+- [`heartbeat.yml`](../.github/workflows/heartbeat.yml) checks both deployed lanes daily at 14:17 UTC. It flags recent lost alarms, unhealthy agent state, and overdue schedules without a hold.
+- [`evals.yml`](../.github/workflows/evals.yml) checks proactive replies against OpenCode Go on Mondays at 15:17 UTC using staging credentials and mocked fetch results.
+- [`canary.yml`](../.github/workflows/canary.yml) exercises the latest Pi Durable release on Mondays at 16:17 UTC. It runs the upgrade, checks, and tests in the runner. If a candidate fails, it creates or updates one open GitHub issue for that version. Use **Run workflow** to check a specific version or leave the input blank to check npm's latest.
+
+## Upgrading Pi Durable
+
+A canary failure issue or an `@earendil-works/*` Dependabot PR can prompt an upgrade. Close the Dependabot signal PR and use the upgrade script so the pins, lockfile, workspace release-age exceptions, and version stamp move together.
+
+1. Create a dedicated branch from `main` and run `pnpm upgrade:pi <version>`. Read the upstream changes and open ledger entries it prints.
+2. Fix changed imports or APIs through `src/agent/pi/`. Start with [the Pi contract test](../test/contract.test.ts), which exercises the exports MiPi relies on. Run `pnpm check` and `pnpm test`.
+3. Update [the Pi Durable ledger](pi-durable-ledger.md). Close entries fixed upstream and remove their workaround code. Add any new entries and mark their code with `pi-ledger L<n>` comments.
+4. Run `pnpm changeset` and add **Pi Durable** and **Migration** notes. Name any ledger changes. If older builds cannot open data written by the upgrade, put `**One-way:**` in a `> [!WARNING]` alert. If the release changes stored data, run `pnpm fixture:capture` after `pnpm bump` and commit the fixture with the release.
+5. Open a PR. Once the owner merges it, staging deploys automatically. Use staging for a day before the owner runs the manual **deploy** workflow for production. The workflow backs up the lane first.
+
+If the upgrade regresses, follow the [rollback and restore order](#lanes-deploys-and-rollback). A rollback across a one-way release needs a backup from before the upgrade.
