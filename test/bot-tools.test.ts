@@ -86,6 +86,45 @@ function settlement(harness: Harness, connectors: Awaited<ReturnType<typeof open
 }
 
 describe("main bot tools", () => {
+  it("waits for the recovery alarm before admitting a queued bot reply", async () => {
+    const arming = Promise.withResolvers<void>();
+    const armed = Promise.withResolvers<void>();
+    const { harness, main, connectors } = await open(() => say("Got it."), true);
+    const answers = new AnswerSettlement({
+      harness,
+      connectors,
+      onWakeChange: () => {
+        arming.resolve();
+        return armed.promise;
+      },
+      report: (message, error) => {
+        throw new Error(message, { cause: error });
+      },
+    });
+    try {
+      await harness.commit(async (tx) => {
+        (await tx.doc(BotReplies)).pending = [
+          { id: "alarm-order", target: main.id, name: "PiDu", text: "Notes ready.", hop: 1 },
+        ];
+      }, ctx);
+      const settling = answers.reconcile();
+      await arming.promise;
+      try {
+        expect(answers.wake().at).toBeDefined();
+        expect((await harness.snapshot(BotReplies, ctx))?.pending).toHaveLength(1);
+        expect((await harness.snapshot(Proactive, ctx))?.pending ?? []).toEqual([]);
+      } finally {
+        armed.resolve();
+        await settling;
+      }
+      expect((await harness.snapshot(BotReplies, ctx))?.pending).toEqual([]);
+      expect((await harness.snapshot(Proactive, ctx))?.pending).toHaveLength(1);
+    } finally {
+      answers.close();
+      await harness.close(ctx);
+    }
+  });
+
   it("replays the same message_bot task after admission without delegating twice", async () => {
     const admitted = Promise.withResolvers<void>();
     const calls: string[] = [];
@@ -706,6 +745,8 @@ describe("main bot tools", () => {
         ctx,
       );
       expect(settled).toMatchObject({ status: "unanswered", reason: "aborted" });
+      await answers.reconcile();
+      expect((await harness.snapshot(Proactive, ctx))?.lastRun?.outcome).toBe("stopped");
       expect(await harness.commit((tx) => routeSchedule(tx, botId), ctx)).toEqual({ kind: "held" });
       await harness.commit(
         (tx) =>

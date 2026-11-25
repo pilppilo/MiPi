@@ -15,6 +15,7 @@ import { pendingSubmissions, PROACTIVE_DOC_KIND, reconcileAnswers } from "./proa
 import type { CommitChanges, SourceWake, WakeSource } from "./wake-sources.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import { BotReplies, deliverBotReplies } from "./bot-messages.ts";
+import { HEARTBEAT_MS } from "./alarm.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -24,8 +25,8 @@ export interface AnswerSettlementOptions {
   readonly providers?: Providers;
   /** Messages were enqueued: the doors may send them now rather than at the next alarm. */
   readonly onQueued?: () => void;
-  /** The settlement's `wake()` changed. */
-  readonly onWakeChange: () => void;
+  /** Persists the alarm for the settlement's current `wake()`. */
+  readonly onWakeChange: () => void | Promise<void>;
   readonly report: (message: string, error: unknown) => void;
   readonly now?: () => number;
 }
@@ -121,26 +122,28 @@ export class AnswerSettlement implements WakeSource {
         const replies = (await this.#options.harness.snapshot(BotReplies, context))?.pending ?? [];
         if (this.#closed) return;
         if (replies.length === 0) {
-          this.#setReplyDue(undefined);
+          await this.#setReplyDue(undefined);
           return;
         }
         // Keep an alarm armed if an admission throws before we can compute the next deadline.
-        this.#setReplyDue(now + 60_000);
+        this.#replyDue = now + HEARTBEAT_MS;
+        await this.#options.onWakeChange();
+        if (this.#closed) return;
         const next = await deliverBotReplies(
           this.#options.harness,
           replies,
           this.#options.connectors.delivery,
           now,
         );
-        this.#setReplyDue(next === Infinity ? undefined : next);
+        await this.#setReplyDue(next === Infinity ? undefined : next);
       }
     });
   }
 
-  #setReplyDue(at: number | undefined): void {
+  async #setReplyDue(at: number | undefined): Promise<void> {
     if (this.#closed || at === this.#replyDue) return;
     this.#replyDue = at;
-    this.#options.onWakeChange();
+    await this.#options.onWakeChange();
   }
 
   /** Every pending input, read in a commit that also refreshes the wake from it. */
@@ -193,7 +196,7 @@ export class AnswerSettlement implements WakeSource {
     if (this.#closed) return result;
     if (active !== this.#wake.active) {
       this.#wake = { active };
-      this.#options.onWakeChange();
+      await this.#options.onWakeChange();
     }
     return result;
   }

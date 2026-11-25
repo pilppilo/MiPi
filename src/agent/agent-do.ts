@@ -873,9 +873,7 @@ export class MipiAgent extends DurableObject<Env> {
         // Telegram sends what was queued now, rather than at the next alarm.
         onQueued: () => telegram.refresh(),
         onWakeChange: () =>
-          void this.#alarm
-            .schedule(harness.wake())
-            .catch(() => this.ctx.abort("Alarm write failed")),
+          this.#alarm.schedule(harness.wake()).catch(() => this.ctx.abort("Alarm write failed")),
         report: reportError,
       });
       // Each part that needs the alarm, once. The alarm runs them in this order, after Pi Durable's resume: answers

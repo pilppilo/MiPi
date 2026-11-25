@@ -682,6 +682,14 @@ export async function reconcileAnswers(
     }
   >();
   for (const item of unanswered) {
+    if (
+      item.source === "proactive" &&
+      isBot(item.input) &&
+      (item.record.reason === "aborted" || item.record.reason === "withdrawn")
+    ) {
+      recordOutcome(item.input.submissionId, "stopped");
+      continue;
+    }
     const stop = item.source === "proactive" ? stopOf.get(item.input.submissionId) : undefined;
     if (item.source === "proactive") {
       recordOutcome(item.input.submissionId, stop === undefined ? "failed" : "stopped");
@@ -697,7 +705,6 @@ export async function reconcileAnswers(
         : undefined;
     if (item.source === "proactive" && isBot(item.input)) {
       const { input, record } = item;
-      if (record.reason === "aborted" || record.reason === "withdrawn") continue;
       const prefer = ownerReply(input);
       if (
         notice?.limit.kind === "usage" &&
