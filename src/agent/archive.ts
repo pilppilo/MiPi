@@ -9,7 +9,8 @@
  * its times and a one-time reminder parks itself here and ends (pi-ledger L11).
  *
  * A chat from before bots, archived when MiPi was made (COD-197), is archived too, but its reminders are the owner's
- * and keep running: they run in MiPi instead, so an archived conversation never runs one itself.
+ * and keep running: they run in MiPi instead, so an archived conversation never runs one itself. Restoring one makes it
+ * a cobot under MiPi (COD-201), and its reminders run in it again.
  */
 import { type Context } from "./pi/context.ts";
 import {
@@ -20,14 +21,19 @@ import {
   type Tx,
 } from "./pi/durable.ts";
 import {
+  type BotKind,
   Bots,
   type BotsState,
   ChannelBindings,
   ConversationMeta,
+  type ConversationMetaState,
   type HeldReminder,
+  profileOf,
+  setProfile,
 } from "./conversations.ts";
 import type { Delivery, DeliveryDestination } from "./delivery.ts";
 import { isPaused } from "./gates.ts";
+import { DEFAULT_PROFILE, RELAY_PROFILE, type Profiles } from "./profiles.ts";
 import { expectProactive, recentProactiveSends } from "./proactive.ts";
 import { AgentSettings } from "./settings.ts";
 import { DEFAULT_TIME_ZONE, localTime } from "./stamp.ts";
@@ -37,6 +43,32 @@ export type { HeldReminder };
 
 /** What a door says to a message for an archived conversation. */
 export const ARCHIVED_REPLY = "This bot is archived. Restore it to talk to it again.";
+
+/** `BOT_NAME_MAX` (`bots.ts`), kept here because `bots.ts` imports this module. */
+const NAME_MAX = 40;
+
+/** The refusal for a message or change to an archived conversation, worded for what it is (COD-201). */
+export function archivedReply(kind: BotKind | undefined): string {
+  switch (kind) {
+    case undefined:
+      return "This chat is archived. Restore it to talk to it again.";
+    case "cobot":
+      return "This cobot is archived with its bot. Restore the bot to talk to it again.";
+    case "main":
+    case "bot":
+      return ARCHIVED_REPLY;
+    default: {
+      const _: never = kind;
+      return ARCHIVED_REPLY;
+    }
+  }
+}
+
+/** `archivedReply` for `id` when it is archived, in a commit; undefined when it is live. */
+export async function archivedRefusal(tx: Tx, id: number): Promise<string | undefined> {
+  if (!(await isArchived(tx, id))) return undefined;
+  return archivedReply((await tx.doc(ConversationMeta, id as ConversationId)).kind);
+}
 
 /** Whether a conversation is archived, from the session index alone. */
 export function archivedIn(bots: Readonly<BotsState>, id: number): boolean {
@@ -115,11 +147,21 @@ async function cobotsOf(
   return found;
 }
 
-/** Why `id` can't be archived or restored, or undefined. MiPi never can, nor a chat from before bots (yet: COD-201). */
-function refusal(kind: string | undefined, action: "archived" | "restored"): string | undefined {
-  if (kind === "main") return `MiPi can't be ${action}.`;
-  if (kind !== "bot") return `Only a bot can be ${action}.`;
-  return undefined;
+/** Why a conversation can't be archived, or undefined. Only a purpose bot is: its cobots go with it. */
+function archiveRefusal(kind: BotKind | undefined): string | undefined {
+  switch (kind) {
+    case "main":
+      return "MiPi can't be archived.";
+    case "bot":
+      return undefined;
+    case "cobot":
+    case undefined:
+      return "Only a bot can be archived.";
+    default: {
+      const _: never = kind;
+      return "Only a bot can be archived.";
+    }
+  }
 }
 
 /**
@@ -133,7 +175,7 @@ export async function archiveBot(
   now: number,
 ): Promise<ConversationId[]> {
   const meta = await tx.doc(ConversationMeta, id);
-  const refused = refusal(meta.kind, "archived");
+  const refused = archiveRefusal(meta.kind);
   if (refused !== undefined) throw new Error(refused);
   if (meta.archivedAt !== undefined) return [];
   const ids = [id, ...(await cobotsOf(tx, id, (archivedAt) => archivedAt === undefined))];
@@ -162,24 +204,122 @@ export async function abortArchived(
   }
 }
 
+/** What `restoreBot` did: the conversations restored now, and those whose held reminders to send (`replayHeld`). */
+export type Restored = {
+  readonly restored: ConversationId[];
+  readonly conversations: ConversationId[];
+};
+
 /**
- * Restores a bot and the cobots archived with it (the same `archivedAt`), in the caller's commit, and binds back each
- * channel key that fell back to MiPi from one of them and wasn't bound elsewhere since. Returns the conversations
- * restored now, and every conversation of the bot whose held reminders are due (`replayHeld`), the bot's included
- * when it was live already, so a restore cut short sends what it left.
+ * Restores an archived conversation in the caller's commit (COD-201 widened it from bots):
+ * - a purpose bot, with the cobots archived with it (`restoreBotTree`);
+ * - a cobot only while its bot is live: one archived with its bot comes back with it, never on its own under another
+ *   bot, whose purpose would contradict its history and break its cached prompt;
+ * - a chat from before bots becomes a cobot under MiPi (`restoreEarlierChat`).
+ * MiPi is never archived, so never restored.
  */
 export async function restoreBot(
   tx: Tx,
   id: ConversationId,
-): Promise<{ readonly restored: ConversationId[]; readonly conversations: ConversationId[] }> {
+  profiles: Profiles,
+): Promise<Restored> {
   const meta = await tx.doc(ConversationMeta, id);
-  const refused = refusal(meta.kind, "restored");
-  if (refused !== undefined) throw new Error(refused);
+  const kind = meta.kind;
+  switch (kind) {
+    case "main":
+      throw new Error("MiPi can't be restored.");
+    case "bot":
+      return restoreBotTree(tx, id, meta);
+    case "cobot":
+      return restoreCobot(tx, id, meta);
+    case undefined:
+      return restoreEarlierChat(tx, id, meta, profiles);
+    default: {
+      const _: never = kind;
+      throw new Error("Only a bot can be restored.");
+    }
+  }
+}
+
+/**
+ * Restores a bot and the cobots archived with it (the same `archivedAt`), and binds back each channel key that fell
+ * back to MiPi from one of them and wasn't bound elsewhere since. Returns the conversations restored now, and every
+ * conversation of the bot whose held reminders are due (`replayHeld`), the bot's included when it was live already, so
+ * a restore cut short sends what it left.
+ */
+async function restoreBotTree(
+  tx: Tx,
+  id: ConversationId,
+  meta: ConversationMetaState,
+): Promise<Restored> {
   const at = meta.archivedAt;
   // Live already: its live cobots, whose held reminders a restore cut short may have left.
   const cobots = await cobotsOf(tx, id, (archivedAt) => archivedAt === at);
   if (at === undefined) return { restored: [], conversations: [id, ...cobots] };
   const ids = [id, ...cobots];
+  await unarchive(tx, ids);
+  return { restored: ids, conversations: ids };
+}
+
+/** A cobot alone, only under a live bot: archived with its bot, it waits for the bot's restore. */
+async function restoreCobot(
+  tx: Tx,
+  id: ConversationId,
+  meta: ConversationMetaState,
+): Promise<Restored> {
+  const parentId = meta.bot as ConversationId | undefined;
+  const parent = parentId === undefined ? undefined : await tx.doc(ConversationMeta, parentId);
+  if (parentId === undefined || parent === undefined || parent.kind === undefined) {
+    throw new Error("This cobot has no bot to restore it under.");
+  }
+  if (parent.archivedAt !== undefined || archivedIn(await tx.doc(Bots), parentId)) {
+    throw new Error(`Restore ${parent.name ?? "its bot"} first.`);
+  }
+  if (meta.archivedAt === undefined) return { restored: [], conversations: [id] };
+  await unarchive(tx, [id]);
+  return { restored: [id], conversations: [id] };
+}
+
+/**
+ * A chat from before bots, restored: a cobot under MiPi, named from its title, on its own profile, or `default` for
+ * the relay's old `pidu`, which no live chat newly keeps. It stays out of the bot name index and the active bot limit.
+ * Its reminders, which ran in MiPi while it was archived (`routeSchedule`), run in it again from this commit.
+ */
+async function restoreEarlierChat(
+  tx: Tx,
+  id: ConversationId,
+  meta: ConversationMetaState,
+  profiles: Profiles,
+): Promise<Restored> {
+  const bots = await tx.doc(Bots);
+  if (bots.mainId === undefined) throw new Error("MiPi isn't set up yet.");
+  if (meta.archivedAt === undefined && !archivedIn(bots, id)) {
+    throw new Error("Only an archived chat can be restored.");
+  }
+  meta.kind = "cobot";
+  meta.bot = bots.mainId;
+  meta.name = earlierChatName(meta.title);
+  meta.createdBy ??= "owner";
+  if (profileOf(meta) === RELAY_PROFILE) await setProfile(tx, id, DEFAULT_PROFILE, profiles);
+  await unarchive(tx, [id]);
+  return { restored: [id], conversations: [id] };
+}
+
+/** A restored earlier chat's cobot name: its title, cut to a name's length. */
+function earlierChatName(title: string | undefined): string {
+  const line = title?.split("\n")[0]?.trim() ?? "";
+  if (line.length === 0) return "Earlier chat";
+  const chars = [...line];
+  return chars.length <= NAME_MAX
+    ? line
+    : `${chars
+        .slice(0, NAME_MAX - 1)
+        .join("")
+        .trimEnd()}…`;
+}
+
+/** Clears `archivedAt` and the index entry of each, and binds back the channel keys that fell back from them. */
+async function unarchive(tx: Tx, ids: readonly ConversationId[]): Promise<void> {
   const bots = await tx.doc(Bots);
   const archived = { ...bots.archived };
   for (const conversationId of ids) {
@@ -198,7 +338,6 @@ export async function restoreBot(
     delete released[key];
   }
   bots.released = released;
-  return { restored: ids, conversations: ids };
 }
 
 /**

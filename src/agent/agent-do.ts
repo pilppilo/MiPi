@@ -43,6 +43,7 @@ import { bindBotDoor, BOT_LIST_CHANGE } from "./bot-tools.ts";
 import {
   abortArchived,
   ARCHIVED_REPLY,
+  archivedRefusal,
   archiveBot,
   isArchived,
   replayHeld,
@@ -299,6 +300,11 @@ export class MipiAgent extends DurableObject<Env> {
   #activity!: WatchHandle<TaskGraph>;
   readonly #views = new Map<WebSocket, WatchHandle<ConversationView>>();
   readonly #typingConnections = new Set<WebSocket>();
+  /**
+   * The archive index as the commit observer last saw it (COD-201): only conversations archived since move their
+   * watchers to MiPi, so an archived conversation opened read-only stays open through unrelated changes.
+   */
+  #archivedSeen: ReadonlySet<number> | undefined;
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
   /**
    * The parts that need the alarm besides Pi Durable (`wake-sources.ts`): registered while the harness opens
@@ -815,11 +821,17 @@ export class MipiAgent extends DurableObject<Env> {
               Promise.resolve()
                 .then(async () => {
                   if (this.#harness !== harness || this.#state.kind !== "open") return;
-                  const archived =
-                    (await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {};
+                  const archived = Object.keys(
+                    (await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {},
+                  ).map(Number);
                   if (this.#harness !== harness || this.#state.kind !== "open") return;
+                  const seen = this.#archivedSeen;
+                  this.#archivedSeen = new Set(archived);
+                  // Archived since the last look (by a tool, say): their watchers move. One opened while archived stays.
                   await this.#leaveArchived(
-                    Object.keys(archived).map(Number) as ConversationId[],
+                    (seen === undefined
+                      ? archived
+                      : archived.filter((id) => !seen.has(id))) as ConversationId[],
                     harness,
                   );
                   if (this.#harness === harness && this.#state.kind === "open") {
@@ -840,6 +852,9 @@ export class MipiAgent extends DurableObject<Env> {
       if (await ensureBots(harness, profiles, Date.now())) {
         console.log(JSON.stringify({ message: "Made the main bot and archived older chats" }));
       }
+      this.#archivedSeen = new Set(
+        Object.keys((await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {}).map(Number),
+      );
       // Before anything runs: every conversation offers its profile's tools (older ones may lack them).
       const synced = await syncProfileTools(harness, profiles);
       if (synced.length > 0) {
@@ -1423,7 +1438,7 @@ export class MipiAgent extends DurableObject<Env> {
           command.conversationId as ConversationId,
         );
         const { conversations } = await this.#harness.commit(
-          (tx) => restoreBot(tx, conversation.id),
+          (tx) => restoreBot(tx, conversation.id, this.#composition!.profiles),
           BACKGROUND_CONTEXT,
         );
         // Held reminders go out marked late; while paused they stay held for the next start (`replayHeld`).
@@ -1496,7 +1511,7 @@ export class MipiAgent extends DurableObject<Env> {
           async (tx) =>
             [
               await tx.submissionByRequest(conversation.id, requestId),
-              await isArchived(tx, conversation.id),
+              await archivedRefusal(tx, conversation.id),
             ] as const,
           BACKGROUND_CONTEXT,
         );
@@ -1511,8 +1526,8 @@ export class MipiAgent extends DurableObject<Env> {
           });
           return;
         }
-        // An archived conversation never runs (COD-198): restore it first.
-        if (archived) throw new Error(ARCHIVED_REPLY);
+        // An archived conversation never runs (COD-198), and is read-only when opened (COD-201): restore it first.
+        if (archived !== undefined) throw new Error(archived);
         // Paused (`MIPI_PAUSED`, M9): a new message is refused with a clear reason, nothing admitted. A retry of one
         // admitted before still gets its answer above.
         if (await isPausedNow(this.#harness)) {
@@ -1580,6 +1595,9 @@ export class MipiAgent extends DurableObject<Env> {
           command.model === undefined ? undefined : await this.#modelList.require(command.model);
         const profile = command.profile;
         await this.#harness.commit(async (tx) => {
+          // Read-only while archived (COD-201): nothing about it changes until it is restored.
+          const archived = await archivedRefusal(tx, conversation.id);
+          if (archived !== undefined) throw new Error(archived);
           if (model !== undefined) await configure(tx, conversation.id, { model });
           if (profile !== undefined && isProfileName(profile)) {
             await setProfile(tx, conversation.id, profile, this.#composition!.profiles);

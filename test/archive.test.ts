@@ -98,7 +98,7 @@ const archive = async (harness: Harness, id: ConversationId) => {
 };
 
 const restore = async (harness: Harness, id: ConversationId) => {
-  const { conversations } = await harness.commit((tx) => restoreBot(tx, id), ctx);
+  const { conversations } = await harness.commit((tx) => restoreBot(tx, id, PROFILES), ctx);
   return replayHeld(harness, conversations, clock.now, ctx);
 };
 
@@ -306,7 +306,7 @@ describe("archive and restore (COD-198)", () => {
       }
     }));
 
-  it("never archives or restores MiPi, nor a chat from before bots", () =>
+  it("never archives or restores MiPi, nor archives a chat from before bots", () =>
     inObject(async (storage) => {
       const agent = await openAgent(storage);
       try {
@@ -316,13 +316,17 @@ describe("archive and restore (COD-198)", () => {
         await expect(harness.commit((tx) => archiveBot(tx, main, clock.now), ctx)).rejects.toThrow(
           "MiPi can't be archived.",
         );
-        await expect(harness.commit((tx) => restoreBot(tx, main), ctx)).rejects.toThrow(
+        await expect(harness.commit((tx) => restoreBot(tx, main, PROFILES), ctx)).rejects.toThrow(
           "MiPi can't be restored.",
         );
         const chat = await harness.createConversation({ ownership: { kind: "ownerless" } }, ctx);
         await expect(
           harness.commit((tx) => archiveBot(tx, chat.id, clock.now), ctx),
         ).rejects.toThrow("Only a bot can be archived.");
+        // A live chat isn't archived, so there's nothing to restore.
+        await expect(
+          harness.commit((tx) => restoreBot(tx, chat.id, PROFILES), ctx),
+        ).rejects.toThrow("Only an archived chat can be restored.");
         expect(await harness.commit((tx) => isArchived(tx, main), ctx)).toBe(false);
       } finally {
         await agent.close();
@@ -374,6 +378,95 @@ describe("archive and restore (COD-198)", () => {
         expect((await userTexts(harness, mainId!)).at(-1)).toMatch(/Stretch/);
         expect(await userTexts(harness, chat.id)).toEqual([]);
         expect((await harness.snapshot(Bots, ctx))?.held ?? []).toEqual([]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("restores a cobot only with its bot, or alone under a live bot (COD-201)", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage);
+      try {
+        const { harness } = agent;
+        const { bot, cobot } = await gardenBot(harness);
+        expect(await archive(harness, bot)).toEqual([bot, cobot]);
+        await expect(harness.commit((tx) => restoreBot(tx, cobot, PROFILES), ctx)).rejects.toThrow(
+          "Restore Garden first.",
+        );
+        expect(await harness.commit((tx) => isArchived(tx, cobot), ctx)).toBe(true);
+        await restore(harness, bot);
+        expect(await harness.commit((tx) => isArchived(tx, cobot), ctx)).toBe(false);
+        // Live already: restoring it again restores nothing.
+        expect(await harness.commit((tx) => restoreBot(tx, cobot, PROFILES), ctx)).toEqual({
+          restored: [],
+          conversations: [cobot],
+        });
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("restores a chat from before bots as a cobot under MiPi, and runs its reminders in it (COD-201)", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, said("Stretched."));
+      try {
+        const { harness } = agent;
+        const { mainId, names } = (await harness.snapshot(Bots, ctx))!;
+        // As `ensureBots` leaves a chat from before bots, on the relay's old profile.
+        const chat = await harness.createConversation({ ownership: { kind: "ownerless" } }, ctx);
+        await harness.commit(async (tx) => {
+          const meta = await tx.doc(ConversationMeta, chat.id);
+          meta.archivedAt = clock.now;
+          meta.title = "Morning stretches and a very long title that runs on";
+          meta.profile = "pidu";
+          const bots = await tx.doc(Bots);
+          bots.archived = { ...bots.archived, [String(chat.id)]: clock.now };
+        }, ctx);
+        await harness.commit(
+          (tx) =>
+            tx.createTask(
+              ScheduledReminder,
+              {
+                id: "reminder:old",
+                conversationId: chat.id,
+                instruction: "Stretch",
+                zone: ZONE,
+                first: clock.now + 60_000,
+                destination: { kind: "web", conversationId: chat.id },
+              },
+              { ownership: { kind: "conversation" }, conversationId: chat.id, background: true },
+            ),
+          ctx,
+        );
+        expect(await harness.commit((tx) => restoreBot(tx, chat.id, PROFILES), ctx)).toEqual({
+          restored: [chat.id],
+          conversations: [chat.id],
+        });
+        const meta = await harness.snapshot(ConversationMeta, chat.id, ctx);
+        expect(meta).toMatchObject({
+          kind: "cobot",
+          bot: mainId,
+          name: "Morning stretches and a very long title…",
+          profile: "default",
+        });
+        expect(meta?.archivedAt).toBeUndefined();
+        expect([...(meta?.name ?? "")].length).toBeLessThanOrEqual(40);
+        const bots = (await harness.snapshot(Bots, ctx))!;
+        // Out of the bot name index and the archive index.
+        expect(bots.names).toEqual(names);
+        expect(bots.archived?.[String(chat.id)]).toBeUndefined();
+        expect(await harness.commit((tx) => routeSchedule(tx, chat.id), ctx)).toEqual({
+          kind: "run",
+          conversationId: chat.id,
+        });
+        await agent.advance(60_000);
+        expect((await userTexts(harness, chat.id)).at(-1)).toMatch(/Stretch/);
+        expect(await userTexts(harness, mainId as ConversationId)).toEqual([]);
+        // A cobot under a live bot now: restoring it again restores nothing.
+        expect(await harness.commit((tx) => restoreBot(tx, chat.id, PROFILES), ctx)).toEqual({
+          restored: [],
+          conversations: [chat.id],
+        });
       } finally {
         await agent.close();
       }

@@ -231,7 +231,7 @@ describe("the main bot (COD-197)", () => {
       await harness.commit((tx) => archiveBot(tx, parent, NOW + 1), ctx);
       expect(await visible()).not.toContain(cobot);
       await expect(make(parent, "Archived")).rejects.toThrow("A cobot needs a live parent bot.");
-      await harness.commit((tx) => restoreBot(tx, parent), ctx);
+      await harness.commit((tx) => restoreBot(tx, parent, PROFILES), ctx);
       expect(await visible()).toContain(cobot);
     } finally {
       await harness.close(ctx);

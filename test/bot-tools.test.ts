@@ -763,7 +763,7 @@ describe("main bot tools", () => {
       const bound = () =>
         harness.commit((tx) => boundConversation(tx, "relay:pidu", "default", profiles), ctx);
       expect(await bound()).toBe(main.id);
-      await harness.commit((tx) => restoreBot(tx, botId), ctx);
+      await harness.commit((tx) => restoreBot(tx, botId, profiles), ctx);
       expect(await bound()).toBe(botId);
       expect(await harness.commit((tx) => routeSchedule(tx, botId), ctx)).toEqual({
         kind: "run",

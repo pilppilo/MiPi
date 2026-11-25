@@ -205,3 +205,68 @@ export function saveLastRead(
     // Storage full or off: the dots just don't survive a reload.
   }
 }
+
+/** One row of Settings → Archived (COD-201). */
+export type ArchivedEntry = {
+  readonly summary: ConversationSummary;
+  /** What it is: a purpose bot, one of its cobots, or a chat from before bots. */
+  readonly kind: "bot" | "cobot" | "earlier";
+  /** What the row shows under its name: a bot's purpose, or a chat's first line (its title). */
+  readonly detail: string | undefined;
+  /** Why Restore is off, when it is: a cobot comes back only with its bot. */
+  readonly restoreHint: string | undefined;
+};
+
+/** The archived bots, each with its archived cobots, newest first, then the chats from before bots, newest first. */
+export function archivedEntries(
+  conversations: readonly ConversationSummary[],
+): readonly ArchivedEntry[] {
+  const archived = conversations.filter(
+    ({ archivedAt, owner }) => archivedAt !== undefined && owner === undefined,
+  );
+  const newest = (left: ConversationSummary, right: ConversationSummary): number =>
+    (right.archivedAt ?? 0) - (left.archivedAt ?? 0) || right.id - left.id;
+  const cobotsOf = (bot: number) =>
+    archived.filter(({ kind, bot: parent }) => kind === "cobot" && parent === bot).sort(newest);
+  const cobotEntry = (summary: ConversationSummary): ArchivedEntry => ({
+    summary,
+    kind: "cobot",
+    detail: summary.title,
+    restoreHint: restoreHintFor(summary, conversations),
+  });
+  const entries: ArchivedEntry[] = [];
+  const listed = new Set<number>();
+  for (const bot of archived.filter(({ kind }) => kind === "bot").sort(newest)) {
+    entries.push({ summary: bot, kind: "bot", detail: bot.purpose, restoreHint: undefined });
+    listed.add(bot.id);
+    for (const cobot of cobotsOf(bot.id)) {
+      entries.push(cobotEntry(cobot));
+      listed.add(cobot.id);
+    }
+  }
+  // A cobot archived on its own under a live bot (none is yet, but restore allows it).
+  for (const cobot of archived
+    .filter(({ kind, id }) => kind === "cobot" && !listed.has(id))
+    .sort(newest)) {
+    entries.push(cobotEntry(cobot));
+  }
+  for (const chat of archived.filter(({ kind }) => kind === undefined).sort(newest)) {
+    entries.push({ summary: chat, kind: "earlier", detail: chat.title, restoreHint: undefined });
+  }
+  return entries;
+}
+
+/**
+ * Why an archived conversation can't be restored from here, or undefined when it can: a cobot archived with its bot
+ * comes back with the bot, never alone (the agent refuses the same way).
+ */
+export function restoreHintFor(
+  summary: ConversationSummary | undefined,
+  conversations: readonly ConversationSummary[],
+): string | undefined {
+  if (summary?.archivedAt === undefined || summary.kind !== "cobot") return undefined;
+  const parent = conversations.find(({ id }) => id === summary.bot);
+  return parent?.archivedAt === undefined
+    ? undefined
+    : `Restore ${parent.name ?? "its bot"} first.`;
+}
