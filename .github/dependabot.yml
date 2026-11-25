@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Node's types follow the Node version MiPi runs on (.node-version, 22). Raise this with that, not on its own:
+      # a newer major brings a second undici-types and its URL type breaks tsc.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
     groups:
       # Signal only. Close this PR and run pnpm upgrade:pi <version> on a branch to keep the pins, workspace
       # allowlist, src/version.ts, the Pi Durable ledger, and the changeset in sync.
