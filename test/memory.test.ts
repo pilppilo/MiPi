@@ -213,7 +213,8 @@ describe("remember and forget", () => {
     ]);
     try {
       const relay = await conversation(agent.harness);
-      await agent.harness.commit((tx) => setProfile(tx, relay.id, "pidu", PROFILES), ctx);
+      // The relay's tools before bots; it reaches MiPi since (COD-197), with the same everyday tools.
+      await agent.harness.commit((tx) => setProfile(tx, relay.id, "default", PROFILES), ctx);
       await ask(agent.harness, relay.id, "Remember that you file Linear issues.", "relay:k1");
       expect((await memory(agent.harness)).lessons).toMatchObject([
         { text: "PiDu files Linear issues.", from: { source: "relay" } },

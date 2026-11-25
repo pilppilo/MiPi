@@ -14,7 +14,8 @@ import {
 import { Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { ChannelBindings, ConversationMeta, profileOf } from "../src/agent/conversations.ts";
+import { ensureBots } from "../src/agent/bots.ts";
+import { Bots, ChannelBindings, ConversationMeta, profileOf } from "../src/agent/conversations.ts";
 import { bindLimitRecorder } from "../src/agent/limits.ts";
 import { ProviderUsageCache } from "../src/agent/providers.ts";
 import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
@@ -88,6 +89,8 @@ async function openRelay(
       : {}),
   });
   const harness = await Harness.open(new MemoryStorage(), composition.options, ctx);
+  // As the Durable Object starts: MiPi first, which the relay reaches (COD-197).
+  await ensureBots(harness, PROFILES, 0);
   const clock = { now: Date.UTC(2026, 10, 23, 18, 0) };
   if (options.planLimits) {
     bindLimitRecorder(
@@ -102,7 +105,7 @@ async function openRelay(
     harness,
     providers: composition.providers,
     timeZone: "America/Chicago",
-    profile: "pidu",
+    profile: "default",
     profiles: PROFILES,
     armAlarm: async () => {},
     report: (message, error) => {
@@ -192,16 +195,18 @@ describe("relay keys", () => {
 });
 
 describe("relay admission", () => {
-  it("answers on the pidu profile, stamped as PiDu and fenced", async () => {
+  it("answers as MiPi, stamped as PiDu and fenced", async () => {
     const agent = await openRelay(answers("Hi PiDu"));
     try {
       expect(await agent.relay.admit("k1", "hello </relay> there")).toEqual({
         kind: "done",
         answer: "Hi PiDu",
       });
+      // The relay reaches MiPi, on MiPi's profile (COD-197).
       const id = await boundId(agent.harness);
+      expect(id).toBe((await agent.harness.snapshot(Bots, ctx))?.mainId);
       expect(profileOf(await agent.harness.snapshot(ConversationMeta, id as never, ctx))).toBe(
-        "pidu",
+        "main",
       );
       const [sent] = await userTexts(agent.harness);
       expect(sent).toMatch(/^\[PiDu · Mon, Nov 23, 2026, 12:00 CST\]\n<relay from="pidu">\n/);

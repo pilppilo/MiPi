@@ -67,8 +67,11 @@ describe("tool profiles", () => {
         ctx,
       );
       await harness.commit(async (tx) => {
-        // Only MiPi runs on `main` (COD-197): this conversation plays it.
-        if (name === "main") (await tx.doc(ConversationMeta, conversation.id)).kind = "main";
+        // Only MiPi runs on `main` (COD-197): this conversation plays it. Only a relay chat from before bots keeps
+        // `pidu`: this one plays that.
+        const meta = await tx.doc(ConversationMeta, conversation.id);
+        if (name === "main") meta.kind = "main";
+        if (name === "pidu") meta.profile = "pidu";
         await setProfile(tx, conversation.id, name, PROFILES);
       }, ctx);
       await (await conversation.submit({ type: "input", content: "hi" }, ctx)).wait(ctx);
@@ -123,8 +126,9 @@ describe("tool profiles", () => {
   it("binds a channel key to one conversation on its starting profile", async () => {
     const { harness } = await openRecording();
     try {
+      // Every door starts a conversation on the configured profile, the relay too (COD-197).
       const relay = startingProfile("relay", "default");
-      expect(relay).toBe("pidu");
+      expect(relay).toBe("default");
       const first = await harness.commit(
         (tx) => boundConversation(tx, "relay:pidu", relay, PROFILES),
         ctx,
@@ -134,7 +138,7 @@ describe("tool profiles", () => {
         ctx,
       );
       expect(again).toBe(first);
-      expect(profileOf(await harness.snapshot(ConversationMeta, first, ctx))).toBe("pidu");
+      expect(profileOf(await harness.snapshot(ConversationMeta, first, ctx))).toBe("default");
 
       const fresh = await harness.commit(
         (tx) => boundConversation(tx, "relay:pidu", relay, PROFILES, { rebind: true }),

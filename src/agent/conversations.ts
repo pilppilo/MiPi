@@ -17,7 +17,9 @@ import {
   DEFAULT_PROFILE,
   isProfileName,
   MAIN_PROFILE,
+  PICKABLE_PROFILES,
   type ProfileName,
+  RELAY_PROFILE,
   type Profiles,
 } from "./profiles.ts";
 
@@ -61,8 +63,12 @@ export const ConversationMeta = defineDoc<ConversationMetaState>({
 /** Channels that open conversations, and the profile each starts them on. */
 export type Channel = "web" | "telegram" | "relay";
 
-export function startingProfile(channel: Channel, configured: ProfileName): ProfileName {
-  return channel === "relay" ? "pidu" : configured;
+/**
+ * The profile a channel starts a conversation on, where it still starts one (an agent without MiPi). Every door the
+ * same since bots (COD-197): the relay reaches MiPi like the others, and `pidu` is only its chats from before.
+ */
+export function startingProfile(_channel: Channel, configured: ProfileName): ProfileName {
+  return configured;
 }
 
 /**
@@ -104,32 +110,39 @@ export async function setProfile(
   profiles: Profiles,
 ): Promise<void> {
   const meta = await tx.doc(ConversationMeta, conversationId);
-  const refused = profileRefusal(meta.kind, profile);
+  const refused = profileRefusal(meta, profile);
   if (refused !== undefined) throw new Error(refused);
   await configure(tx, conversationId, { tools: profiles.toolsFor(profile) });
   meta.profile = profile;
 }
 
-/** Why a conversation of `kind` can't switch to `profile`: MiPi alone runs on `main`, and always does (COD-197). */
+/**
+ * Why a conversation can't switch to `profile` (COD-197): MiPi alone runs on `main`, and always does, and no
+ * conversation newly takes `pidu`, kept only for the relay's chats from before bots. Its current profile can always be
+ * applied again (the startup sync does).
+ */
 export function profileRefusal(
-  kind: BotKind | undefined,
+  meta: Readonly<Pick<ConversationMetaState, "kind" | "profile">>,
   profile: ProfileName,
 ): string | undefined {
-  if (kind === "main" && profile !== MAIN_PROFILE) return "MiPi always runs on the main profile.";
-  if (kind !== "main" && profile === MAIN_PROFILE) return "Only MiPi runs on the main profile.";
+  if (meta.kind === "main" && profile !== MAIN_PROFILE)
+    return "MiPi always runs on the main profile.";
+  if (meta.kind !== "main" && profile === MAIN_PROFILE)
+    return "Only MiPi runs on the main profile.";
+  if (profile === RELAY_PROFILE && meta.profile !== RELAY_PROFILE) {
+    return `${RELAY_PROFILE} is kept for the relay's chats from before bots. Pick one of: ${PICKABLE_PROFILES.join(", ")}.`;
+  }
   return undefined;
 }
 
 /**
- * The bots (COD-197): which conversation is MiPi, which one the relay's PiDu, and every bot's name. A session document,
+ * The bots (COD-197): which conversation is MiPi, and every bot's name. A session document,
  * so finding a bot by name (and, later, counting the active ones) never scans conversations. Written once by
  * `ensureBots` (`bots.ts`), then as bots are made and renamed.
  */
 export type BotsState = {
   /** MiPi, the main bot. Unset until the first start of a build with bots. */
   mainId?: number;
-  /** PiDu, the relay's bot. */
-  piduId?: number;
   /** Every bot's name, lowercased, to its conversation. */
   names?: Record<string, number>;
   /** When MiPi was made, and older chats archived. */
@@ -144,16 +157,11 @@ export const Bots = defineDoc<BotsState>({
   checkpointWhen: () => true,
 });
 
-/** Where a binding older than bots goes once MiPi exists: the relay's to PiDu, every other door's to MiPi. */
-function botFor(key: string, bots: Readonly<BotsState>): number | undefined {
-  return key.startsWith("relay:") ? (bots.piduId ?? bots.mainId) : bots.mainId;
-}
-
 /**
  * The conversation a channel key is bound to.
  *
  * Once MiPi exists (`Bots.mainId`), a binding written before bots, or none at all, moves to its bot on its first read
- * and is marked `bots`: so every door reaches MiPi (the relay PiDu) without core having to list the doors' keys, which
+ * and is marked `bots`: so every door, the relay's too, reaches MiPi without core having to list the doors' keys, which
  * Pi Durable can't do for a document family. A binding marked `bots` stays where it is (a `/bot` choice survives a
  * restart). `rebind` binds a new chat of its own, as Telegram's `/new` does until cobots (COD-200).
  *
@@ -169,7 +177,7 @@ export async function boundConversation(
   const binding = await tx.doc(ChannelBindings, key, null);
   const bots = await tx.doc(Bots);
   if (options.rebind !== true) {
-    const target = binding.bots === true ? binding.conversationId : botFor(key, bots);
+    const target = binding.bots === true ? binding.conversationId : bots.mainId;
     const current = target ?? binding.conversationId;
     if (current !== undefined) {
       const bound = await tx.conversation(current as ConversationId);

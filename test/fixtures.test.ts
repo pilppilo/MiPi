@@ -12,7 +12,7 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { type ConversationId, Harness } from "@earendil-works/pi-durable";
+import { Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
@@ -94,6 +94,12 @@ describe("fixture databases", () => {
         instance.relayResult("fixture-relay"),
       );
       expect(relay).toEqual({ kind: "done", answer: "Hi PiDu." });
+      // Sent again through the relay, which now reaches MiPi (COD-197): its receipt still answers it, and nothing is
+      // admitted again.
+      const resent = await runInDurableObject(stub, (instance: MipiAgent) =>
+        instance.relayAdmit("fixture-relay", "Hello from PiDu"),
+      );
+      expect(resent).toEqual({ kind: "done", answer: "Hi PiDu." });
 
       // The web door opens a session on it.
       const socket = await worker.fetch(
@@ -175,21 +181,16 @@ describe("fixture databases", () => {
           );
           expect(lessons.some(({ from }) => from.source === "background")).toBe(true);
           // Snapshots only: this inspecting harness writes nothing beside the live agent.
-          // The first start made MiPi and PiDu (COD-197). Every chat from before bots is archived, kept whole.
+          // The first start made MiPi (COD-197). Every chat from before bots is archived, kept whole.
           const bots = (await harness.snapshot(Bots, ctx))!;
           expect(bots.mainId).toBeDefined();
-          expect(bots.piduId).toBeDefined();
-          const binding = (key: string) => harness.snapshot(ChannelBindings, key, ctx);
-          // The doors that wrote since reach their bot: the web and Telegram MiPi.
-          expect(await binding("web")).toEqual({ conversationId: bots.mainId, bots: true });
-          expect(await binding("tg:4242")).toEqual({ conversationId: bots.mainId, bots: true });
-          // The relay hasn't written since, so its binding still names the older chat, and moves when it does.
-          const older = (await binding("relay:pidu"))?.conversationId;
-          expect(older).toBeDefined();
-          expect(older).not.toBe(bots.piduId);
-          expect(
-            (await harness.snapshot(ConversationMeta, older as ConversationId, ctx))?.archivedAt,
-          ).toBeDefined();
+          // Every door that wrote since reaches MiPi: the web, Telegram and the relay.
+          for (const key of ["web", "tg:4242", "relay:pidu"]) {
+            expect(await harness.snapshot(ChannelBindings, key, ctx), key).toEqual({
+              conversationId: bots.mainId,
+              bots: true,
+            });
+          }
           // A commit that only reads: it writes nothing.
           const ownerless = await harness.commit(
             async (tx) =>
@@ -198,10 +199,10 @@ describe("fixture databases", () => {
               ),
             ctx,
           );
-          expect(ownerless.length).toBeGreaterThan(2);
+          expect(ownerless.length).toBeGreaterThan(1);
           for (const { id } of ownerless) {
             const meta = await harness.snapshot(ConversationMeta, id, ctx);
-            if (id === bots.mainId || id === bots.piduId) expect(meta?.archivedAt).toBeUndefined();
+            if (id === bots.mainId) expect(meta?.archivedAt).toBeUndefined();
             else expect(meta?.archivedAt, `conversation ${id}`).toBeDefined();
           }
           const reminders = (await harness.inspect(ctx)).tasks.filter(

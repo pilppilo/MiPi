@@ -4,13 +4,7 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { type ConversationId, Harness, type Storage } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import {
-  botNameRefusal,
-  ensureBots,
-  MAIN_BOT_NAME,
-  RELAY_BOT_NAME,
-  RELAY_BOT_PURPOSE,
-} from "../src/agent/bots.ts";
+import { botNameRefusal, createBot, ensureBots, MAIN_BOT_NAME } from "../src/agent/bots.ts";
 import {
   Bots,
   boundConversation,
@@ -42,39 +36,29 @@ const bound = (harness: Harness, key: string) =>
   harness.commit((tx) => boundConversation(tx, key, "default", PROFILES), ctx);
 
 describe("the main bot (COD-197)", () => {
-  it("makes MiPi on main and PiDu on pidu once, and never again", async () => {
+  it("makes MiPi on main once, and never again", async () => {
     const harness = await open();
     try {
       expect(await ensureBots(harness, PROFILES, NOW)).toBe(true);
       const bots = (await harness.snapshot(Bots, ctx))!;
       expect(bots.madeAt).toBe(NOW);
-      expect(await meta(harness, bots.mainId!)).toMatchObject({
+      expect(await meta(harness, bots.mainId!)).toEqual({
         kind: "main",
         name: MAIN_BOT_NAME,
         profile: "main",
         createdBy: "owner",
       });
-      expect((await meta(harness, bots.mainId!))?.purpose).toBeUndefined();
-      expect(await meta(harness, bots.piduId!)).toMatchObject({
-        kind: "bot",
-        name: RELAY_BOT_NAME,
-        purpose: RELAY_BOT_PURPOSE,
-        profile: "pidu",
-      });
-      expect(bots.names).toEqual({ mipi: bots.mainId, pidu: bots.piduId });
+      // The only bot: the relay reaches MiPi too, until the owner points it at a bot of its own (COD-199).
+      expect(bots.names).toEqual({ mipi: bots.mainId });
 
-      // MiPi has its profile's tools and no instructions; PiDu's purpose is its instructions.
+      // MiPi has its profile's tools and no instructions: its prompt is the one MiPi had before bots.
       const mipi = await (await harness.conversation(bots.mainId! as ConversationId, ctx))!.agent(
         ctx,
       );
       expect(mipi.tools.map(({ name }) => name)).toEqual([...PROFILE_TABLE.main.tools]);
       expect(mipi.instructions).toBeUndefined();
-      const pidu = await (await harness.conversation(bots.piduId! as ConversationId, ctx))!.agent(
-        ctx,
-      );
-      expect(pidu.instructions).toBe(RELAY_BOT_PURPOSE);
 
-      // A later start finds them and makes nothing.
+      // A later start finds it and makes nothing.
       expect(await ensureBots(harness, PROFILES, NOW + 1)).toBe(false);
       expect(await harness.snapshot(Bots, ctx)).toEqual(bots);
     } finally {
@@ -96,9 +80,8 @@ describe("the main bot (COD-197)", () => {
         title: "Plan the week",
         archivedAt: NOW,
       });
-      const { mainId, piduId } = (await harness.snapshot(Bots, ctx))!;
+      const { mainId } = (await harness.snapshot(Bots, ctx))!;
       expect((await meta(harness, mainId!))?.archivedAt).toBeUndefined();
-      expect((await meta(harness, piduId!))?.archivedAt).toBeUndefined();
     } finally {
       await harness.close(ctx);
     }
@@ -118,10 +101,11 @@ describe("the main bot (COD-197)", () => {
       expect(await bound(harness, "tg:4242")).toBe(chat.id);
 
       await ensureBots(harness, PROFILES, NOW);
-      const { mainId, piduId } = (await harness.snapshot(Bots, ctx))!;
+      const { mainId } = (await harness.snapshot(Bots, ctx))!;
+      // Every door, the relay's too, reaches MiPi.
       expect(await bound(harness, "web")).toBe(mainId);
       expect(await bound(harness, "tg:4242")).toBe(mainId);
-      expect(await bound(harness, "relay:pidu")).toBe(piduId);
+      expect(await bound(harness, "relay:pidu")).toBe(mainId);
       // A chat that never wrote before reaches MiPi too.
       expect(await bound(harness, "tg:777")).toBe(mainId);
       for (const key of ["web", "tg:4242", "relay:pidu", "tg:777"]) {
@@ -129,13 +113,31 @@ describe("the main bot (COD-197)", () => {
       }
 
       // A binding written since bots (as `/bot <name>` will) stays where it is, across a restart.
+      const groceries = await harness.commit(
+        (tx) =>
+          createBot(
+            tx,
+            {
+              kind: "bot",
+              name: "Groceries",
+              purpose: "Keep the shopping list.",
+              profile: "default",
+              createdBy: "owner",
+            },
+            PROFILES,
+          ),
+        ctx,
+      );
       await harness.commit(async (tx) => {
         const binding = await tx.doc(ChannelBindings, "tg:4242", null);
-        binding.conversationId = piduId;
+        binding.conversationId = groceries;
         binding.bots = true;
       }, ctx);
       expect(await ensureBots(harness, PROFILES, NOW + 1)).toBe(false);
-      expect(await bound(harness, "tg:4242")).toBe(piduId);
+      expect(await bound(harness, "tg:4242")).toBe(groceries);
+      // A purpose bot's purpose is its instructions.
+      const agent = await (await harness.conversation(groceries, ctx))!.agent(ctx);
+      expect(agent.instructions).toBe("Keep the shopping list.");
     } finally {
       await harness.close(ctx);
     }
@@ -153,19 +155,28 @@ describe("the main bot (COD-197)", () => {
     }
   });
 
-  it("keeps main for MiPi alone", () => {
-    expect(profileRefusal("main", "main")).toBeUndefined();
-    expect(profileRefusal("main", "default")).toBe("MiPi always runs on the main profile.");
-    expect(profileRefusal("bot", "main")).toBe("Only MiPi runs on the main profile.");
-    expect(profileRefusal(undefined, "main")).toBe("Only MiPi runs on the main profile.");
-    expect(profileRefusal(undefined, "empty")).toBeUndefined();
+  it("keeps main for MiPi alone, and pidu for the relay's chats from before bots", () => {
+    expect(profileRefusal({ kind: "main", profile: "main" }, "main")).toBeUndefined();
+    expect(profileRefusal({ kind: "main" }, "main")).toBeUndefined();
+    expect(profileRefusal({ kind: "main", profile: "main" }, "default")).toBe(
+      "MiPi always runs on the main profile.",
+    );
+    expect(profileRefusal({ kind: "bot" }, "main")).toBe("Only MiPi runs on the main profile.");
+    expect(profileRefusal({}, "main")).toBe("Only MiPi runs on the main profile.");
+    expect(profileRefusal({}, "empty")).toBeUndefined();
+    // An older relay chat keeps `pidu` (the startup sync applies it again); nothing newly takes it.
+    expect(profileRefusal({ profile: "pidu" }, "pidu")).toBeUndefined();
+    expect(profileRefusal({ profile: "default" }, "pidu")).toBe(
+      "pidu is kept for the relay's chats from before bots. Pick one of: default, empty.",
+    );
+    expect(profileRefusal({ kind: "bot" }, "pidu")).toBeDefined();
   });
 
   it("names bots uniquely, ignoring case, in 1 to 40 characters", () => {
-    const bots = { names: { mipi: 1, pidu: 2 } };
-    expect(botNameRefusal(bots, "Groceries")).toBeUndefined();
+    const bots = { names: { mipi: 1, groceries: 2 } };
+    expect(botNameRefusal(bots, "PiDu")).toBeUndefined();
     expect(botNameRefusal(bots, "  mipi ")).toBe("There is already a bot named mipi.");
-    expect(botNameRefusal(bots, "PIDU", 2)).toBeUndefined();
+    expect(botNameRefusal(bots, "GROCERIES", 2)).toBeUndefined();
     expect(botNameRefusal(bots, "   ")).toBe("A bot needs a name.");
     expect(botNameRefusal(bots, "x".repeat(40))).toBeUndefined();
     expect(botNameRefusal(bots, "x".repeat(41))).toBe("A bot's name is at most 40 characters.");

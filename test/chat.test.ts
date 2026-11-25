@@ -486,8 +486,8 @@ describe("chat application", () => {
       type: string;
       session: { conversations: Array<{ id: number }> };
     }>();
-    // MiPi, PiDu and the new conversation.
-    expect(snapshot.session.conversations).toHaveLength(3);
+    // MiPi and the new conversation.
+    expect(snapshot.session.conversations).toHaveLength(2);
     for (let index = 0; index < 2; index++) await reopenedMessages.next();
 
     reopenedSocket.send(command);
@@ -528,7 +528,7 @@ describe("chat application", () => {
     await response.body?.cancel();
   });
 
-  it("opens a session WebSocket with MiPi, beside PiDu", async () => {
+  it("opens a session WebSocket with MiPi", async () => {
     const response = await exports.default.fetch(
       withSpikeToken("https://example.com/api/sessions/jerome", {
         headers: { Upgrade: "websocket" },
@@ -548,14 +548,11 @@ describe("chat application", () => {
         activity: { tasks: Record<string, unknown> };
       };
     }>();
-    // A new agent has only its bots: MiPi and the relay's PiDu (COD-197).
+    // A new agent has only MiPi, which every door reaches (COD-197).
     expect(session).toEqual({
       type: "session.snapshot",
       session: {
-        conversations: [
-          { id: expect.any(Number), profile: "main" },
-          { id: expect.any(Number), profile: "pidu" },
-        ],
+        conversations: [{ id: expect.any(Number), profile: "main" }],
         activity: { tasks: {} },
       },
     });

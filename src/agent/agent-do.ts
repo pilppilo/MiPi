@@ -761,7 +761,7 @@ export class MipiAgent extends DurableObject<Env> {
         },
         end: () => {},
       });
-      // MiPi and PiDu, once: before any door reads a binding, so every door reaches its bot (COD-197).
+      // MiPi, once: before any door reads a binding, so every door reaches it (COD-197).
       if (await ensureBots(harness, profiles, Date.now())) {
         console.log(JSON.stringify({ message: "Made the main bot and archived older chats" }));
       }

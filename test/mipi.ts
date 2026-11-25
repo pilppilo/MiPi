@@ -25,18 +25,16 @@ export function connectedCore(): Extension {
 }
 
 /**
- * Gives the bots (MiPi, PiDu) a test agent's model. A test that opens its own harness over a Durable Object's storage
- * finds them made already, by the object's own start (`ensureBots`) with the lane's default model; the doors bind to
- * them, so a faux-model test must move them onto its model first.
+ * Gives MiPi a test agent's model. A test that opens its own harness over a Durable Object's storage finds MiPi made
+ * already, by the object's own start (`ensureBots`) with the lane's default model; every door binds to it, so a
+ * faux-model test must move it onto its model first.
  */
 export async function botsOnModel(
   harness: Harness,
   model: { readonly provider: string; readonly modelId: string },
 ): Promise<void> {
   await harness.commit(async (tx) => {
-    const bots = await tx.doc(Bots);
-    for (const id of [bots.mainId, bots.piduId]) {
-      if (id !== undefined) await configure(tx, id as ConversationId, { model });
-    }
+    const { mainId } = await tx.doc(Bots);
+    if (mainId !== undefined) await configure(tx, mainId as ConversationId, { model });
   }, BACKGROUND_CONTEXT);
 }

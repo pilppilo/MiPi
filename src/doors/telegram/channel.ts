@@ -631,10 +631,7 @@ export class TelegramChannelRuntime {
           if (!isProfileName(name)) {
             return `${argument} is not a profile. Pick one of: ${PICKABLE_PROFILES.join(", ")}.`;
           }
-          const refused = profileRefusal(
-            (await tx.doc(ConversationMeta, conversationId)).kind,
-            name,
-          );
+          const refused = profileRefusal(await tx.doc(ConversationMeta, conversationId), name);
           if (refused !== undefined) return refused;
           if (await this.#busy(tx, conversationId)) return BUSY_REPLY;
           await setProfile(tx, conversationId, name, this.#options.profiles);

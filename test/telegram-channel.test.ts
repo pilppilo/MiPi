@@ -488,8 +488,8 @@ describe("Telegram commands", () => {
         expect(mipi).toMatch(/^Profile: main /);
         expect(kept).toBe("MiPi always runs on the main profile.");
         expect(shown).toMatch(/^Profile: default /);
-        expect(shown).toMatch(/default, empty, pidu\.$/);
-        expect(refused).toBe("nope is not a profile. Pick one of: default, empty, pidu.");
+        expect(shown).toMatch(/default, empty\.$/);
+        expect(refused).toBe("nope is not a profile. Pick one of: default, empty.");
         expect(onlyMipi).toBe("Only MiPi runs on the main profile.");
         expect(set).toBe("Profile set to empty.");
         const conversationId = (await boundId(agent.harness))!;

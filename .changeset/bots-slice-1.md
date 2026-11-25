@@ -6,13 +6,13 @@ COD-197: MiPi becomes the main bot (bots slice 1). Work in progress: the protoco
 
 **Added**
 
-- MiPi, the main bot, on a new `main` profile (the everyday tools; the bot tools come in COD-199), and PiDu, the relay's bot, on `pidu`, its purpose as its instructions. Both are made on the first start of this build.
-- Bot fields on `app.conversation` (`kind`, `name`, `purpose`, `bot`, `createdBy`, `archivedAt`) and the session document `app.bots` (MiPi, PiDu, the name index). Bot names are unique, ignoring case, and 1 to 40 characters.
+- MiPi, the main bot, on a new `main` profile (the everyday tools; the bot tools come in COD-199), made on the first start of this build.
+- Bot fields on `app.conversation` (`kind`, `name`, `purpose`, `bot`, `createdBy`, `archivedAt`) and the session document `app.bots` (MiPi and the name index). Bot names are unique, ignoring case, and 1 to 40 characters. A purpose bot's purpose is its instructions.
 
 **Changed**
 
-- The web door opens MiPi, not Pi Durable's root conversation. Telegram reaches MiPi, and the relay PiDu.
-- Only MiPi runs on `main`, and MiPi always does: the web and Telegram's `/profile` refuse other switches, and pickers no longer list `main`.
+- Every door reaches MiPi: the web opens it instead of Pi Durable's root conversation, and Telegram and the PiDu relay talk to it. Relay messages stay fenced and stamped as PiDu's. Pointing the relay at a purpose bot of its own comes with COD-199.
+- Only MiPi runs on `main`, and MiPi always does. `pidu` stays only for the relay's chats from before bots: no conversation newly takes it, and the relay starts on the configured profile like the other doors. The web and Telegram's `/profile` refuse these switches, and pickers list only `default` and `empty`.
 - A fork is a chat of its own, never a copy of its bot.
 
 **Migration**
