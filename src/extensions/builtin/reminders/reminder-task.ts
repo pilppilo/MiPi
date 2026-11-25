@@ -225,7 +225,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
           );
           const submissionId =
             existing?.id ??
-            (await conversation.submit(tx, {
+            (await conversation.admit(tx, {
               type: "input",
               content,
               requestId,

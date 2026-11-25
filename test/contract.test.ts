@@ -202,19 +202,19 @@ describe("Pi seam contract", () => {
           expect.arrayContaining([expect.objectContaining({ role: "toolResult", isError: false })]),
         );
 
-        // Telegram admission (M5): a document read, then `submit(tx, …)`, then document writes, in one commit; a table
+        // Telegram admission (M5): a document read, then `admit(tx, …)`, then document writes, in one commit; a table
         // write before the submit is refused. The settled record and its answer are read back in a commit, and a
         // submission is reacquired by id to wait for it.
         await expect(
           harness.commit(async (tx) => {
             await tx.createConversation({ ownership: { kind: "ownerless" } });
-            await root.submit(tx, { type: "input", content: "Too late", requestId: "contract-x" });
+            await root.admit(tx, { type: "input", content: "Too late", requestId: "contract-x" });
           }, ctx),
         ).rejects.toThrow();
         const admittedId = await harness.commit(async (tx) => {
           const before = (await tx.doc(Notes)).count;
           expect(await tx.submissionByRequest(root.id, "contract-2")).toBeUndefined();
-          const id = await root.submit(tx, {
+          const id = await root.admit(tx, {
             type: "input",
             content: "Admit me",
             requestId: "contract-2",
@@ -242,7 +242,7 @@ describe("Pi seam contract", () => {
           expect((await tx.doc(durable.LiveDoc, root.id)).run).toBeUndefined();
           expect((await tx.doc(durable.InboxDoc, root.id)).items).toEqual([]);
           try {
-            await root.submit(tx, {
+            await root.admit(tx, {
               type: "input",
               content: "Wait for the window",
               requestId: "contract-idle",
@@ -418,7 +418,10 @@ describe("Pi seam contract", () => {
         tools: [fail],
         hooks: [
           durable.hook(durable.GenerationTask, {
-            onYield: async () => ({ tasks: [durable.hookTask(OnYield, {})] }),
+            onYield: async () => ({
+              kind: "tasks" as const,
+              tasks: [durable.hookTask(OnYield, {})],
+            }),
             afterTools: async (_assistant, results) => ({
               tasks: [durable.hookTask(AfterTools, { results: results.map(Number) })],
             }),

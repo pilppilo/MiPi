@@ -224,7 +224,7 @@ export class RelayRuntime {
       return { kind: "too-large", limitBytes: RELAY_MAX_TEXT_BYTES };
     }
     const { harness } = this.#options;
-    // Creating the conversation writes tables, and `submit(tx, …)` must come first in its commit: so on its own.
+    // Creating the conversation writes tables, and `admit(tx, …)` must come first in its commit: so on its own.
     const conversationId = await harness.commit(
       (tx) => boundConversation(tx, RELAY_BINDING, this.#options.profile, this.#options.profiles),
       context,
@@ -262,7 +262,7 @@ export class RelayRuntime {
         };
       }
       const open = await openSubmissions(tx, state.receipts);
-      const submissionId = await conversation.submit(tx, {
+      const submissionId = await conversation.admit(tx, {
         type: "input",
         content: stampInput(RELAY_SPEAKER, relayContent(text), this.#options.timeZone, now),
         requestId,

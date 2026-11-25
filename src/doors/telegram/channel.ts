@@ -359,7 +359,7 @@ export class TelegramChannelRuntime {
           });
           return { id, text: batchText(messages) };
         }
-        // Pi Durable's `submit(tx, …)` must come before any table write in this commit: read, submit, then write.
+        // Pi Durable's `admit(tx, …)` must come before any table write in this commit: read, admit, then write.
         const existing = await tx.submissionByRequest(target.id, requestId);
         if (existing !== undefined) {
           // Admitted before, and its receipt is gone: it was answered then, so nothing to send again.
@@ -369,7 +369,7 @@ export class TelegramChannelRuntime {
         }
         let id: SubmissionId;
         try {
-          id = await target.submit(tx, {
+          id = await target.admit(tx, {
             type: "input",
             content: stampInput(
               this.#options.owner,
@@ -431,7 +431,7 @@ export class TelegramChannelRuntime {
   ): Promise<SubmissionId | undefined> {
     const requestId = telegramBatchRequest(firstUpdateId);
     if ((await tx.submissionByRequest(conversation.id, requestId)) !== undefined) return undefined;
-    return conversation.submit(tx, {
+    return conversation.admit(tx, {
       type: "input",
       content: batchContent(this.#options.owner, this.#options.timeZone, messages),
       requestId,

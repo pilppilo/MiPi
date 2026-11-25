@@ -27,7 +27,7 @@ import {
 import { SUPPORTED_SCHEMA_VERSION } from "../src/agent/pi/storage.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import worker from "../src/worker/index.ts";
-import { MIPI_VERSION } from "../src/version.ts";
+import { MIPI_VERSION, PI_DURABLE_VERSION } from "../src/version.ts";
 import { withSpikeToken } from "./spike.ts";
 
 const ADMIN = "test-admin-token";
@@ -141,7 +141,7 @@ describe("admin routes", () => {
     expect(await adminHealth.json()).toEqual({
       ok: true,
       version: MIPI_VERSION,
-      piDurable: "1.6.0",
+      piDurable: PI_DURABLE_VERSION,
       storageSchema: SUPPORTED_SCHEMA_VERSION,
       env: "production",
     });

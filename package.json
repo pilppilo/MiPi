@@ -22,10 +22,10 @@
     "fixture:capture": "node scripts/fixture-capture.ts"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.6.0",
-    "@earendil-works/pi-ai": "1.6.0",
-    "@earendil-works/pi-durable": "1.6.0",
-    "@earendil-works/pi-schema": "1.6.0",
+    "@earendil-works/chord": "1.6.1",
+    "@earendil-works/pi-ai": "1.6.1",
+    "@earendil-works/pi-durable": "1.6.1",
+    "@earendil-works/pi-schema": "1.6.1",
     "partysocket": "1.3.0",
     "react": "19.3.1",
     "react-dom": "19.3.1"
