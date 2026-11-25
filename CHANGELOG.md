@@ -1,5 +1,233 @@
 # mipi
 
+## 0.1.0-beta.2
+
+### Patch Changes
+
+- fd43b61: **Added**
+
+  - Admin heartbeat status reports schedules, overdue work, gate holds, lost alarms, and the last proactive outcome. A daily check monitors staging and production.
+  - Weekly proactive prompt evals use OpenCode Go and mocked page contents. Run them locally with `pnpm eval:proactive --env-file .dev.vars`.
+
+  **Migration**
+
+  - The last proactive outcome and local alarm-loss marker are additive. Exports omit the alarm-loss marker.
+
+- COD-156: release 0.1.0-beta.2 with its fixture database.
+
+  **Added**
+
+  - `test/fixtures/db/0.1.0-beta.2.json`: this release's stored data (the M9 spend document, the provider limits and the run cap, beside everything 0.1.0-beta.1 stored), written by Pi Durable 1.6.1. Every later build restores it on each `pnpm test`, beside 0.1.0-beta.1's.
+
+  **Migration**
+
+  - None. The fixture is test data; nothing the agent stores changes in this release step.
+
+- 51896bb: COD-211: conversation visibility, and history search as a built-in in fact.
+
+  **Changed**
+
+  - Internal, no behaviour change for the owner. Core decides which conversations are the owner's (`src/agent/visibility.ts`: `listVisible`, `visiblePage`): today, every ownerless one. History search and the memory pass use it at all three scan sites instead of scanning and filtering themselves. The memory pass plans its wake in the records-only mode, which reads no conversation's documents, so the archive (COD-198) can't make every plan read every conversation.
+  - `search_history` and its subagent's `search_conversations` moved to `src/extensions/builtin/history-search/`. `src/tools/` is gone: all four built-ins live in `src/extensions/builtin/`, and the boundary check covers them.
+  - The memory pass still recognises reminders' deliveries by their text: Pi Durable has no way from an entry to the input that placed it (ledger L8).
+
+  **Pi Durable**
+
+  - No version change (1.6.0). Ledger: L8 added (watch): Pi Durable links a submission to its entry one way only, with no request id on the entry and no submission scan.
+
+  **Migration**
+
+  - None. No stored data changed.
+
+- 58ce999: COD-210: the doors as their own tier, delivery, the answer policy, the run cap and reminders as a built-in.
+
+  **Changed**
+
+  - Internal, no behaviour change for the owner. Telegram and the relay moved to `src/doors/` (`telegram/`, `relay/`), with the web door's registration in `src/doors/web/` (its socket handler stays in `agent-do.ts`). The three Telegram helpers left `src/lib/`. Core imports no door: each door registers its request-id prefix, its delivery adapter and its inputs waiting for an answer (`src/agent/connectors.ts`), and the composition root wires the runtimes.
+  - Delivery (`src/agent/delivery.ts`): `send`, `tellOwner` and `onDelivered`, through the doors' adapters. Both enqueue in the caller's commit, so a state change and its notice are stored together. An adapter says whether its destination can take a message nobody is waiting for (Telegram yes, the web no); that replaces every `kind === "telegram"` branch. Message ids are built as before, so nothing already queued is sent twice.
+  - Core owns proactive runs: `app.proactive` (same kind and fields), `RecordRun`, `RoundBudget` and the answer policy. One settlement (`src/agent/answers.ts`) watches every door's pending inputs and every reminder and judges each answer once, as before; it moved out of the Telegram door. "Is this a reminder's own run" comes from origin, not from a `sched:` check.
+  - Origin: the fixed table of request-id prefixes left core. Each door and the reminders register their own prefix, and the reply destination comes from the door (Telegram: the chat recorded with the input). Request-id builders moved to their doors and to the reminders.
+  - The gates (`src/agent/gates.ts`): the run cap, the spend cap and the pause, read-only for doors and extensions. Telegram, the relay, the usage readout and the memory pass stop reading `app.spend` and `app.proactive` themselves.
+  - Reminders became a built-in in fact: `schedule`, `app.reminder`, `app.deliver-scheduled-instruction` and their tasks moved to `src/extensions/builtin/reminders/`, onto delivery, origin and the gates.
+  - The Bot API sender moved from the outbox to `src/doors/telegram/bot-api.ts`.
+  - Lint: core imports no door, extension or tool except in the composition root; a door imports no extension; and only `src/doors/telegram/` imports Telegram's documents.
+
+  **Pi Durable**
+
+  - No version change (1.6.0). Ledger: L7's wording names `expectProactive` and the reminders' folder; no entry added or closed.
+
+  **Migration**
+
+  - None. Document kinds, stored fields and task names are unchanged, so rolling back reads the same data. The 0.1.0-beta.1 fixture opens and runs, and its sleeping reminder now wakes and runs from the `reminders` extension (tested).
+
+- 311d1f1: COD-209: the extension shape, the built-in list, memory and `web_fetch` as built-in extensions.
+
+  **Changed**
+
+  - Internal, no behaviour change for the owner. A MiPi extension is now a Pi Durable extension plus MiPi registrations (`src/agent/extensions.ts`): tier, replaceable, prompt slot, untrusted tools, wake sources. Core resolves them once (`composeAgent`), and the composition root adds the built-ins (`src/agent/composition.ts`).
+  - The one `chat` extension that held every tool is split. `chat` keeps only the preamble, and `memory`, `reminders`, `history-search` and `web-fetch` are built-ins, listed in `src/extensions/builtins.ts`. Memory (its tools, section and background pass) and `web_fetch` moved to `src/extensions/builtin/`. Reminders and history search keep their code in `src/tools/` until COD-210 and COD-211 move it.
+  - Every built-in is always installed. The default selection is core's own extensions first, then the built-ins by slot and name, so the prompt sections and tools come out exactly as before. A conversation can switch a built-in off (`AgentComposition.switchOff`), and its tools and section leave that conversation only. Profile changes, the startup profile sync and the memory pass all respect that.
+  - Pi's replacement rule: an extension that registers a built-in's tool name replaces that built-in whole, whatever the load order. The replaced one stays installed, so its stored tasks still resolve. Any other clash refuses to start, with the reason in the admin status. The admin status lists the extensions in use and any replacements.
+  - New core connectors: side model calls (`side-calls.ts`, used by titles and the memory pass), untrusted content (`untrusted.ts`: `web_fetch` is declared untrusted by its extension, checked against the tools it registers and bound per agent, and memory no longer names it), input origin (`origin.ts`: memory no longer parses request ids or lists the doors), and the delivery destination type (`delivery.ts`).
+  - The startup guard's task list is collected from the installed extensions instead of a hand-kept `APP_TASKS`.
+  - The profile table moved to `src/extensions/profiles.ts`; `src/agent/profiles.ts` is the mechanism and names no tool.
+  - Lint: core imports no extension or tool except in the composition root, and an extension imports no door. `scripts/check-boundaries.ts` (in `pnpm check`) fails on an import from one extension into another.
+
+  **Pi Durable**
+
+  - No version change (1.6.0). No ledger changes.
+
+  **Migration**
+
+  - None. Document kinds and task names are unchanged, and the 0.1.0-beta.1 fixture opens and runs as before.
+
+- 1e722ec: COD-217: upgrade Pi Durable to 1.6.1.
+
+  **Changed**
+
+  - Internal, no behaviour change for the owner. The proactive `onYield` hook returns the tagged `{ kind: "tasks", tasks }`, and the Telegram, relay and reminder admissions call `admit(tx, draft)` instead of `submit(tx, draft)`.
+  - The admin health test reads the stamped Pi Durable version instead of a literal.
+
+  **Pi Durable**
+
+  - 1.6.0 → 1.6.1. Of its seven breaking changes, two touch MiPi: tagged `onYield` results and `submit(tx, …)` renamed to `admit(tx, …)`. Parks, `Wrap`, `beforeCompact`, `SignalState` and `CommitResult` are tagged too; MiPi uses none of them. Ledger: no entries added or closed.
+
+  **Migration**
+
+  - None. No stored data changed, and Pi Durable's tables are unchanged, so rolling back to the previous build is safe.
+
+- 95c3731: COD-212: OpenCode Go's provider pieces as an optional extension, and the boundary written down.
+
+  **Changed**
+
+  - Internal, no behaviour change for the owner. OpenCode Go's usage reader and live model list moved out of core into `src/extensions/optional/opencode-go/`, an optional extension listed in `src/extensions/optional.ts`. The usage readout (admin status, `/usage`, the web line), the web model picker and Telegram's `/model` read and set the same as before.
+  - Core's providers connector (`src/agent/providers.ts`, which replaces `usage-sources.ts`): an extension registers a provider's usage reader and model list, each under a static provider id. One provider's piece registered twice refuses to compose, with or without a key set. A replaced extension's providers aren't registered.
+  - `ModelList` takes the registered model lists and returns each model's provider from its source. With none (bare core) it lists nothing and refuses a model clearly.
+  - An extension may have no Pi Durable part (`MipiExtension.pi` is optional). OpenCode Go's has none, so it is never in a conversation's selection and can't be switched off; the admin status lists `opencode-go` among the extensions in use.
+  - The model list key is read through the agent's settings, so an empty `OPENCODE_API_KEY` now sends no `Authorization` header rather than an empty one.
+  - Docs: "Core, doors and extensions" in `docs/development.md` (tiers, imports, the extension contract, the connectors). `AGENTS.md` adds the rule that provider-specific code lives in the provider's optional extension or the model seam. A test keeps OpenCode URLs, settings and response shapes out of `src/agent/` outside `pi/`.
+
+  **Pi Durable**
+
+  - No version change (1.6.0). No ledger change: the model seam (`src/agent/pi/models.ts`, L1) stays as it is.
+
+  **Migration**
+
+  - None. No stored data changed.
+
+- 4a69fd3: **Added**
+
+  - OpenCode Go plan-limit notices on web, Telegram, and relay. Background work waits for the latest active hold deadline. The web keeps the original error in the conversation, and owner messages are still tried.
+
+  **Changed**
+
+  - Recurring reminders wait through a short cooldown after transient provider failures. Memory keeps its existing transient retry delay.
+
+  **Fixed**
+
+  - Recurring legacy schedules keep their cadence through a hold. Repeating reminders still report plan failures when a recorded limit has expired or is unavailable. The web refreshes usage when a new failure arrives in a live update.
+
+  **Pi Durable**
+
+  - Ledger L9 records provider limits from the awaited `afterResponse` observer before a failed input settles.
+
+  **Migration**
+
+  - The provider-limit document is additive. Existing conversations inherit the core extension through the default selection.
+
+- 28a481e: COD-215: a check reports a source it couldn't read instead of staying quiet.
+
+  **Fixed**
+
+  - A reminder's notes now tell the model to say so when it couldn't read or verify a source (a fetch error, a login wall, or a blank or JavaScript-only page) instead of answering `NO_SEND`. A page that loads but shows nothing (HTTP 200) leaves no tool error for MiPi to catch, so such a check used to look healthy while it had read nothing. Found by the first live run of the proactive evals (`javascript-shell` and `fetch-503`).
+
+  **Pi Durable**
+
+  - No change.
+
+  **Migration**
+
+  - None. The note is on each reminder's message, so the system prompt prefix stays the same.
+
+- 9600e41: COD-193 (M9 slice 1): a daily spend cap, a pause switch, and a usage readout.
+
+  **Added**
+
+  - **Spend today.** `src/agent/spend.ts` measures what MiPi spent from every conversation's `pi.usage`, subagents' and tools' included, at pi-ai's list prices. Titles and the memory pass already record theirs there. A measure adds what grew since the last one to today's count (Pi Pocket `spend.ts` pattern). The count never drops, and it starts afresh at Chicago midnight. The agent measures once when it first opens with this build, so spend from before that counts for no day.
+  - **`MIPI_DAILY_SPEND_CAP`** (dollars; `1` on both lanes; `off` means no cap). At the cap, work nobody asked for at that moment waits until Chicago midnight:
+    - reminders: a one-time Telegram one goes out as plain text, "(sent without MiPi: daily spend cap reached)"; a web one waits; a repeat skips its occurrence
+    - a reminder run already going, stopped after the tool round that crossed it
+    - the memory pass, measured before each conversation's pass
+    - model-written titles
+
+    One notice a day says so. Your own messages still go through; on Telegram, the first new one over the cap each day gets one line saying so (a message Telegram sends again doesn't).
+
+  - **`MIPI_PAUSED`** (`0` on both lanes). `1` holds every model call:
+    - the web refuses new messages with "MiPi is paused, so it can't answer right now."
+    - Telegram answers the same before any burst window opens, and refuses a window staged before the pause, when it comes due or on `/new`; commands still answer
+    - the relay answers 503 `{ "error": "Paused" }` with `Retry-After: 3600`; a key admitted before still gets its answer
+    - reminders are held as at the cap, without a notice
+    - the memory pass sets no wake
+
+    A value that is neither on nor off is reported and pauses.
+
+  - **Usage readout**, the same on every door: Telegram `/usage`, a line in the web header, and `usage` in the admin status. The web line is read again only while the agent is awake anyway (the session opening, your message, work running, the tab coming back into view), at most every 30 seconds, so it never wakes a hibernated agent. Details show on hover. It shows today's estimate, the spend cap, the run cap's rounds, and each provider's own figures where MiPi can read them. `src/agent/usage-sources.ts` holds one reader per provider. OpenCode Go is the first: its rolling, weekly and monthly windows from `GET https://opencode.ai/zen/go/v1/usage` (the shape OpenCode's own client reads). Reads are cached in memory for five minutes, failures too, and callers at the same moment share one read. The admin status measures nothing and asks no provider: it shows the spend as last measured and what is cached, so a GET writes nothing.
+  - Optional settings: `OPENCODE_USAGE_KEY`, a key with usage permission when the model key has none, and `OPENCODE_ORG_ID`, the workspace id if Go asks for one. The deploy workflow passes them, and `MIPI_DAILY_SPEND_CAP` and `MIPI_PAUSED` from a lane's Environment variables, over `wrangler.jsonc`'s values. An unset `OPENCODE_USAGE_KEY` is written as `off`, as the relay tokens are, so removing it takes effect.
+  - `docs/deployment.md`: a "Spend cap, pause and usage" section, with how to pause a lane.
+
+  **Changed**
+
+  - Older scheduled deliveries (`app.deliver-scheduled-instruction`) follow the same rule. Paused or at the cap, the occurrence isn't delivered, and a successor carries the schedule to its next time (a repeat) or past Chicago midnight (a one-time one). At the cap, the day's notice goes to the chat that wrote last. An occurrence already submitted before a restart is never held.
+  - `chicagoDay`, `afterNextChicagoMidnight` and `CAP_ZONE` moved to `src/lib/cap-day.ts`; `proactive.ts` re-exports them.
+  - `RoundBudget` can stop a run for `spend-cap` or `paused`, besides `daily-cap` and `run-limit`.
+
+  **Pi Durable**
+
+  - No version change (1.6.0). Ledger: L7 now covers the spend cap and the pause, checked at the same two places as the run cap. It is renamed "Daily caps are checked at admission and after each tool round".
+
+  **Migration**
+
+  - New session document `app.spend`. An older build ignores it, so this isn't one-way. After a rollback:
+    - a run stopped for `spend-cap` or `paused` would be reported as a run-limit stop
+    - a reminder's `skippedPaused` count is dropped the next time it runs
+  - Fixture capture now seeds `app.spend`. The release that carries this captures its fixture DB with `pnpm fixture:capture`.
+
+- a3747a5: COD-207: the agent's one alarm takes wake-ups from a list of wake sources that names no door.
+
+  **Changed**
+
+  - Internal only, no behaviour change. Each part that needs the alarm (today the Telegram door and the memory pass) registers once as a wake source (`src/agent/wake-sources.ts`): its wake, what the alarm runs, which commits make it look again, and how it closes.
+  - `alarm.ts` no longer imports the Telegram door. The alarm, the commit observer and shutdown loop over the sources instead of naming them, and the alarm runs them in registration order after Pi Durable, as before.
+  - Sources are registered when the harness opens and cleared when it closes, so a reopen after an export or restore registers each once. A second source with the same name throws.
+  - A source closed while the alarm runs (maintenance taking the object) is skipped. A source that throws while observing a commit or closing is reported, and the others still run.
+  - Lint: `alarm.ts` and `wake-sources.ts` may not import a door, tool or extension (an oxlint override beside the Pi seam rule).
+
+  **Pi Durable**
+
+  - No version change (1.6.0). No ledger changes.
+
+  **Migration**
+
+  - None. No stored data changes.
+
+- 845d857: COD-190: the web transcript formats replies, and collapses long tool results.
+
+  **Changed**
+
+  - The web door shows assistant replies and context summaries as formatted markdown. That covers paragraphs, headings, bold, italic, strikethrough, inline and fenced code, bullet and numbered lists, block quotes, rules and links. Before, it printed the `**`, `- ` and backticks as written. A reply still streaming is formatted as it arrives.
+  - Links open only for `http(s)`, in a new tab with no referrer. Anything else, including HTML or a `javascript:` link in a reply, shows as text.
+  - User, scheduled and queued messages still show exactly as typed.
+  - A tool result longer than 600 characters or 12 lines starts collapsed. Its one-line summary gives the fetched page's URL (or the result's first line) and its length. Short results and failures stay open.
+  - The inline markdown parse moved from `telegram-html.ts` to `src/lib/markdown.ts`. Both doors use it, and Telegram's output is unchanged.
+
+  **Pi Durable**
+
+  - No version change (1.6.0). No ledger changes.
+
+  **Migration**
+
+  - None. Only the web page changes.
+
 ## 0.1.0-beta.1
 
 ### Minor Changes
