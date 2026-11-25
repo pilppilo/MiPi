@@ -12,6 +12,7 @@ import {
   UserEntry,
 } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
+import { Origins } from "../src/agent/origin.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import { ConversationMeta } from "../src/agent/conversations.ts";
 import { listVisible, OWNER_SCOPE, visiblePage } from "../src/agent/visibility.ts";
@@ -117,6 +118,7 @@ describe("conversation visibility", () => {
       const pass = new MemoryPassRuntime({
         harness: watched,
         models: createModels(),
+        origins: new Origins([]),
         untrustedTools: new Set(),
         onWakeChange: () => {},
         report: (message, error) => {

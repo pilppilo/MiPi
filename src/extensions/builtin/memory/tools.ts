@@ -10,7 +10,6 @@
 import type { ToolRegistration } from "../../../agent/pi/durable.ts";
 import { str, obj } from "../../../agent/pi/schema.ts";
 import { connectorsOf } from "../../../agent/connectors.ts";
-import { BOT_ORIGIN } from "../../../agent/bot-hops.ts";
 import { runTouched, untrustedToolNames } from "../../../agent/untrusted.ts";
 import {
   addLesson,
@@ -39,12 +38,7 @@ export const rememberTool: ToolRegistration = {
     const result = await api.commit(async (tx) => {
       const { origins } = connectorsOf(api.registry);
       const inputs = await origins.runInputs(tx, api.conversationId);
-      if (
-        inputs.some(
-          ({ authority, origin }) =>
-            authority === "external" || origin.source === BOT_ORIGIN.source,
-        )
-      ) {
+      if (inputs.some(({ authority }) => authority === "external")) {
         throw new Error(
           "Memory cannot be written in a turn that includes a relay or bot message. Ask the owner to send a new message directly.",
         );

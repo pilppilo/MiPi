@@ -126,7 +126,12 @@ export class AnswerSettlement implements WakeSource {
         }
         // Keep an alarm armed if an admission throws before we can compute the next deadline.
         this.#setReplyDue(now + 60_000);
-        const next = await deliverBotReplies(this.#options.harness, replies, now);
+        const next = await deliverBotReplies(
+          this.#options.harness,
+          replies,
+          this.#options.connectors.delivery,
+          now,
+        );
         this.#setReplyDue(next === Infinity ? undefined : next);
       }
     });

@@ -6,14 +6,23 @@
  *
  * Adding a name: export it here, then use it through this file.
  */
-import type { Conversation } from "@earendil-works/pi-durable";
+import type {
+  Conversation,
+  ToolRegistration as PiToolRegistration,
+} from "@earendil-works/pi-durable";
 import type { Context } from "./context.ts";
+
+/** MiPi metadata until tools that write externally gain an approval step (COD-173). */
+export type ToolRegistration = PiToolRegistration & { readonly writesOutside?: boolean };
 
 /**
  * `Conversation.abort()` (COD-198): withdraws the queued inputs, aborts the run and waits until the conversation is
  * idle. Background tasks (reminders) survive. Named here so an upgrade that changes it fails in this folder.
  */
-export function abortConversation(conversation: Conversation, context: Context): Promise<void> {
+export function abortConversation(
+  conversation: Pick<Conversation, "abort">,
+  context: Context,
+): Promise<void> {
   return conversation.abort(context);
 }
 
@@ -54,7 +63,6 @@ export type {
   SubmissionRecord,
   TaskGraph,
   ToolExecutionApi,
-  ToolRegistration,
   Tx,
   Wake,
   WatchHandle,

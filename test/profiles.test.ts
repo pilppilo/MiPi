@@ -16,7 +16,7 @@ import {
 import { composeMipi, createHarnessOptions } from "../src/agent/composition.ts";
 import { PROFILES } from "./mipi.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
-import { PROFILE_NAMES, type ProfileName } from "../src/agent/profiles.ts";
+import { PROFILE_NAMES, profileOrDefault, type ProfileName } from "../src/agent/profiles.ts";
 import { PROFILE_TABLE } from "../src/extensions/profiles.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -59,14 +59,21 @@ async function openRecording(profile?: ProfileName) {
 }
 
 describe("tool profiles", () => {
+  it("reserves main when configuration asks to use it as a default", async () => {
+    expect(profileOrDefault("main")).toBe("default");
+    const { harness } = await openRecording("main");
+    try {
+      const root = await harness.root(ctx);
+      expect(profileOf(await harness.snapshot(ConversationMeta, root.id, ctx))).toBe("default");
+      expect((await root.agent(ctx)).tools.map(({ name }) => name)).not.toContain("create_bot");
+    } finally {
+      await harness.close(ctx);
+    }
+  });
   it("keeps tools marked writesOutside out of purpose-bot profiles until approvals exist", () => {
     const { profiles } = composeMipi();
     for (const name of PROFILE_NAMES.filter((name) => name !== "main")) {
-      expect(
-        profiles
-          .toolsFor(name)
-          .filter((tool) => "writesOutside" in tool && tool.writesOutside === true),
-      ).toEqual([]);
+      expect(profiles.toolsFor(name).filter((tool) => tool.writesOutside === true)).toEqual([]);
     }
   });
 

@@ -24,6 +24,6 @@ export const PROFILE_TABLE: ProfileTable = {
   },
   main: {
     description: "MiPi, the main bot: everyday tools and bot management",
-    tools: [...EVERYDAY, "create_bot", "message_bot", "list_bots", "stop_bot"],
+    tools: [...EVERYDAY, "create_bot", "bind_door", "message_bot", "list_bots", "stop_bot"],
   },
 };

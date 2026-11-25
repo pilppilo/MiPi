@@ -21,7 +21,6 @@ import { composeMipi } from "./composition.ts";
 import {
   boundConversation,
   Bots,
-  BOTS_DOC_KIND,
   clearBotFields,
   ConversationMeta,
   type ConversationMetaState,
@@ -40,7 +39,7 @@ import {
   profileOrDefault,
 } from "./profiles.ts";
 import { createBot, ensureBots, renameBot } from "./bots.ts";
-import { bindBotDoor } from "./bot-tools.ts";
+import { bindBotDoor, BOT_LIST_CHANGE } from "./bot-tools.ts";
 import {
   abortArchived,
   ARCHIVED_REPLY,
@@ -801,18 +800,29 @@ export class MipiAgent extends DurableObject<Env> {
           if (
             this.#connections().length > 0 &&
             publication.changes.some(
-              (change) => change.type === "document" && change.record?.kind === BOTS_DOC_KIND,
+              (change) => change.type === "document" && change.record?.kind === BOT_LIST_CHANGE,
             )
           ) {
             this.ctx.waitUntil(
               Promise.resolve()
                 .then(async () => {
+                  if (this.#harness !== harness || this.#state.kind !== "open") return;
                   const archived =
                     (await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {};
-                  await this.#leaveArchived(Object.keys(archived).map(Number) as ConversationId[]);
-                  await this.#broadcastSessionSnapshot();
+                  if (this.#harness !== harness || this.#state.kind !== "open") return;
+                  await this.#leaveArchived(
+                    Object.keys(archived).map(Number) as ConversationId[],
+                    harness,
+                  );
+                  if (this.#harness === harness && this.#state.kind === "open") {
+                    await this.#broadcastSessionSnapshot();
+                  }
                 })
-                .catch((error) => reportError("Refreshing the web bot list failed", error)),
+                .catch((error) => {
+                  if (this.#harness === harness && this.#state.kind === "open") {
+                    reportError("Refreshing the web bot list failed", error);
+                  }
+                }),
             );
           }
         },
@@ -887,6 +897,7 @@ export class MipiAgent extends DurableObject<Env> {
         const sources =
           extension.wakeSources?.({
             harness,
+            origins: composition.connectors.origins,
             models: this.#models,
             untrustedTools: composition.extensions.untrustedTools,
             onWakeChange: () =>
@@ -1669,14 +1680,17 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   /** Moves every socket watching an archived conversation to where the web door is bound now (MiPi). */
-  async #leaveArchived(archived: readonly ConversationId[]): Promise<void> {
+  async #leaveArchived(
+    archived: readonly ConversationId[],
+    harness = this.#harness,
+  ): Promise<void> {
     const gone = new Set<number>(archived);
     const watching = this.#connections().filter((socket) => {
       const id = connectionState(socket)?.conversationId;
       return id !== undefined && gone.has(id);
     });
     if (watching.length === 0) return;
-    const bound = await this.#harness.commit(
+    const bound = await harness.commit(
       (tx) =>
         boundConversation(
           tx,
@@ -1686,7 +1700,11 @@ export class MipiAgent extends DurableObject<Env> {
         ),
       BACKGROUND_CONTEXT,
     );
-    for (const socket of watching) await this.#watchConversation(socket, bound);
+    for (const socket of watching) {
+      if (this.#harness !== harness || this.#state.kind !== "open") return;
+      const id = connectionState(socket)?.conversationId;
+      if (id !== undefined && gone.has(id)) await this.#watchConversation(socket, bound);
+    }
   }
 
   async #stopView(socket: WebSocket): Promise<void> {

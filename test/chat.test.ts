@@ -690,6 +690,16 @@ describe("chat application", () => {
       profile: "default",
     });
     const garden = created.conversationId!;
+    expect(
+      await run({ type: "bot.bind", conversationId: garden, channel: "relay:pidu" }),
+    ).toMatchObject({
+      ok: true,
+      conversationId: garden,
+    });
+    expect(await run({ type: "bot.bind", conversationId: garden, channel: "web" })).toMatchObject({
+      ok: false,
+      error: { message: "No rebindable door named web." },
+    });
     // `bot.create` opened it in this tab: archiving moves the tab to MiPi, then tells every list, then answers.
     type Snapshot = {
       type: string;
@@ -861,6 +871,7 @@ describe("chat application", () => {
               "forget",
               "web_fetch",
               "create_bot",
+              "bind_door",
               "message_bot",
               "list_bots",
               "stop_bot",

@@ -72,7 +72,9 @@ async function seed(): Promise<void> {
     const faux = fauxProvider();
     // Answers by what was asked, so the doors' order of requests doesn't matter.
     const answer: FauxResponseStep = (context) => {
-      const last = context.messages.at(-1);
+      const last = context.messages.findLast(
+        (message) => message.role === "user" || message.role === "toolResult",
+      );
       if (last?.role === "toolResult") return fauxAssistantMessage([fauxText("Done.")]);
       const text = JSON.stringify(last?.content ?? "");
       if (text.includes("long-term memory")) {
@@ -160,6 +162,7 @@ async function seed(): Promise<void> {
     const pass = new MemoryPassRuntime({
       harness,
       models,
+      origins: composition.connectors.origins,
       untrustedTools: new Set(["web_fetch"]),
       onWakeChange: () => {},
       report: (message, error) => {
@@ -228,14 +231,15 @@ async function seed(): Promise<void> {
       await answers.reconcile();
       await telegram.recover();
 
+      // The owner's idle range can save a lesson before a relay exchange starts a new range.
+      clock.now = Date.now() + MEMORY_IDLE_MS + 60_000;
+      await pass.run();
+      await harness.waitForIdle(ctx);
+
       expect(await relay.admit("fixture-relay", "Hello from PiDu")).toEqual({
         kind: "done",
         answer: "Hi PiDu.",
       });
-
-      clock.now = Date.now() + MEMORY_IDLE_MS + 60_000;
-      await pass.run();
-      await harness.waitForIdle(ctx);
 
       // Capture both an undelivered follow-up and a submitted bot message awaiting settlement. The exporter
       // sees them on disk even if some work hasn't reached the caller yet.

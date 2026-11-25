@@ -27,6 +27,7 @@ export const memoryExtension: MipiExtension = {
   wakeSources: (context) => {
     const pass = new MemoryPassRuntime({
       harness: context.harness,
+      origins: context.origins,
       models: context.models,
       untrustedTools: context.untrustedTools,
       onWakeChange: context.onWakeChange,

@@ -45,7 +45,7 @@ import {
   TRANSIENT_REMINDER_COOLDOWN_MS,
 } from "./limits.ts";
 import type { Providers } from "./providers.ts";
-import { BOT_REPLY_KIND, BOT_TRANSCRIPT_KIND, BotHops, maxBotHop } from "./bot-hops.ts";
+import { BOT_ORIGIN, BOT_REPLY_KIND, BotHops, maxBotHop } from "./bot-hops.ts";
 
 export { afterNextChicagoMidnight, CAP_ZONE, chicagoDay } from "../lib/cap-day.ts";
 
@@ -80,6 +80,7 @@ export type ProactiveState = {
     instruction: string;
     conversationId: number;
     destination: DeliveryDestination;
+    ownerReply?: DeliveryDestination;
     repeating?: true;
   }>;
   /** Recently settled transient failures, used to keep a recurring schedule from readmitting immediately. */
@@ -188,6 +189,7 @@ export async function expectProactive(
     readonly instruction: string;
     readonly conversationId: number;
     readonly destination: DeliveryDestination;
+    readonly ownerReply?: DeliveryDestination;
     readonly repeating?: true;
   },
   now: number,
@@ -202,6 +204,9 @@ export async function expectProactive(
       instruction: expectation.instruction,
       conversationId: expectation.conversationId,
       destination: { ...expectation.destination },
+      ...(expectation.ownerReply === undefined
+        ? {}
+        : { ownerReply: { ...expectation.ownerReply } }),
       ...(expectation.repeating ? { repeating: true } : {}),
     },
   ];
@@ -253,9 +258,9 @@ export const RecordRun = defineTask<
   },
 });
 
-/** One tool round of a reminder-only run: its failed tools, and whether the run may take another. */
+/** Records proactive tool failures and budgets fully proactive rounds. */
 export const RoundBudget = defineTask<
-  { readonly results: number[] },
+  { readonly results: number[]; readonly recordOnly?: true },
   { phase: "count" },
   { terminate?: true }
 >({
@@ -286,6 +291,9 @@ export const RoundBudget = defineTask<
               failed.map((error) => ({ submissionId, ...error })),
             ),
           ]);
+        }
+        if (task.input.recordOnly) {
+          return { status: "terminal", outcome: { status: "completed", result: {} } };
         }
         // pi-ledger L7. Rounds are counted here, after each tool round, because `beforeRequest` can't write. The spend
         // cap and a pause are checked here too, with today's spend measured first (M9).
@@ -326,16 +334,17 @@ export const RoundBudget = defineTask<
   },
 });
 
-/** Whether the live run's inputs include (`some`) or are all (`every`) pending reminders. */
-async function reminderRun(api: HookApi, which: "some" | "every"): Promise<boolean> {
+/** Match proactive work to the live run, including bot work grouped with a door input. */
+async function proactiveRunKind(api: HookApi): Promise<"only" | "mixed-bot" | "mixed" | "none"> {
   const inputs = (await api.snapshot(LiveDoc, api.conversationId, context))?.run?.inputs ?? [];
-  if (inputs.length === 0) return false;
-  const pending = new Set(
-    ((await api.snapshot(Proactive, context))?.pending ?? []).map(
-      ({ submissionId }) => submissionId,
-    ),
-  );
-  return inputs[which]((id) => pending.has(id));
+  if (inputs.length === 0) return "none";
+  const pending = (await api.snapshot(Proactive, context))?.pending ?? [];
+  const inputIds = new Set<number>(inputs);
+  const active = pending.filter(({ submissionId }) => inputIds.has(submissionId));
+  if (active.length === inputs.length) return "only";
+  if (active.some(({ reminderId }) => reminderId.startsWith(`${BOT_ORIGIN.prefix}:`)))
+    return "mixed-bot";
+  return active.length > 0 ? "mixed" : "none";
 }
 
 export const proactiveExtension = defineExtension({
@@ -344,13 +353,19 @@ export const proactiveExtension = defineExtension({
   hooks: [
     hook(GenerationTask, {
       onYield: async (_answer, api) =>
-        (await reminderRun(api, "some"))
+        (await proactiveRunKind(api)) !== "none"
           ? { kind: "tasks" as const, tasks: [hookTask(RecordRun, {})] }
           : undefined,
-      afterTools: async (_assistant, results, api) =>
-        (await reminderRun(api, "every"))
-          ? { tasks: [hookTask(RoundBudget, { results: results.map(Number) })] }
-          : undefined,
+      afterTools: async (_assistant, results, api) => {
+        const kind = await proactiveRunKind(api);
+        if (kind === "only")
+          return { tasks: [hookTask(RoundBudget, { results: results.map(Number) })] };
+        if (kind === "mixed-bot")
+          return {
+            tasks: [hookTask(RoundBudget, { results: results.map(Number), recordOnly: true })],
+          };
+        return undefined;
+      },
     }),
   ],
 });
@@ -494,17 +509,12 @@ export async function reconcileAnswers(
   const spend = await tx.doc(Spend);
   const pushable = (destination: DeliveryDestination) =>
     delivery.canPush(destination) ? destination : undefined;
+  const isBot = (input: ProactiveState["pending"][number]) =>
+    origins.originOf(input.reminderId).source === BOT_ORIGIN.source;
+  const ownerReply = (input: ProactiveState["pending"][number]) =>
+    input.destination.kind === BOT_REPLY_KIND ? input.ownerReply : pushable(input.destination);
   const stopNotice = async (input: ProactiveState["pending"][number], reason: StopReason) => {
-    if (input.destination.kind === BOT_REPLY_KIND) {
-      if (reason !== "paused") {
-        await send(input.destination, {
-          id: `bot-stop:${input.submissionId}`,
-          text: `The bot's work stopped (${reason}).`,
-        });
-      }
-      return;
-    }
-    const prefer = pushable(input.destination);
+    const prefer = ownerReply(input);
     switch (reason) {
       case "daily-cap":
         await noticeCap(tx, proactive, delivery, prefer, now);
@@ -519,6 +529,19 @@ export async function reconcileAnswers(
         // The owner paused MiPi: the run stops without a word.
         return;
       case "run-limit":
+        if (isBot(input)) {
+          const notice = {
+            id: `bot-run-limit:${input.submissionId}`,
+            text: `The bot's work stopped after ${RUN_ROUND_LIMIT} rounds.`,
+          };
+          if (
+            !(await delivery.tellOwner(tx, notice, now, prefer)) &&
+            input.destination.kind === BOT_REPLY_KIND
+          ) {
+            await send(input.destination, notice);
+          }
+          return;
+        }
         if (prefer !== undefined) {
           await send(prefer, {
             id: `run-limit:${input.submissionId}`,
@@ -577,7 +600,7 @@ export async function reconcileAnswers(
         await stopNotice(input, stop);
         continue;
       }
-      const errors = reminderOnly ? errorsOf(input.submissionId) : [];
+      const errors = reminderOnly || isBot(input) ? errorsOf(input.submissionId) : [];
       let outcome: ProactiveRun["outcome"] = "sent";
       if (errors.length > 0) outcome = "failed";
       else if (reminderOnly && isNoSend(text)) outcome = "quiet";
@@ -588,12 +611,24 @@ export async function reconcileAnswers(
       const id = `answer:${answer}:${keyOf(destination)}`;
       if (destination.kind === BOT_REPLY_KIND) {
         if (reminderOnly && isNoSend(text) && errors.length === 0) continue;
-        if (answered.has(identity)) continue;
-        answered.add(identity);
+        const route =
+          input.ownerReply === undefined ? "" : `:${delivery.identity(input.ownerReply)}`;
+        if (answered.has(identity + route)) continue;
+        answered.add(identity + route);
+        const tools = [...new Set(errors.map(({ tool }) => tool))].join(", ");
+        const notice =
+          errors.length > 0
+            ? `The bot hit a failed tool (${tools}): ${errors[0]!.reason}`
+            : undefined;
         await send(destination, {
-          id,
-          text: quiet ? (errors[0]?.reason ?? "The bot produced no answer.") : text,
+          id: id + route,
+          text: quiet
+            ? (notice ?? "The bot produced no answer.")
+            : notice === undefined
+              ? text
+              : `${notice}\n\n${text}`,
           botHop: await maxBotHop(tx, run?.inputs ?? group.map(({ input }) => input)),
+          ...(input.ownerReply === undefined ? {} : { ownerReply: input.ownerReply }),
         });
         continue;
       }
@@ -606,7 +641,10 @@ export async function reconcileAnswers(
       }
       if (errors.length > 0) {
         const tools = [...new Set(errors.map(({ tool }) => tool))].join(", ");
-        const notice = `The reminder "${reminderLabel(input.instruction)}" hit a failed tool (${tools}): ${errors[0]!.reason}`;
+        const subject = isBot(input)
+          ? "The bot follow-up"
+          : `The reminder "${reminderLabel(input.instruction)}"`;
+        const notice = `${subject} hit a failed tool (${tools}): ${errors[0]!.reason}`;
         await send(destination, {
           id: `tool-error:${input.submissionId}`,
           text: quiet ? notice : `${notice}\n\n${text}`,
@@ -618,11 +656,17 @@ export async function reconcileAnswers(
         // Thinking only, or nothing: a reminder is never dropped without a word.
         await send(destination, {
           id: `empty:${input.submissionId}`,
-          text: `The reminder "${reminderLabel(input.instruction)}" ran but produced no answer.`,
+          text: isBot(input)
+            ? "The bot follow-up produced no answer."
+            : `The reminder "${reminderLabel(input.instruction)}" ran but produced no answer.`,
         });
         continue;
       }
-      await send(destination, { id, text, proactive: { sourceId: input.reminderId } });
+      await send(destination, {
+        id,
+        text,
+        ...(isBot(input) ? {} : { proactive: { sourceId: input.reminderId } }),
+      });
     }
   }
 
@@ -647,17 +691,33 @@ export async function reconcileAnswers(
       continue;
     }
     const destination = pushable(item.input.destination);
-    if (destination?.kind === BOT_REPLY_KIND) {
-      await send(destination, {
-        id: `bot-unanswered:${item.input.submissionId}`,
-        text: `The bot couldn't answer (${item.record.reason}).`,
-      });
-      continue;
-    }
     const notice =
       item.record.reason === "model_error"
         ? await settledLimit(tx, providers, item.record.detail, now)
         : undefined;
+    if (item.source === "proactive" && isBot(item.input)) {
+      const { input, record } = item;
+      if (record.reason === "aborted" || record.reason === "withdrawn") continue;
+      const prefer = ownerReply(input);
+      if (
+        notice?.limit.kind === "usage" &&
+        (await tellProviderLimit(tx, delivery, prefer, now, notice.limit.provider)) === "active"
+      )
+        continue;
+      const message = {
+        id: `bot-unanswered:${input.submissionId}`,
+        text: notice?.text ?? `The bot couldn't answer (${record.reason}).`,
+      };
+      if (notice !== undefined) {
+        await delivery.tellOwner(tx, message, now, prefer);
+      } else if (destination !== undefined) {
+        await send(destination, {
+          ...message,
+          ...(prefer === undefined ? {} : { ownerReply: prefer }),
+        });
+      }
+      continue;
+    }
     if (item.source === "proactive" && item.input.repeating) {
       if (notice?.limit.kind === "rate") {
         const { reminderId, submissionId } = item.input;
@@ -711,10 +771,8 @@ export async function reconcileAnswers(
   }
 
   const done = new Set(settled.map((item) => item.input.submissionId));
-  const botIds = settled.flatMap(({ input }) =>
-    input.destination.kind === BOT_REPLY_KIND || input.destination.kind === BOT_TRANSCRIPT_KIND
-      ? [input.submissionId]
-      : [],
+  const botIds = settled.flatMap((item) =>
+    item.source === "proactive" && isBot(item.input) ? [item.input.submissionId] : [],
   );
   if (botIds.length > 0) {
     const hops = await tx.doc(BotHops);

@@ -181,10 +181,8 @@ export type HeldReminder = {
   readonly destination: { readonly kind: string; readonly [field: string]: string | number };
 };
 
-export const BOTS_DOC_KIND = "app.bots";
-
 export const Bots = defineDoc<BotsState>({
-  kind: BOTS_DOC_KIND,
+  kind: "app.bots",
   version: 1,
   scope: "session",
   initial: () => ({}),

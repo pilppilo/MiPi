@@ -7,6 +7,15 @@ import { RELAY_BINDING } from "./requests.ts";
 
 export const relayDoor: DoorRegistration = {
   name: "relay",
-  origins: [{ prefix: "relay", source: "relay", automated: false, authority: "external" }],
+  origins: [
+    {
+      prefix: "relay",
+      source: "relay",
+      automated: false,
+      authority: "external",
+      // pi-ledger L8: match the envelope used by the relay before entries carry a submission id.
+      matchesTranscript: (text) => /^\[PiDu(?: · [^\n]+)?\]\n<relay from="pidu">\n/.test(text),
+    },
+  ],
   rebindableKeys: [RELAY_BINDING],
 };

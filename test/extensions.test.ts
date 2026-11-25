@@ -360,6 +360,7 @@ describe("switching an extension off for one conversation", () => {
     const pass = new MemoryPassRuntime({
       harness,
       models,
+      origins: composition.connectors.origins,
       untrustedTools: composition.extensions.untrustedTools,
       onWakeChange: () => {},
       report: (message, error) => {
