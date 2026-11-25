@@ -54,8 +54,8 @@ jobs:
       CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
       CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
       - name: Worker URL
@@ -71,7 +71,7 @@ jobs:
           BOOKMARK: ${{ inputs.bookmark }}
         run: node scripts/deploy.ts restore-bookmark --url "$WORKER_URL" --bookmark "$BOOKMARK"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         if: inputs.bookmark == ''
         with:
           name: backup-${{ inputs.backup_target }}-${{ inputs.backup_run_id }}

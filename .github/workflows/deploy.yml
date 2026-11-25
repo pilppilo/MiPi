@@ -62,10 +62,10 @@ jobs:
       OPENCODE_USAGE_KEY: ${{ secrets.OPENCODE_USAGE_KEY }}
       OPENCODE_ORG_ID: ${{ vars.OPENCODE_ORG_ID }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .node-version
       - run: corepack enable
@@ -128,7 +128,7 @@ jobs:
 
       - name: Back up the agent
         run: node scripts/deploy.ts backup --url "$WORKER_URL" --out "$RUNNER_TEMP/backup.json"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: backup-${{ env.TARGET }}-${{ github.run_id }}
           path: ${{ runner.temp }}/backup.json
