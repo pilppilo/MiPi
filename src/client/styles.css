@@ -100,6 +100,87 @@ body:has(.session-workspace) {
   margin: 0;
 }
 
+/* Bots (COD-197): MiPi pinned first, then purpose bots with their purpose. */
+.bot-link {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.bot-link--main {
+  font-weight: 600;
+}
+
+.bot-name {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.bot-purpose {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+.bot-dot {
+  flex: none;
+  inline-size: 0.5rem;
+  block-size: 0.5rem;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.bot-dot--waiting {
+  background: transparent;
+  border: 1px solid currentColor;
+}
+
+.bot-dot--running {
+  animation: bot-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.bot-dot--unread {
+  background: #1f6feb;
+}
+
+@keyframes bot-dot-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bot-dot--running {
+    animation: none;
+  }
+}
+
+.new-bot-form {
+  display: grid;
+  gap: 0.5rem;
+  margin-block-start: 0.75rem;
+}
+
+.new-bot-form label {
+  display: grid;
+  gap: 0.2rem;
+  font-size: 0.85rem;
+}
+
+.new-bot-form input,
+.new-bot-form textarea,
+.new-bot-form select {
+  font: inherit;
+}
+
+.new-bot-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .conversation-view {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;

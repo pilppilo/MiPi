@@ -203,6 +203,42 @@ const seedUserEntry = (sessionId: string, content: string): Promise<number> => {
   });
 };
 
+/** A settled input in MiPi, as an earlier process would have left it: a fork needs a committed entry. */
+const seedMainEntry = (
+  sessionId: string,
+  content: string,
+): Promise<{ main: number; entry: number }> => {
+  const models = createModels();
+  const faux = fauxProvider();
+  faux.setResponses([fauxAssistantMessage([fauxText("Seeded")])]);
+  models.setProvider(faux.provider);
+  return seedSession(
+    sessionId,
+    createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+    async (harness) => {
+      const main = (await harness.commit(
+        async (tx) => (await tx.doc(Bots)).mainId,
+        BACKGROUND_CONTEXT,
+      ))!;
+      const conversation = (await harness.conversation(
+        main as ConversationId,
+        BACKGROUND_CONTEXT,
+      ))!;
+      await conversation.configure(
+        { model: { provider: "faux", modelId: "faux-1" } },
+        BACKGROUND_CONTEXT,
+      );
+      const settled = await (
+        await conversation.submit({ type: "input", content, requestId: "seed" }, BACKGROUND_CONTEXT)
+      ).wait(BACKGROUND_CONTEXT);
+      if (settled.type !== "input" || settled.entry === undefined) {
+        throw new Error("Seed submission did not create an input entry");
+      }
+      return { main, entry: settled.entry };
+    },
+  );
+};
+
 describe("chat application", () => {
   it("shares attributed prompts between clients in one session", async () => {
     const sessionId = "multiplayer-prompts";
@@ -554,10 +590,26 @@ describe("chat application", () => {
       });
     }
 
-    // Renaming keeps the purpose and frees the old name.
+    // Renaming keeps the purpose and frees the old name, and an open tab hears of it at once.
+    type Snapshot = {
+      type: string;
+      session?: { conversations: Array<{ id: number; name?: string; kind?: string }> };
+    };
+    const other = await openSession(sessionSocketUrl(sessionId, "Bob", "bots-client-other"));
+    const otherSocket = other.webSocket!;
+    const otherMessages = jsonMessages(otherSocket);
+    otherSocket.accept();
+    await otherMessages.skipConnectFrames();
+    const renamed = otherMessages.nextMatching<Snapshot>(
+      (message) =>
+        message.type === "session.snapshot" &&
+        message.session?.conversations.some(({ name }) => name === "Shopping") === true,
+    );
     expect(
       await run({ type: "bot.rename", conversationId: created.conversationId, name: "Shopping" }),
     ).toMatchObject({ ok: true });
+    await renamed;
+    otherSocket.close(1000, "test complete");
     expect((await bot("Groceries")).ok).toBe(true);
     // MiPi can be renamed too; a chat from before bots can't.
     const older = await configureOfflineModel(sessionId, "root");
@@ -580,6 +632,7 @@ describe("chat application", () => {
       latestEntryId?: number;
     }>((message) => message.type === "conversation.head" && message.conversationId === main);
     expect(head.latestEntryId).toEqual(expect.any(Number));
+
     socket.close(1000, "test complete");
 
     // A new session's snapshot carries each bot's newest entry, and the rename.
@@ -600,6 +653,54 @@ describe("chat application", () => {
     expect(conversations.find(({ id }) => id === created.conversationId)).toMatchObject({
       name: "Shopping",
       purpose: "Keep the shopping list.",
+    });
+    againSocket.close(1000, "test complete");
+  });
+
+  it("forks MiPi into a chat of its own on the default profile, never a second MiPi", async () => {
+    const sessionId = "fork-the-main-bot";
+    const { main, entry } = await seedMainEntry(sessionId, "Fork this");
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "fork-main-client"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Snapshot = {
+      type: string;
+      session?: { conversations: Array<{ id: number; kind?: string; parent?: unknown }> };
+    };
+    socket.send(
+      JSON.stringify({
+        type: "conversation.fork",
+        requestId: "fork-main",
+        conversationId: main,
+        entryId: entry,
+      }),
+    );
+    const result = await messages.nextMatching<{
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      conversationId?: number;
+    }>((message) => message.type === "command.result" && message.requestId === "fork-main");
+    expect(result.ok).toBe(true);
+    socket.close(1000, "test complete");
+
+    const again = await openSession(sessionSocketUrl(sessionId, "Alice", "fork-main-client-2"));
+    const againSocket = again.webSocket!;
+    const againMessages = jsonMessages(againSocket);
+    againSocket.accept();
+    const snapshot = await againMessages.nextMatching<Snapshot>(
+      ({ type }) => type === "session.snapshot",
+    );
+    const conversations = snapshot.session!.conversations;
+    expect(conversations.filter(({ kind }) => kind === "main").map(({ id }) => id)).toEqual([main]);
+    // Off MiPi's `main` too, whose tools are MiPi's alone.
+    expect(conversations.find(({ id }) => id === result.conversationId)).toEqual({
+      id: result.conversationId,
+      parent: { conversationId: main, at: entry },
+      profile: "default",
+      latestEntryId: entry,
     });
     againSocket.close(1000, "test complete");
   });

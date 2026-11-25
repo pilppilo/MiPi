@@ -2,7 +2,7 @@
 "mipi": minor
 ---
 
-COD-197: MiPi becomes the main bot (bots slice 1). Work in progress: the web bots list and Telegram's `/bot` follow in this PR.
+COD-197: MiPi becomes the main bot (bots slice 1). Work in progress: Telegram's `/bot` follows in this PR.
 
 **Added**
 
@@ -10,13 +10,14 @@ COD-197: MiPi becomes the main bot (bots slice 1). Work in progress: the web bot
 - Bot fields on `app.conversation` (`kind`, `name`, `purpose`, `bot`, `createdBy`, `archivedAt`) and the session document `app.bots` (MiPi and the name index). Bot names are unique, ignoring case, and 1 to 40 characters. A purpose bot's purpose is its instructions.
 
 - Protocol: `bot.create { name, purpose, profile }` makes a purpose bot (on a profile the pickers offer; a retry with the same request id makes it once), and `bot.rename` renames a bot, MiPi included. Conversation summaries carry `kind`, `name`, `purpose`, `bot`, `archivedAt` and `latestEntryId`, and a `conversation.head` event tells the list when a conversation gets a new entry, from the commit itself.
-- The web app's "New bot" form (name, purpose, profile).
+- The web app lists bots: MiPi first, by its own name, then the purpose bots with their purposes, each with a dot while it works or waits (its subagents' tasks count; a sleeping reminder doesn't) and a dot for anything unread since this browser last read it. A new browser starts with nothing unread. "New bot" asks for a name, a purpose and a profile.
 
 **Changed**
 
 - Every door reaches MiPi: the web opens it instead of Pi Durable's root conversation, and Telegram and the PiDu relay talk to it. Relay messages stay fenced and stamped as PiDu's. Pointing the relay at a purpose bot of its own comes with COD-199.
 - Only MiPi runs on `main`, and MiPi always does. `pidu` stays only for the relay's chats from before bots: no conversation newly takes it, and the relay starts on the configured profile like the other doors. The web and Telegram's `/profile` refuse these switches, and pickers list only `default` and `empty`.
-- A fork is a chat of its own, never a copy of its bot.
+- A fork is a chat of its own, never a copy of its bot, and a fork of MiPi leaves `main` for `default`. The web app no longer offers forking until forks become cobots (COD-200): the bots list doesn't show plain chats.
+- MiPi's profile shows as text in the web app, not as a picker.
 - `conversation.create` is gone: "New conversation" became "New bot". Receipts stored by older builds still read.
 
 **Migration**

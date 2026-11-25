@@ -19,6 +19,16 @@ import {
   type UsageReadout,
 } from "../protocol.ts";
 import type { ConversationSnapshot } from "./session-state.ts";
+import {
+  activityByBot,
+  advanceLastRead,
+  type BotActivity,
+  type LastRead,
+  listedBots,
+  loadLastRead,
+  saveLastRead,
+  unreadIds,
+} from "./bots-list.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MessageText, TranscriptList } from "./Transcript.tsx";
@@ -28,13 +38,38 @@ interface ChatSessionProps {
   readonly sessionId: string;
 }
 
-const conversationLabel = ({ id, parent, owner, title }: ConversationSummary): string => {
+const conversationLabel = ({ id, parent, owner, title, name }: ConversationSummary): string => {
+  // A bot by its name, which the owner can change (MiPi's too): never a fixed string.
+  if (name !== undefined) return name;
   if (owner !== undefined) return `Subagent (id: ${id}, owner: ${owner.conversationId})`;
   if (title !== undefined) return parent === undefined ? title : `${title} (fork)`;
   if (id === ROOT_CONVERSATION_ID) return "Main conversation";
   if (parent !== undefined) return `Fork (id: ${id}, from: ${parent.at})`;
   return "New conversation";
 };
+
+/** Which bots have something unread, remembered in this browser (`localStorage`), the open one never. */
+function useUnread(
+  sessionId: string,
+  conversations: readonly ConversationSummary[],
+  activeConversationId: number | undefined,
+): ReadonlySet<number> {
+  const storage = (): Storage | undefined => {
+    try {
+      return window.localStorage;
+    } catch {
+      return undefined;
+    }
+  };
+  const [lastRead, setLastRead] = useState<LastRead>(() => loadLastRead(storage(), sessionId));
+  const next = advanceLastRead(lastRead, conversations, activeConversationId);
+  useEffect(() => {
+    if (next === lastRead) return;
+    setLastRead(next);
+    saveLastRead(storage(), sessionId, next);
+  });
+  return unreadIds(next, conversations);
+}
 
 const statusLabel = {
   connecting: "Connecting",
@@ -148,6 +183,9 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const activeConversationId = session.activeConversationId;
   const activeConversation = session.activeConversation;
   const activeSummary = session.conversations.find(({ id }) => id === activeConversationId);
+  const listed = listedBots(session.conversations);
+  const activity = activityByBot(session.conversations, session.activity);
+  const unread = useUnread(sessionId, session.conversations, activeConversationId);
   const activityCount = Object.keys(session.activity?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
   const canSubmit =
@@ -356,7 +394,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
         <nav className="conversation-navigation" aria-labelledby="conversations-heading">
           <div className="conversation-navigation-header">
-            <h2 id="conversations-heading">Conversations</h2>
+            <h2 id="conversations-heading">Bots</h2>
             <button
               type="button"
               aria-expanded={newBotOpen}
@@ -366,37 +404,46 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             >
               New bot
             </button>
+            {newBotOpen ? (
+              <NewBotForm
+                profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
+                  ({ id }) => id,
+                )}
+                disabled={!isConnected}
+                onCreate={async (bot) => {
+                  const created = await session.createBot(bot);
+                  if (created) setNewBotOpen(false);
+                  return created;
+                }}
+                onCancel={() => setNewBotOpen(false)}
+              />
+            ) : null}
           </div>
-          {newBotOpen ? (
-            <NewBotForm
-              profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
-                ({ id }) => id,
-              )}
-              disabled={!isConnected}
-              onCreate={async (bot) => {
-                const created = await session.createBot(bot);
-                if (created) setNewBotOpen(false);
-                return created;
-              }}
-              onCancel={() => setNewBotOpen(false)}
-            />
-          ) : null}
           <div className="conversation-list" tabIndex={0}>
-            {session.conversations.length === 0 ? (
-              <p className="conversation-list-empty">No conversations yet.</p>
+            {listed.main === undefined && listed.bots.length === 0 ? (
+              <p className="conversation-list-empty">No bots yet.</p>
             ) : (
               <ul>
-                {session.conversations.map((conversation) => (
-                  <li key={conversation.id}>
-                    <a
-                      href={`?conversation=${conversation.id}`}
-                      aria-current={conversation.id === activeConversationId ? "page" : undefined}
-                      onClick={(event) => followConversationLink(event, conversation.id)}
-                    >
-                      {conversationLabel(conversation)}
-                    </a>
-                  </li>
-                ))}
+                {[listed.main, ...listed.bots].map((bot) =>
+                  bot === undefined ? null : (
+                    <li key={bot.id}>
+                      <a
+                        href={`?conversation=${bot.id}`}
+                        className={bot.kind === "main" ? "bot-link bot-link--main" : "bot-link"}
+                        aria-current={bot.id === activeConversationId ? "page" : undefined}
+                        onClick={(event) => followConversationLink(event, bot.id)}
+                      >
+                        <span className="bot-name">
+                          {conversationLabel(bot)}
+                          <BotDots activity={activity.get(bot.id)} unread={unread.has(bot.id)} />
+                        </span>
+                        {bot.purpose === undefined ? null : (
+                          <span className="bot-purpose">{bot.purpose}</span>
+                        )}
+                      </a>
+                    </li>
+                  ),
+                )}
               </ul>
             )}
           </div>
@@ -424,6 +471,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             <ConversationDetails
               conversation={activeConversation}
               profile={activeSummary?.profile}
+              fixedProfile={activeSummary?.kind === "main"}
               options={session.options}
               disabled={!isConnected}
               onConfigure={(change) => session.configureConversation(activeConversation.id, change)}
@@ -453,10 +501,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           {activeConversation === undefined ? (
             <p className="transcript-empty">Loading conversation…</p>
           ) : activeConversation.entries.length === 0 && activeConversation.live === null ? (
-            <p className="transcript-empty">
-              Send a message to begin. You can fork the conversation from any user or assistant
-              message.
-            </p>
+            <p className="transcript-empty">Send a message to begin.</p>
           ) : (
             <>
               {activeConversation.earlier ? (
@@ -474,11 +519,9 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 gaps={activeConversation.gaps}
                 tools={activeConversation.tools}
                 runActive={activeConversation.live !== null}
-                onFork={
-                  activeConversationId === undefined
-                    ? undefined
-                    : (entryId) => session.forkConversation(activeConversationId, entryId)
-                }
+                // No forking from the web until forks are cobots (COD-200): a fork is a plain chat, which the bots
+                // list doesn't show, so it would strand the owner in a chat they can't find again.
+                onFork={undefined}
                 onFillGap={(gap) => session.fillGap(activeConversation.id, gap)}
               />
             </>
@@ -592,6 +635,31 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 }
 
 /** "New bot": a name and a purpose (its fixed instructions), on a profile the pickers offer (COD-197). */
+/** A bot's dots: working or waiting (from the activity graph), and something unread. */
+function BotDots({
+  activity,
+  unread,
+}: {
+  readonly activity: BotActivity | undefined;
+  readonly unread: boolean;
+}) {
+  return (
+    <>
+      {activity === undefined ? null : (
+        <span
+          className={`bot-dot bot-dot--${activity}`}
+          role="img"
+          aria-label={activity === "running" ? "Working" : "Waiting"}
+          title={activity === "running" ? "Working" : "Waiting"}
+        />
+      )}
+      {unread ? (
+        <span className="bot-dot bot-dot--unread" role="img" aria-label="Unread" title="Unread" />
+      ) : null}
+    </>
+  );
+}
+
 function NewBotForm({
   profiles,
   disabled,
@@ -673,9 +741,12 @@ function ConversationDetails({
   options,
   disabled,
   onConfigure,
+  fixedProfile,
 }: {
   readonly conversation: ConversationSnapshot;
   readonly profile: string | undefined;
+  /** MiPi always runs on `main`, which no picker offers: shown as text, not a select that falls back to another. */
+  readonly fixedProfile: boolean;
   readonly options: Options | undefined;
   readonly disabled: boolean;
   readonly onConfigure: (change: { readonly model?: string; readonly profile?: string }) => void;
@@ -741,18 +812,24 @@ function ConversationDetails({
             <label htmlFor="profile-picker">Profile:</label>
           </dt>
           <dd>
-            <select
-              id="profile-picker"
-              value={profile ?? "default"}
-              disabled={disabled || options === undefined}
-              onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
-            >
-              {(options?.profiles ?? [{ id: profile ?? "default", name: "" }]).map((choice) => (
-                <option key={choice.id} value={choice.id} title={choice.name}>
-                  {choice.id}
-                </option>
-              ))}
-            </select>
+            {fixedProfile ? (
+              <output id="profile-picker" title="MiPi always runs on the main profile">
+                {profile ?? "main"}
+              </output>
+            ) : (
+              <select
+                id="profile-picker"
+                value={profile ?? "default"}
+                disabled={disabled || options === undefined}
+                onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
+              >
+                {(options?.profiles ?? [{ id: profile ?? "default", name: "" }]).map((choice) => (
+                  <option key={choice.id} value={choice.id} title={choice.name}>
+                    {choice.id}
+                  </option>
+                ))}
+              </select>
+            )}
           </dd>
           <dt>Tools:</dt>
           <dd>{tools}</dd>

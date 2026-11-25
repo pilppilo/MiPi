@@ -30,7 +30,13 @@ import {
 } from "./conversations.ts";
 import { ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
-import { isProfileName, PICKABLE_PROFILES, profileOrDefault } from "./profiles.ts";
+import {
+  DEFAULT_PROFILE,
+  isProfileName,
+  MAIN_PROFILE,
+  PICKABLE_PROFILES,
+  profileOrDefault,
+} from "./profiles.ts";
 import { createBot, ensureBots, renameBot } from "./bots.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
@@ -1304,8 +1310,13 @@ export class MipiAgent extends DurableObject<Env> {
           const fork = await tx.forkConversation(parentConversationId, entryId, {
             ownership: { kind: "ownerless" },
           });
-          // A fork is a chat of its own, never a second copy of its bot (the meta forks with it).
-          clearBotFields(await tx.doc(ConversationMeta, fork.id));
+          // A fork is a chat of its own, never a second copy of its bot (the meta forks with it), nor on MiPi's
+          // `main`, whose tools are MiPi's alone.
+          const forkMeta = await tx.doc(ConversationMeta, fork.id);
+          clearBotFields(forkMeta);
+          if (forkMeta.profile === MAIN_PROFILE) {
+            await setProfile(tx, fork.id, DEFAULT_PROFILE, this.#composition!.profiles);
+          }
           doc.receipt = {
             command: command.type,
             conversationId: fork.id,
