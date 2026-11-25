@@ -68,6 +68,9 @@ export function formatReminder(
       : [`It repeats ${repeats}, on its own: don't schedule it again.`]),
     // M6: a check with nothing to report stays quiet; a reminder never does.
     "If this is a check and it finds nothing the owner needs to hear, answer exactly NO_SEND. A plain reminder always gets a message.",
+    // COD-215: an unreadable source is news, not "nothing to report". A page that loads (HTTP 200) but holds no
+    // content (a login wall, a JavaScript-only shell) leaves no tool error for `reconcileAnswers` to catch.
+    "If you couldn't read or verify a source (fetch error, login wall, or blank/JavaScript-only page), say so instead of NO_SEND.",
     ...(recentSends.length === 0
       ? []
       : [

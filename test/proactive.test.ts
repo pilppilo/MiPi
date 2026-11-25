@@ -115,12 +115,17 @@ describe("proactive text", () => {
       [{ at: "Mon, Nov 23, 2026, 9:00 CST", snippet: "Two letters came." }],
     );
     expect(content).toContain("answer exactly NO_SEND");
+    // An unreadable source is reported, not silenced (COD-215).
+    expect(content).toContain(
+      "If you couldn't read or verify a source (fetch error, login wall, or blank/JavaScript-only page), say so instead of NO_SEND.",
+    );
     expect(content).toContain("- Mon, Nov 23, 2026, 9:00 CST: Two letters came.");
     expect(content).toContain("It repeats daily at 12:00");
     expect(parseScheduledInstruction(content)).toBe("Check the mail");
     // One-time reminders carry notes too, and still parse.
     const once = formatReminder({ id: "r", instruction: "Stretch" }, "now");
     expect(parseScheduledInstruction(once)).toBe("Stretch");
+    expect(once).toContain("say so instead of NO_SEND");
     expect(once).not.toContain("Messages scheduled runs sent lately");
   });
 });
