@@ -22,7 +22,7 @@ COD-201: a settings menu with Archived (settings slice 2).
 
 **Pi Durable**
 
-- No version change (1.6.1). Ledger: L13 added (watch): Pi Durable 1.6.1 can't delete a conversation, so Archived offers no Delete.
+- No version change (1.6.1). Ledger: L13 added (watch): Pi Durable 1.6.1 can't delete a conversation, so Archived offers no Delete. Upstream: earendil-works/pi#11026, with an open PR (earendil-works/pi#12562).
 
 **Migration**
 

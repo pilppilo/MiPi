@@ -118,6 +118,7 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Kind:** watch
 - **Since:** 0.2.0-alpha.5
 - **Upstream:** Pi Durable 1.6.1 has no way to delete a conversation: no harness or transaction call removes a conversation with its entries, documents and tasks. Archive (COD-198) only hides one and holds its schedules.
+- **Upstream link:** https://github.com/earendil-works/pi/issues/11026 https://github.com/earendil-works/pi/pull/12562
 - **MiPi:** Settings → Archived (COD-201) opens an archived conversation read-only or restores it, and offers no Delete. No MiPi code depends on this yet.
 - **Revisit when:** Pi Durable can delete a conversation and its subtree: then Delete comes to Archived, for archived entries only, confirmed by typing the name, with a backup first.
 
