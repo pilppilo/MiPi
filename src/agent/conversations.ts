@@ -147,6 +147,38 @@ export type BotsState = {
   names?: Record<string, number>;
   /** When MiPi was made, and older chats archived. */
   madeAt?: number;
+  // Archive (COD-198), optional so the document stays version 1.
+  /**
+   * Every archived conversation's id, with when it was archived: bots, their cobots and the chats from before bots. The
+   * one index visibility, the doors and the schedules read (`archive.ts`), so none reads a conversation's documents.
+   * Unset on an agent made before archive: `ensureBots` fills it once.
+   */
+  archived?: Record<string, number>;
+  /**
+   * Channel keys that fell back to MiPi because their bot was archived, to the bot they were bound to. Restore binds
+   * each back unless it was bound elsewhere since (`bindChannel` drops the key).
+   */
+  released?: Record<string, number>;
+  /** One-time reminders that came due while their bot was archived: sent, marked late, on restore. */
+  held?: HeldReminder[];
+};
+
+/**
+ * A one-time reminder parked while its bot was archived (COD-198). Everything restore needs to send it, so core never
+ * reads the reminders' tasks; the destination is opaque, as delivery's always is.
+ */
+export type HeldReminder = {
+  readonly id: string;
+  /** The archived conversation it was made in, where it is sent on restore. */
+  readonly conversationId: number;
+  readonly instruction: string;
+  /** The time it was for. */
+  readonly dueAt: number;
+  /** The owner's zone when it was made, if the reminder kept one. */
+  readonly zone?: string;
+  /** The request id restore sends it with: one per reminder, so a second restore sends nothing twice. */
+  readonly requestId: string;
+  readonly destination: { readonly kind: string; readonly [field: string]: string | number };
 };
 
 export const Bots = defineDoc<BotsState>({
@@ -177,6 +209,17 @@ export async function boundConversation(
   const binding = await tx.doc(ChannelBindings, key, null);
   const bots = await tx.doc(Bots);
   if (options.rebind !== true) {
+    // pi-ledger L10: a binding to an archived bot falls back to MiPi on its first read (COD-198), for the same reason
+    // an unmarked one moves there: bindings can't be listed, so archive can't move them in its own commit.
+    if (
+      binding.bots === true &&
+      binding.conversationId !== undefined &&
+      bots.mainId !== undefined &&
+      bots.archived?.[String(binding.conversationId)] !== undefined
+    ) {
+      bots.released = { ...bots.released, [key]: binding.conversationId };
+      binding.conversationId = bots.mainId;
+    }
     // pi-ledger L10: an unmarked binding moves to MiPi here, on its first read, since bindings can't be listed.
     const target = binding.bots === true ? binding.conversationId : bots.mainId;
     const current = target ?? binding.conversationId;
@@ -198,7 +241,16 @@ export async function boundConversation(
   await setProfile(tx, id, profile, profiles);
   binding.conversationId = id;
   if (bots.mainId !== undefined) binding.bots = true;
+  // Bound to a chat of its own: restoring its old bot no longer takes it back.
+  unrelease(bots, key);
   return id;
+}
+
+/** Drops a released key: the channel was bound somewhere since its bot was archived. */
+function unrelease(bots: BotsState, key: string): void {
+  if (bots.released?.[key] === undefined) return;
+  const { [key]: _, ...rest } = bots.released;
+  bots.released = rest;
 }
 
 /** Binds a channel key to a conversation, marked as chosen since bots: it stays there across restarts (`/bot`). */
@@ -210,6 +262,7 @@ export async function bindChannel(
   const binding = await tx.doc(ChannelBindings, key, null);
   binding.conversationId = conversationId;
   binding.bots = true;
+  unrelease(await tx.doc(Bots), key);
 }
 
 /**

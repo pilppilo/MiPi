@@ -24,7 +24,7 @@ import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
 import worker from "../src/worker/index.ts";
 import type { Fixture } from "./fixture-capture.test.ts";
-import { clock, openAgent, said } from "./reminder-agent.ts";
+import { clock, openAgent, said, userTexts } from "./reminder-agent.ts";
 import { withSpikeToken } from "./spike.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -204,6 +204,8 @@ describe("fixture databases", () => {
             const meta = await harness.snapshot(ConversationMeta, id, ctx);
             if (id === bots.mainId) expect(meta?.archivedAt).toBeUndefined();
             else expect(meta?.archivedAt, `conversation ${id}`).toBeDefined();
+            // And in the session's archive index, which visibility and the doors read (COD-198).
+            expect(bots.archived?.[String(id)], `conversation ${id}`).toBe(meta?.archivedAt);
           }
           const reminders = (await harness.inspect(ctx)).tasks.filter(
             ({ record }) => record.kind === ScheduledReminder.definition.name,
@@ -245,6 +247,22 @@ describe("fixture databases", () => {
           expect(agent.sent).toEqual([
             { chatId: record.input.destination.chatId, text: "Time to renew the passport." },
           ]);
+          // Its chat from before bots is archived, so it ran in MiPi (COD-198): never in the archived chat.
+          const { mainId } = (await agent.harness.snapshot(Bots, ctx))!;
+          const madeIn = (record.input as unknown as { conversationId: number }).conversationId;
+          expect(madeIn).not.toBe(mainId);
+          expect(
+            (await agent.harness.snapshot(Bots, ctx))?.archived?.[String(madeIn)],
+          ).toBeDefined();
+          expect((await userTexts(agent.harness, mainId!)).at(-1)).toMatch(
+            /^Scheduled instruction due now \(.+\): /,
+          );
+          expect(
+            (await userTexts(agent.harness, madeIn)).filter((text) =>
+              text.startsWith("Scheduled instruction due now"),
+            ),
+            // Only the times it ran before the upgrade.
+          ).toHaveLength(record.state.checkpoint.sent);
           const reminders = (await agent.harness.inspect(ctx)).tasks.filter(
             ({ record: task }) => task.kind === ScheduledReminder.definition.name,
           );

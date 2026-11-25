@@ -12,6 +12,12 @@
  * the last one is still queued, late times move to the next).
  */
 import { type ConversationId, defineTask } from "../../../agent/pi/durable.ts";
+import {
+  holdReminder,
+  routedDestination,
+  routeSchedule,
+  type ScheduleRoute,
+} from "../../../agent/archive.ts";
 import { isTransientModelFailure, TRANSIENT_REMINDER_COOLDOWN_MS } from "../../../agent/limits.ts";
 import { connectorsOf } from "../../../agent/connectors.ts";
 import type { DeliveryDestination } from "../../../agent/delivery.ts";
@@ -27,7 +33,7 @@ import { recentProactiveSends, transientReminderUntil } from "../../../agent/pro
 import { localTime } from "../../../agent/stamp.ts";
 import { describeRepeat, nextRepeat, type Repeat } from "../../../lib/when.ts";
 import { formatReminder } from "../../../protocol.ts";
-import { reminderRequest } from "./requests.ts";
+import { heldReminderRequest, reminderRequest } from "./requests.ts";
 
 /** A repeat time this late is skipped: past a maintenance pause or a slow alarm, but not hours late. */
 export const LATE_WINDOW_MS = 15 * 60_000;
@@ -63,6 +69,8 @@ type ReminderProgress = {
   skippedCap?: number;
   /** Repeat times skipped while MiPi was paused (`MIPI_PAUSED`, M9). */
   skippedPaused?: number;
+  /** Repeat times skipped while the reminder's bot was archived (COD-198). */
+  skippedArchived?: number;
   /** Last submission whose cooldown was checked, including when settlement had not observed it yet. */
   cooldownChecked?: number;
 };
@@ -125,25 +133,72 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
     send: async (task, runtime, context) => {
       const { input } = task;
       const state = task.state.checkpoint;
-      const conversation = await runtime.conversation(input.conversationId, context);
+      const now = runtime.now();
+      // Today's spend first, in a commit of its own: the next one admits, and its admit must be its first write. Where
+      // this occurrence runs too (COD-198): its own conversation, MiPi for a chat from before bots, or nowhere while
+      // its bot is archived.
+      const looked: { route?: ScheduleRoute } = {};
+      await runtime.commit(async (tx) => {
+        await measureToday(tx, now);
+        looked.route = await routeSchedule(tx, input.conversationId);
+        return undefined;
+      }, context);
+      const route = looked.route ?? { kind: "held" };
+      if (route.kind === "held") {
+        // pi-ledger L11: Pi Durable can't pause this task, so an archived bot's occurrence holds here when due.
+        await runtime.commit(async (tx) => {
+          // Restored since the look above: run this occurrence after all.
+          if ((await routeSchedule(tx, input.conversationId)).kind === "run") {
+            return { status: "running", checkpoint: { ...state, phase: "send" } };
+          }
+          if (input.every === undefined) {
+            // A one-time reminder parks with core and ends: restore sends it, marked late. Nothing polls.
+            await holdReminder(tx, {
+              id: input.id,
+              conversationId: input.conversationId,
+              instruction: input.instruction,
+              dueAt: state.at,
+              zone: input.zone,
+              requestId: heldReminderRequest(input.id),
+              destination: input.destination,
+            });
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }
+          return {
+            status: "running",
+            checkpoint: {
+              ...state,
+              phase: "wait",
+              at: nextOccurrence(input.every, state.at, now, input.zone),
+              skippedArchived: (state.skippedArchived ?? 0) + 1,
+            },
+          };
+        }, context);
+        return;
+      }
+      const runIn: ConversationId = route.conversationId;
+      const conversation = await runtime.conversation(runIn, context);
       if (conversation === undefined) {
-        runtime.report(
-          new Error(`Reminder ${input.id}'s conversation ${input.conversationId} is gone`),
-        );
+        runtime.report(new Error(`Reminder ${input.id}'s conversation ${runIn} is gone`));
         await runtime.commit(
           () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
           context,
         );
         return;
       }
-      const now = runtime.now();
-      // Today's spend first, in a commit of its own: the next one admits, and its admit must be its first write.
-      await runtime.commit(async (tx) => {
-        await measureToday(tx, now);
-        return undefined;
-      }, context);
       const { delivery } = connectorsOf(runtime.registry);
+      // A chat from before bots runs its reminders in MiPi: an answer for its transcript goes to MiPi's.
+      const destination = routedDestination(
+        delivery,
+        input.destination,
+        input.conversationId,
+        conversation.id,
+      );
       await runtime.commit(async (tx) => {
+        // Archived since the look above: this occurrence holds instead (the held path, on the phase's next run).
+        if ((await routeSchedule(tx, input.conversationId)).kind === "held") {
+          return { status: "running", checkpoint: { ...state, phase: "send" } };
+        }
         // Reads first; the admit is this commit's first table write. Documents may change before it.
         const previous =
           state.sent === 0
@@ -189,7 +244,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
         const held: ProactiveHold | undefined =
           decision !== "send" || existing !== undefined ? undefined : await proactiveHold(tx, now);
         if (held !== undefined) {
-          const pushable = delivery.canPush(input.destination) ? input.destination : undefined;
+          const pushable = delivery.canPush(destination) ? destination : undefined;
           // The owner paused MiPi: no notice. A cap tells once a day.
           await tellHeld(tx, delivery, held, pushable, now);
           if (input.every === undefined) {
@@ -241,7 +296,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
                 sourceId: input.id,
                 instruction: input.instruction,
                 conversationId: conversation.id,
-                destination: input.destination,
+                destination,
                 ...(input.every === undefined ? {} : { repeating: true }),
               },
               now,
@@ -264,6 +319,9 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             skippedCap:
               (state.skippedCap ?? 0) +
               (held === "run-cap" || held === "spend-cap" || held === "provider-limit" ? 1 : 0),
+            ...(state.skippedArchived === undefined
+              ? {}
+              : { skippedArchived: state.skippedArchived }),
             ...(held === "paused" || state.skippedPaused !== undefined
               ? { skippedPaused: (state.skippedPaused ?? 0) + (held === "paused" ? 1 : 0) }
               : {}),

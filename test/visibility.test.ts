@@ -21,9 +21,14 @@ const ctx = BACKGROUND_CONTEXT;
 
 type Record_ = { id: number; owner?: { conversationId: number; taskId: number } };
 
-/** A transaction that only scans the given conversation records, a page at a time. */
-const scanning = (records: readonly Record_[], pageSize: number) =>
+/** A transaction that only scans the given conversation records, a page at a time, with the session's archive index. */
+const scanning = (
+  records: readonly Record_[],
+  pageSize: number,
+  archived: Record<string, number> = {},
+) =>
   ({
+    doc: async () => ({ archived }),
     scanConversations: async (_query: unknown, limit: number, cursor?: number) => {
       const start = cursor ?? 0;
       const size = Math.min(limit, pageSize);
@@ -48,6 +53,13 @@ describe("conversation visibility", () => {
     // A subagent's conversation: an empty page, with more to come.
     expect(second.items).toEqual([]);
     expect(second.next).toBeDefined();
+  });
+
+  it("leaves archived conversations out, from the session's index alone (COD-198)", async () => {
+    const tx = scanning([{ id: 1 }, { id: 2 }, { id: 3 }], 10, { "2": 1_000 });
+    expect((await listVisible(tx, OWNER_SCOPE, { recordsOnly: true })).map(({ id }) => id)).toEqual(
+      [1, 3],
+    );
   });
 
   it("plans the memory pass's wake without reading any conversation's document", async () => {

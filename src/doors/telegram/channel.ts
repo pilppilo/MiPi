@@ -21,6 +21,7 @@ import {
   type SubmissionId,
   type Tx,
 } from "../../agent/pi/durable.ts";
+import { isArchived } from "../../agent/archive.ts";
 import { findLiveBot, type LiveBot, liveBots } from "../../agent/bots.ts";
 import {
   bindChannel,
@@ -90,6 +91,10 @@ export function isTelegramChange(publication: CommitChanges): boolean {
 
 /** The chat key a Telegram chat's binding lives under (`conversations.ts`). */
 export const telegramBinding = (chatId: number): string => `tg:${chatId}`;
+
+/** What a chat hears when its bot was archived before its waiting messages went out (COD-198). */
+export const ARCHIVED_WINDOW_REPLY =
+  "That bot was archived before your messages went out, so they weren't sent. Send them again to reach MiPi.";
 
 export const HELP_TEXT =
   "Hi, I'm MiPi. Send me a message and I'll answer here.\n\n" +
@@ -454,6 +459,21 @@ export class TelegramChannelRuntime {
   ): Promise<SubmissionId | undefined> {
     const requestId = telegramBatchRequest(firstUpdateId);
     if ((await tx.submissionByRequest(conversation.id, requestId)) !== undefined) return undefined;
+    // Its bot was archived while the window waited (COD-198): an archived bot never runs, so nothing goes in. The
+    // chat reaches MiPi from its next message (`boundConversation`).
+    if (await isArchived(tx, conversation.id)) {
+      const staged = (await tx.doc(TelegramChannel)).staged?.find(
+        (window) => window.firstUpdateId === firstUpdateId,
+      );
+      if (staged !== undefined) {
+        enqueueReply(
+          await tx.doc(TelegramOutbox),
+          { id: `archived:${firstUpdateId}`, chatId: staged.chatId, text: ARCHIVED_WINDOW_REPLY },
+          this.#now(),
+        );
+      }
+      return undefined;
+    }
     return conversation.admit(tx, {
       type: "input",
       content: batchContent(this.#options.owner, this.#options.timeZone, messages),

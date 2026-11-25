@@ -49,6 +49,8 @@ export interface ScheduledWork {
   readonly id: string;
   readonly dueAt: number;
   readonly repeating: boolean;
+  /** A known hold, not an overdue alarm: its bot is archived (COD-198), so it skips or parks when due. */
+  readonly held?: "archived";
 }
 
 export type ScheduleReader = (tx: Tx) => Promise<readonly ScheduledWork[]>;

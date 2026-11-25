@@ -15,6 +15,7 @@ import {
   type Harness,
   type Tx,
 } from "./pi/durable.ts";
+import { backfillArchived } from "./archive.ts";
 import { Bots, type BotsState, ConversationMeta, setProfile } from "./conversations.ts";
 import { MAIN_PROFILE, type ProfileName, type Profiles } from "./profiles.ts";
 
@@ -87,7 +88,11 @@ export async function ensureBots(
 ): Promise<boolean> {
   return harness.commit(async (tx) => {
     const bots = await tx.doc(Bots);
-    if (bots.mainId !== undefined) return false;
+    if (bots.mainId !== undefined) {
+      // Made by a build before archive (COD-198): its archived chats join the index once.
+      await backfillArchived(tx, bots);
+      return false;
+    }
     // Reads first: the older chats, before this commit creates anything.
     const older: ConversationId[] = [];
     let cursor: Cursor | undefined;
@@ -101,6 +106,7 @@ export async function ensureBots(
       cursor = page.next;
     } while (cursor !== undefined);
     for (const id of older) (await tx.doc(ConversationMeta, id)).archivedAt = now;
+    bots.archived = Object.fromEntries(older.map((id) => [String(id), now]));
     const mainId = await createBot(
       tx,
       { kind: "main", name: MAIN_BOT_NAME, profile: MAIN_PROFILE, createdBy: "owner" },

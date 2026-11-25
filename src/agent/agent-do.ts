@@ -38,6 +38,14 @@ import {
   profileOrDefault,
 } from "./profiles.ts";
 import { createBot, ensureBots, renameBot } from "./bots.ts";
+import {
+  abortArchived,
+  ARCHIVED_REPLY,
+  archiveBot,
+  isArchived,
+  replayHeld,
+  restoreBot,
+} from "./archive.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
@@ -1291,6 +1299,49 @@ export class MipiAgent extends DurableObject<Env> {
         });
         return;
       }
+      case "bot.archive": {
+        const conversation = await this.#requireConversation(
+          command.conversationId as ConversationId,
+        );
+        // One commit: the bot and its cobots archived and indexed, so from here no door reaches them, nothing lists
+        // them and their schedules hold. Then what they were doing is stopped (`Conversation.abort()`).
+        const archived = await this.#harness.commit(
+          (tx) => archiveBot(tx, conversation.id, Date.now()),
+          BACKGROUND_CONTEXT,
+        );
+        await abortArchived(this.#harness, archived, BACKGROUND_CONTEXT);
+        await this.#leaveArchived(archived);
+        await this.#broadcastSessionSnapshot();
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId: conversation.id,
+        });
+        return;
+      }
+      case "bot.restore": {
+        const conversation = await this.#requireConversation(
+          command.conversationId as ConversationId,
+        );
+        const { conversations } = await this.#harness.commit(
+          (tx) => restoreBot(tx, conversation.id),
+          BACKGROUND_CONTEXT,
+        );
+        // Arm before admitting work: an early alarm is harmless, a missing one strands the turn.
+        await this.#alarm.schedule({ ...this.#harness.wake(), active: true });
+        await replayHeld(this.#harness, conversations, Date.now(), BACKGROUND_CONTEXT);
+        await this.#broadcastSessionSnapshot();
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId: conversation.id,
+        });
+        return;
+      }
       case "conversation.fork": {
         const parentConversationId = command.conversationId as ConversationId;
         const entryId = command.entryId as EntryId;
@@ -1343,8 +1394,12 @@ export class MipiAgent extends DurableObject<Env> {
         );
         const requestId = webRequest(command.requestId);
         // A retry of an input already admitted is answered with that input, and admits nothing.
-        const admitted = await this.#harness.commit(
-          (tx) => tx.submissionByRequest(conversation.id, requestId),
+        const [admitted, archived] = await this.#harness.commit(
+          async (tx) =>
+            [
+              await tx.submissionByRequest(conversation.id, requestId),
+              await isArchived(tx, conversation.id),
+            ] as const,
           BACKGROUND_CONTEXT,
         );
         if (admitted !== undefined) {
@@ -1358,6 +1413,8 @@ export class MipiAgent extends DurableObject<Env> {
           });
           return;
         }
+        // An archived conversation never runs (COD-198): restore it first.
+        if (archived) throw new Error(ARCHIVED_REPLY);
         // Paused (`MIPI_PAUSED`, M9): a new message is refused with a clear reason, nothing admitted. A retry of one
         // admitted before still gets its answer above.
         if (await isPausedNow(this.#harness)) {
@@ -1555,6 +1612,27 @@ export class MipiAgent extends DurableObject<Env> {
       if (this.#views.get(socket) === view) this.#views.delete(socket);
     });
     this.#broadcastTyping(conversationId);
+  }
+
+  /** Moves every socket watching an archived conversation to where the web door is bound now (MiPi). */
+  async #leaveArchived(archived: readonly ConversationId[]): Promise<void> {
+    const gone = new Set<number>(archived);
+    const watching = this.#connections().filter((socket) => {
+      const id = connectionState(socket)?.conversationId;
+      return id !== undefined && gone.has(id);
+    });
+    if (watching.length === 0) return;
+    const bound = await this.#harness.commit(
+      (tx) =>
+        boundConversation(
+          tx,
+          "web",
+          startingProfile("web", profileOrDefault(this.env.MIPI_PROFILE)),
+          this.#composition!.profiles,
+        ),
+      BACKGROUND_CONTEXT,
+    );
+    for (const socket of watching) await this.#watchConversation(socket, bound);
   }
 
   async #stopView(socket: WebSocket): Promise<void> {

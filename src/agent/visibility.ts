@@ -1,15 +1,18 @@
 /**
  * Conversation visibility (COD-211): which conversations count as the owner's own, for anything that looks across
- * them (history search, the memory pass). Today that is every ownerless conversation: a subagent's conversation belongs
- * to the tool that made it. 0.2 builds on this: archived conversations drop out (COD-198), and bots get a scope of their
- * own (COD-197). Core code: callers never scan conversations and filter themselves.
+ * them (history search, the memory pass). Today that is every ownerless conversation that isn't archived (COD-198): a
+ * subagent's conversation belongs to the tool that made it, and an archived one, a chat from before bots included, is
+ * out of sight until restored. Bots get a scope of their own later. Core code: callers never scan conversations and
+ * filter themselves.
  *
  * `recordsOnly` is for planners that look often (the memory pass's wake): the answer comes from the conversation
  * records alone, never from a conversation's documents, so a look stays a short scan however many conversations there
- * are. Today every answer does; an archive must keep that true for this mode (a session-level index, not a field read
- * per conversation).
+ * are. Archive keeps that true: archived conversations are read from the session's index (`app.bots`), never from a
+ * conversation's own meta.
  */
 import type { ConversationRecord, Cursor, Tx } from "./pi/durable.ts";
+import { archivedIn } from "./archive.ts";
+import { Bots, type BotsState } from "./conversations.ts";
 
 /** Whose conversations: the owner's (ownerless, not archived). Bots add theirs later. */
 export type VisibilityScope = { readonly kind: "owner" };
@@ -24,10 +27,16 @@ export interface VisibleOptions {
 /** The scan's page size when the caller doesn't page itself. */
 const PAGE = 100;
 
-function visible(record: ConversationRecord, scope: VisibilityScope): boolean {
+function visible(
+  record: ConversationRecord,
+  scope: VisibilityScope,
+  bots: Readonly<BotsState>,
+): boolean {
   switch (scope.kind) {
     case "owner":
-      return record.owner === undefined;
+      // An archived conversation (COD-198), a chat from before bots included, is out of sight: from the session's
+      // archive index, so `recordsOnly` holds.
+      return record.owner === undefined && !archivedIn(bots, record.id);
     default: {
       const _: never = scope.kind;
       throw new Error("Unknown visibility scope");
@@ -48,8 +57,9 @@ export async function visiblePage(
   // Every answer is from the records today; the option is the caller's promise to keep it so (see above).
   _options: VisibleOptions = {},
 ): Promise<{ readonly items: readonly ConversationRecord[]; readonly next?: Cursor }> {
+  const bots = await tx.doc(Bots);
   const page = await tx.scanConversations({}, limit, cursor);
-  const items = page.items.filter((record) => visible(record, scope));
+  const items = page.items.filter((record) => visible(record, scope, bots));
   return page.next === undefined ? { items } : { items, next: page.next };
 }
 

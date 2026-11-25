@@ -64,8 +64,15 @@ export function formatReminder(
   deliveredAt: string,
   repeats?: string,
   recentSends: readonly { readonly at: string; readonly snippet: string }[] = [],
+  /** COD-198: the local time it was due, for a reminder held while its bot was archived and sent on restore. */
+  lateFrom?: string,
 ): string {
   const notes = [
+    ...(lateFrom === undefined
+      ? []
+      : [
+          `It was due ${lateFrom.replaceAll("\n", " ")}, while this bot was archived: it's late, so say so.`,
+        ]),
     ...(repeats === undefined
       ? []
       : [`It repeats ${repeats}, on its own: don't schedule it again.`]),
@@ -270,6 +277,18 @@ export type ClientCommand =
       readonly requestId: string;
       readonly conversationId: number;
       readonly name: string;
+    }
+  | {
+      /** Archives a bot and its cobots (COD-198): it stops working and keeps all its data. Never MiPi. */
+      readonly type: "bot.archive";
+      readonly requestId: string;
+      readonly conversationId: number;
+    }
+  | {
+      /** Restores an archived bot, its cobots, bindings and held reminders (COD-198). */
+      readonly type: "bot.restore";
+      readonly requestId: string;
+      readonly conversationId: number;
     }
   | {
       readonly type: "conversation.fork";
@@ -547,6 +566,8 @@ const commandTypes = new Set<ClientCommandType>([
   "conversation.entries",
   "bot.create",
   "bot.rename",
+  "bot.archive",
+  "bot.restore",
   "conversation.fork",
   "prompt.submit",
   "options.list",
@@ -749,6 +770,13 @@ export function parseClientCommand(message: string): ClientCommand {
         requestId,
         conversationId: requireId(value.conversationId, "conversationId"),
         name: botText(value.name, "name", MAX_BOT_NAME_CHARACTERS),
+      };
+    case "bot.archive":
+    case "bot.restore":
+      return {
+        type: value.type,
+        requestId,
+        conversationId: requireId(value.conversationId, "conversationId"),
       };
     case "conversation.fork":
       return {

@@ -93,7 +93,16 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Since:** 0.2.0-alpha.1
 - **Upstream:** Pi Durable 1.6.1 reads a document family only by key (`tx.doc(token, key, seed)`): a transaction can't list a family's keys, so core can't find every `app.channel-binding` (`tg:<chat>` for each Telegram chat) to move them in one commit.
 - **MiPi:** when MiPi is first made (COD-197), each binding moves to it the first time a door reads it, and is marked `bots`; a marked binding never moves again (`boundConversation`). Same result as moving them all at once, with no read of Pi Durable's tables.
-- **Remove when:** a transaction can list a document family's keys: then `ensureBots` moves every binding in its own commit, and the `bots` marker can go.
+- **MiPi (archive, COD-198):** for the same reason, archiving a bot can't move the bindings that point at it. A binding to an archived bot falls back to MiPi the first time a door reads it, and its key is recorded in `app.bots.released`; restore binds each recorded key back unless it was bound elsewhere since. A door that never read it in between still points at the bot, which is live again.
+- **Remove when:** a transaction can list a document family's keys: then `ensureBots` moves every binding in its own commit, archive moves a bot's bindings in its own, and the `bots` marker can go.
+
+### L11 · Archived bots' schedules hold themselves
+
+- **Kind:** workaround
+- **Since:** 0.2.0-alpha.2
+- **Upstream:** Pi Durable 1.6.1 can pause neither a task nor a conversation's background tasks: a sleeping reminder wakes at its time whatever its conversation's state, and a task's input (its conversation) can't change.
+- **MiPi:** every reminder asks core where it runs when it comes due (`routeSchedule`, `src/agent/archive.ts`). An archived bot's repeat skips that time (`skippedArchived`); a one-time reminder parks itself in `app.bots.held` and ends, and restore sends it marked late (`held:<reminderId>`). Nothing polls. A reminder of a chat from before bots (archived when MiPi was made) runs in MiPi instead, with an answer for its transcript going to MiPi's: its task keeps its old conversation, since it can't be moved. The heartbeat counts an archived bot's schedules as a known hold, not overdue.
+- **Remove when:** Pi Durable can pause and resume a conversation's tasks: archive pauses them, restore resumes them, and the held list goes.
 
 ## Closed
 
