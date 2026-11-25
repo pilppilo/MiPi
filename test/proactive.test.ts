@@ -179,10 +179,15 @@ describe("proactive runs", () => {
         await remind(agent.harness, "reminder:b", "Check the door", telegram);
         await agent.advance(60_000);
         expect(agent.sent).toEqual([]);
+        expect((await proactive(agent.harness))?.lastRun).toEqual({
+          at: clock.now,
+          outcome: "quiet",
+        });
         await remind(agent.harness, "reminder:c", "Check the mail", telegram);
         await agent.advance(60_000);
         expect(sentTexts(agent)).toEqual(["The mail came."]);
         const state = await proactive(agent.harness);
+        expect(state?.lastRun).toEqual({ at: clock.now, outcome: "sent" });
         expect(state?.pending).toEqual([]);
         expect(state?.recentSends).toEqual([
           expect.objectContaining({
@@ -245,6 +250,7 @@ describe("proactive runs", () => {
         ]);
         // Both model rounds counted: one at admission, one after the tool round.
         expect((await proactive(agent.harness))?.cap).toMatchObject({ count: 2 });
+        expect((await proactive(agent.harness))?.lastRun?.outcome).toBe("failed");
       } finally {
         await agent.close();
       }
@@ -332,6 +338,7 @@ describe("proactive runs", () => {
           `The reminder "Keep looking" stopped after ${RUN_ROUND_LIMIT} rounds.`,
         ]);
         expect((await proactive(agent.harness))?.cap).toMatchObject({ count: RUN_ROUND_LIMIT });
+        expect((await proactive(agent.harness))?.lastRun?.outcome).toBe("stopped");
       } finally {
         await agent.close();
       }
@@ -531,6 +538,7 @@ describe("proactive runs", () => {
         expect(sentTexts(agent)).toEqual([
           "Reminder: Take pills (sent without MiPi: OpenCode Go's usage limit is reached; /usage shows its windows).",
         ]);
+        expect((await proactive(agent.harness))?.lastRun?.outcome).toBe("failed");
       } finally {
         await agent.close();
       }

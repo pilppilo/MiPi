@@ -13,6 +13,7 @@
     "dev": "vite",
     "preview": "vite preview",
     "test": "vitest --run",
+    "eval:proactive": "node scripts/eval-proactive.ts",
     "changeset": "changeset",
     "lint": "oxlint --deny-warnings",
     "upgrade:pi": "node scripts/upgrade-pi.ts",

@@ -1,0 +1,22 @@
+{
+  "id": "already-reported",
+  "description": "An unchanged incident was sent in a recent run.",
+  "instruction": "Read https://status.example.com/search and check current status. Tell me about search indexing delays only if they changed since your last message.",
+  "deliveredAt": "Tue, Nov 24, 2026, 09:00 CST",
+  "repeats": "every weekday at 09:00",
+  "fetches": {
+    "https://status.example.com/search": {
+      "ok": true,
+      "text": "Incident S-14 remains open. Search indexing is delayed by 30 minutes. No change since the last update."
+    }
+  },
+  "recentSends": [
+    {
+      "at": "Tue, Nov 24, 2026, 08:00 CST",
+      "snippet": "S-14: Search indexing is delayed by 30 minutes."
+    }
+  ],
+  "expect": {
+    "kind": "quiet"
+  }
+}

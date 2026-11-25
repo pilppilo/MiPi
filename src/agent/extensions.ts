@@ -13,7 +13,7 @@
  * Core code: it names no extension and no door.
  */
 import type { MutableModels } from "./pi/ai.ts";
-import type { Extension, Harness, ToolRegistration } from "./pi/durable.ts";
+import type { Extension, Harness, ToolRegistration, Tx } from "./pi/durable.ts";
 import type { OriginRegistration } from "./origin.ts";
 import type { ProviderRegistration } from "./providers.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
@@ -45,6 +45,14 @@ export interface ExtensionSource extends WakeSource {
   prepare?(): Promise<void>;
 }
 
+export interface ScheduledWork {
+  readonly id: string;
+  readonly dueAt: number;
+  readonly repeating: boolean;
+}
+
+export type ScheduleReader = (tx: Tx) => Promise<readonly ScheduledWork[]>;
+
 export interface MipiExtension {
   /** Unique among installed extensions; also the name of `pi`, when it has one. */
   readonly name: string;
@@ -69,6 +77,8 @@ export interface MipiExtension {
   readonly origins?: readonly OriginRegistration[];
   /** Background work that needs the alarm. Not started for an extension that was replaced. */
   readonly wakeSources?: (context: BackgroundContext) => readonly ExtensionSource[];
+  /** Read-only schedule health for an active extension. */
+  readonly schedules?: ScheduleReader;
   /** A provider's usage reader and model list (`providers.ts`). Not registered for an extension that was replaced. */
   readonly providers?: readonly ProviderRegistration[];
 }

@@ -8,13 +8,14 @@ import { defineExtension } from "../../../agent/pi/durable.ts";
 import type { MipiExtension } from "../../../agent/extensions.ts";
 import { ScheduledReminder } from "./reminder-task.ts";
 import { DeliverScheduledInstruction } from "./schedule-task.ts";
-import { scheduleTool } from "./schedule.ts";
+import { readSchedules, scheduleTool } from "./schedule.ts";
 
 export const remindersExtension: MipiExtension = {
   name: "reminders",
   tier: "builtin",
   replaceable: true,
   origins: [{ prefix: "sched", source: "reminder", automated: true }],
+  schedules: readSchedules,
   pi: defineExtension({
     name: "reminders",
     tools: [scheduleTool],

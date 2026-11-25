@@ -65,7 +65,13 @@ export const MIXED_FALLBACK = "I didn't produce an answer for your message; send
 /** Why `RoundBudget` ended a run. An older build reads `spend-cap` and `paused` as `run-limit`. */
 export type StopReason = "daily-cap" | "run-limit" | "spend-cap" | "paused" | "provider-limit";
 
+export type ProactiveRun = {
+  readonly at: number;
+  readonly outcome: "sent" | "quiet" | "failed" | "stopped";
+};
+
 export type ProactiveState = {
+  lastRun?: ProactiveRun;
   /** Proactive inputs (reminder occurrences) admitted and not settled yet. `reminderId` is the opaque source id. */
   pending: Array<{
     submissionId: number;
@@ -471,6 +477,13 @@ export async function reconcileAnswers(
   );
   const errorsOf = (submissionId: number) =>
     proactive.toolErrors.filter((error) => error.submissionId === submissionId);
+  // A batch settles at one time. Use admission order to break ties across answer and failure groups.
+  let latestSubmission = -1;
+  const recordOutcome = (submissionId: number, outcome: ProactiveRun["outcome"]) => {
+    if (submissionId <= latestSubmission) return;
+    latestSubmission = submissionId;
+    proactive.lastRun = { at: now, outcome };
+  };
   const send = (destination: DeliveryDestination, message: DeliveryMessage) =>
     delivery.send(tx, destination, message, now);
   /** A destination's part of a message id, kept as 0.1.0-beta.1 built it (Telegram: the chat id). */
@@ -546,11 +559,17 @@ export async function reconcileAnswers(
       const { input } = item;
       const stop = stopOf.get(input.submissionId);
       if (stop !== undefined) {
+        recordOutcome(input.submissionId, "stopped");
         // Only reminder-only runs are stopped; the run ended on a tool call, with no answer of its own (and no
         // `onYield`, so no run record). The notice is the whole message.
         await stopNotice(input, stop);
         continue;
       }
+      const errors = reminderOnly ? errorsOf(input.submissionId) : [];
+      let outcome: ProactiveRun["outcome"] = "sent";
+      if (errors.length > 0) outcome = "failed";
+      else if (reminderOnly && isNoSend(text)) outcome = "quiet";
+      recordOutcome(input.submissionId, outcome);
       const destination = pushable(input.destination);
       if (destination === undefined) continue;
       const identity = delivery.identity(destination);
@@ -562,7 +581,6 @@ export async function reconcileAnswers(
         await send(destination, { id, text: quiet ? MIXED_FALLBACK : text });
         continue;
       }
-      const errors = errorsOf(input.submissionId);
       if (errors.length > 0) {
         const tools = [...new Set(errors.map(({ tool }) => tool))].join(", ");
         const notice = `The reminder "${reminderLabel(input.instruction)}" hit a failed tool (${tools}): ${errors[0]!.reason}`;
@@ -598,6 +616,9 @@ export async function reconcileAnswers(
   >();
   for (const item of unanswered) {
     const stop = item.source === "proactive" ? stopOf.get(item.input.submissionId) : undefined;
+    if (item.source === "proactive") {
+      recordOutcome(item.input.submissionId, stop === undefined ? "failed" : "stopped");
+    }
     if (item.source === "proactive" && stop !== undefined) {
       await stopNotice(item.input, stop);
       continue;

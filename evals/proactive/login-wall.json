@@ -1,0 +1,16 @@
+{
+  "id": "login-wall",
+  "description": "Fetched text only shows a login form.",
+  "instruction": "Read https://status.example.com/database and check current status. If the page shows an outage, tell me its affected service. Stay quiet if it shows normal service.",
+  "deliveredAt": "Tue, Nov 24, 2026, 09:00 CST",
+  "repeats": "every weekday at 09:00",
+  "fetches": {
+    "https://status.example.com/database": {
+      "ok": true,
+      "text": "Please sign in to view the status dashboard. Email. Password. Sign in."
+    }
+  },
+  "expect": {
+    "kind": "unreadable"
+  }
+}

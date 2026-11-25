@@ -316,23 +316,57 @@ export const scheduleTool: ToolRegistration = {
   },
 };
 
-/** Schedules not yet finished: reminders, and legacy deliveries still in storage. Stops counting at the cap. */
-async function activeReminders(tx: Tx): Promise<number> {
-  let count = 0;
+/** Both formats of unfinished schedule, including legacy deliveries still in storage. */
+async function* unfinishedSchedules(tx: Tx) {
   for (const kind of [
     ScheduledReminder.definition.name,
     DeliverScheduledInstruction.definition.name,
   ]) {
-    // Every status but `terminal`, so finished schedules are never paged through.
+    // Only states that can still run, so finished schedules are never paged through.
     for (const status of ["pending", "running", "waiting", "sleeping"] as const) {
       let cursor: Parameters<typeof tx.scanTasks>[2];
       do {
         const page = await tx.scanTasks({ kind, status }, MAX_ACTIVE_REMINDERS, cursor);
-        count += page.items.length;
-        if (count >= MAX_ACTIVE_REMINDERS) return count;
+        for (const task of page.items) yield task;
         cursor = page.next;
       } while (cursor !== undefined);
     }
   }
+}
+
+/** Stops counting at the cap. */
+async function activeReminders(tx: Tx): Promise<number> {
+  let count = 0;
+  for await (const _ of unfinishedSchedules(tx)) {
+    count += 1;
+    if (count >= MAX_ACTIVE_REMINDERS) break;
+  }
   return count;
+}
+
+export async function readSchedules(tx: Tx) {
+  const schedules = [];
+  for await (const task of unfinishedSchedules(tx)) {
+    const { input, state } = task;
+    const modern = task.kind === ScheduledReminder.definition.name;
+    // scanTasks returns stored JSON for both formats. A malformed schedule makes health unavailable.
+    if (input === null || typeof input !== "object" || Array.isArray(input)) {
+      throw new Error("Invalid scheduled task input");
+    }
+    const checkpoint = state.checkpoint;
+    const dueAt = modern
+      ? checkpoint !== null && typeof checkpoint === "object" && !Array.isArray(checkpoint)
+        ? checkpoint.at
+        : undefined
+      : input.runAt;
+    if (typeof input.id !== "string" || typeof dueAt !== "number" || !Number.isFinite(dueAt)) {
+      throw new Error("Invalid scheduled task deadline or id");
+    }
+    schedules.push({
+      id: input.id,
+      dueAt,
+      repeating: modern ? input.every !== undefined : input.recurrence !== undefined,
+    });
+  }
+  return schedules;
 }

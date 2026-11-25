@@ -52,6 +52,8 @@ export interface HarnessConfig {
   readonly profiles: ProfileTable;
 }
 
+export const CORE_PREAMBLE = `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`;
+
 /** Core's own extension: the static preamble. Always selected, first. Made fresh per agent (`untrusted.ts`). */
 export function createCoreExtension(): Extension {
   return defineExtension({
@@ -59,13 +61,9 @@ export function createCoreExtension(): Extension {
     sections: [
       // pi-ledger L3. Static: the system prompt never changes between requests, so the provider's prompt cache keeps the prefix.
       // The time comes with each message instead (`stamp.ts`).
-      section(
-        "preamble",
-        () => `You are MiPi, a concise personal assistant. ${STAMP_INSTRUCTIONS}`,
-        {
-          tag: false,
-        },
-      ),
+      section("preamble", () => CORE_PREAMBLE, {
+        tag: false,
+      }),
     ],
   });
 }

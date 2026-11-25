@@ -15,7 +15,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { adminClient as createAdminClient, hasAgentToBackUp } from "./admin-client.ts";
+import { adminClientFromEnv, hasAgentToBackUp } from "./admin-client.ts";
 import { oneWayReleasesCrossed, parseChangelog } from "./release-notes.ts";
 
 interface ExportRow {
@@ -58,16 +58,7 @@ function required(name: keyof typeof flags): string {
  * The admin API with this lane's `ADMIN_TOKEN` (falling back to `ADMIN_TOKEN_PREVIOUS` during a rotation) and, once
  * Cloudflare Access is on, its service token (`CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`).
  */
-const adminClient = (url: string) => {
-  const clientId = process.env.CF_ACCESS_CLIENT_ID ?? "";
-  const clientSecret = process.env.CF_ACCESS_CLIENT_SECRET ?? "";
-  return createAdminClient(
-    url,
-    [process.env.ADMIN_TOKEN ?? "", process.env.ADMIN_TOKEN_PREVIOUS ?? ""],
-    fetch,
-    clientId.length > 0 && clientSecret.length > 0 ? { clientId, clientSecret } : undefined,
-  );
-};
+const adminClient = (url: string) => adminClientFromEnv(url, process.env);
 
 const countsOf = (rows: readonly ExportRow[]): Record<string, number> => {
   const counts: Record<string, number> = {};

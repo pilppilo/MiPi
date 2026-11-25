@@ -45,6 +45,30 @@ export type Hold = SpendHold | "provider-limit";
 /** Why a proactive run may not start: a hold, or today's run cap. */
 export type ProactiveHold = Hold | "run-cap";
 
+/** The proactive gate as last measured, with the effective deadline of timed holds. */
+export async function readProactiveHold(harness: Harness, now: number) {
+  const [spend, limits, proactive] = await Promise.all([
+    harness.snapshot(Spend, BACKGROUND_CONTEXT),
+    harness.snapshot(ProviderLimits, BACKGROUND_CONTEXT),
+    harness.snapshot(Proactive, BACKGROUND_CONTEXT),
+  ]);
+  const spendHold = spend === undefined ? undefined : holdOf(spend, now);
+  const providerUntil = providerHeldUntil(limits, now);
+  const runCapped = proactive !== undefined && !hasRound(proactive, now);
+  const held: ProactiveHold | undefined =
+    spendHold ??
+    (providerUntil === undefined ? undefined : "provider-limit") ??
+    (runCapped ? "run-cap" : undefined);
+  const heldUntil =
+    held === "paused"
+      ? undefined
+      : maxDeadline(
+          spendHold === "spend-cap" || runCapped ? afterNextChicagoMidnight(now) : undefined,
+          providerUntil,
+        );
+  return { held, heldUntil, lastProactiveRun: proactive?.lastRun };
+}
+
 /** Whether MiPi is paused (`MIPI_PAUSED`): every model call is held, the owner's messages too. */
 export async function isPaused(tx: Tx): Promise<boolean> {
   return (await tx.doc(Spend)).paused === true;
