@@ -120,6 +120,11 @@ describe("parseTelegramUpdate", () => {
       command: "model",
       argument: "deepseek",
     });
+    expect(parseTelegramUpdate(message({ text: "/help" }), ALLOWED)).toMatchObject({
+      kind: "command",
+      command: "help",
+      argument: "",
+    });
     expect(parseTelegramUpdate(message({ text: "/new@mipibot" }), ALLOWED)).toMatchObject({
       kind: "command",
       command: "new",

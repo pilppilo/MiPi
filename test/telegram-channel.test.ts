@@ -683,14 +683,20 @@ describe("Telegram /bot (COD-197)", () => {
 });
 
 describe("Telegram commands", () => {
-  it("answers /start and /version without the model", () =>
+  it("answers /start, /help and /version without the model", () =>
     inObject(async (storage) => {
       const agent = await openAgent(storage);
       try {
         await agent.channel.admit(command(1, "start"));
-        await agent.channel.admit(command(2, "version"));
+        await agent.channel.admit(command(2, "help"));
+        await agent.channel.admit(command(3, "version"));
         await agent.settle();
-        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([HELP_TEXT, "MiPi 0.0.0-test"]);
+        expect(HELP_TEXT).toContain("/new [name] starts a cobot");
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual([
+          HELP_TEXT,
+          HELP_TEXT,
+          "MiPi 0.0.0-test",
+        ]);
       } finally {
         await agent.close();
       }

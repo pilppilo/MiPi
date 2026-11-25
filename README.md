@@ -29,6 +29,7 @@ All three lead to the same assistant, with the same memory and reminders.
 
 | Command       | What it does                                         |
 | ------------- | ---------------------------------------------------- |
+| `/help`       | Show the available commands                          |
 | `/bot`        | List your bots                                       |
 | `/bot <name>` | Talk to that bot in this chat, until you switch back |
 | `/new [name]` | Start a side chat (cobot) under the current bot      |

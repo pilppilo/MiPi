@@ -654,6 +654,7 @@ export class TelegramChannelRuntime {
     const { argument, chatId, updateId } = update;
     switch (update.command) {
       case "start":
+      case "help":
         await this.#reply(updateId, chatId, () => HELP_TEXT);
         return;
       case "version":

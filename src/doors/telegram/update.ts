@@ -6,6 +6,7 @@
 
 export const TELEGRAM_COMMANDS = [
   "start",
+  "help",
   "new",
   "bot",
   "version",
