@@ -66,7 +66,11 @@ describe("tool profiles", () => {
         { ownership: { kind: "ownerless" } },
         ctx,
       );
-      await harness.commit((tx) => setProfile(tx, conversation.id, name, PROFILES), ctx);
+      await harness.commit(async (tx) => {
+        // Only MiPi runs on `main` (COD-197): this conversation plays it.
+        if (name === "main") (await tx.doc(ConversationMeta, conversation.id)).kind = "main";
+        await setProfile(tx, conversation.id, name, PROFILES);
+      }, ctx);
       await (await conversation.submit({ type: "input", content: "hi" }, ctx)).wait(ctx);
 
       const { tools, prompt } = offered(requests.at(-1)!);

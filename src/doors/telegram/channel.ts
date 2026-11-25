@@ -25,6 +25,7 @@ import {
   boundConversation,
   ConversationMeta,
   profileOf,
+  profileRefusal,
   setProfile,
 } from "../../agent/conversations.ts";
 import type { Delivery } from "../../agent/delivery.ts";
@@ -32,7 +33,7 @@ import { isPaused, isPausedNow, PAUSED_REPLY, warnOwnerOverCap } from "../../age
 import type { ModelList } from "../../agent/model-list.ts";
 import {
   isProfileName,
-  PROFILE_NAMES,
+  PICKABLE_PROFILES,
   type ProfileName,
   type Profiles,
 } from "../../agent/profiles.ts";
@@ -624,12 +625,17 @@ export class TelegramChannelRuntime {
         await this.#reply(updateId, chatId, async (tx) => {
           if (argument.length === 0) {
             const current = profileOf(await tx.doc(ConversationMeta, conversationId));
-            return `Profile: ${current} (${this.#options.profiles.description(current)}).\nPick one with /profile <name>: ${PROFILE_NAMES.join(", ")}.`;
+            return `Profile: ${current} (${this.#options.profiles.description(current)}).\nPick one with /profile <name>: ${PICKABLE_PROFILES.join(", ")}.`;
           }
           const name = argument.toLowerCase();
           if (!isProfileName(name)) {
-            return `${argument} is not a profile. Pick one of: ${PROFILE_NAMES.join(", ")}.`;
+            return `${argument} is not a profile. Pick one of: ${PICKABLE_PROFILES.join(", ")}.`;
           }
+          const refused = profileRefusal(
+            (await tx.doc(ConversationMeta, conversationId)).kind,
+            name,
+          );
+          if (refused !== undefined) return refused;
           if (await this.#busy(tx, conversationId)) return BUSY_REPLY;
           await setProfile(tx, conversationId, name, this.#options.profiles);
           return `Profile set to ${name}.`;

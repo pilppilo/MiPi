@@ -13,15 +13,38 @@ import {
   type Harness,
 } from "./pi/durable.ts";
 import { AgentSettings } from "./settings.ts";
-import { DEFAULT_PROFILE, isProfileName, type ProfileName, type Profiles } from "./profiles.ts";
+import {
+  DEFAULT_PROFILE,
+  isProfileName,
+  MAIN_PROFILE,
+  type ProfileName,
+  type Profiles,
+} from "./profiles.ts";
 
 type Tx = Parameters<typeof configure>[0];
+
+/** What a conversation is since bots (COD-197): absent on a conversation older than bots. */
+export type BotKind = "main" | "bot" | "cobot";
 
 export type ConversationMetaState = {
   /** Shown in the conversation list. Unset until the first message. */
   title?: string;
   /** The tool profile the conversation runs with. Unset on conversations older than profiles: `default`. */
   profile?: ProfileName;
+  // Bot fields (COD-197), all optional so the document stays version 1: an older build ignores them. The bot index
+  // (names, the main bot) is the session's `app.bots` (`bots.ts`).
+  /** `main` (MiPi), `bot` (a purpose bot) or `cobot`. Absent: a chat from before bots. */
+  kind?: BotKind;
+  /** A bot's name, as its owner wrote it. Unique among bots, ignoring case. */
+  name?: string;
+  /** A purpose bot's purpose: also its `instructions`, so it is fixed and its prompt prefix stays cached. */
+  purpose?: string;
+  /** A cobot's bot (its conversation id). */
+  bot?: number;
+  /** `owner`, or `bot:<name>` for a bot made by another bot. */
+  createdBy?: string;
+  /** When it was archived. A chat from before bots is archived when MiPi is made. */
+  archivedAt?: number;
 };
 
 export const ConversationMeta = defineDoc<ConversationMetaState>({
@@ -42,8 +65,12 @@ export function startingProfile(channel: Channel, configured: ProfileName): Prof
   return channel === "relay" ? "pidu" : configured;
 }
 
-/** A channel key (`web`, `tg:<chat_id>`, `relay:pidu`) mapped to the conversation it talks to. */
-export const ChannelBindings = defineDocFamily<{ conversationId?: number }, null>({
+/**
+ * A channel key (`web`, `tg:<chat_id>`, `relay:pidu`) mapped to the conversation it talks to. `bots` marks a binding
+ * written since bots (COD-197): one without it, read once MiPi exists, still points where an older build left it and
+ * moves to its bot (`resolveBinding`).
+ */
+export const ChannelBindings = defineDocFamily<{ conversationId?: number; bots?: true }, null>({
   family: true,
   kind: "app.channel-binding",
   version: 1,
@@ -51,6 +78,16 @@ export const ChannelBindings = defineDocFamily<{ conversationId?: number }, null
   initial: () => ({}),
   checkpointWhen: () => true,
 });
+
+/** Drops the bot fields from a conversation's meta: a fork is a chat of its own, not a copy of its bot. */
+export function clearBotFields(meta: ConversationMetaState): void {
+  delete meta.kind;
+  delete meta.name;
+  delete meta.purpose;
+  delete meta.bot;
+  delete meta.createdBy;
+  delete meta.archivedAt;
+}
 
 export function profileOf(meta: Readonly<ConversationMetaState> | undefined): ProfileName {
   return isProfileName(meta?.profile) ? meta.profile : DEFAULT_PROFILE;
@@ -66,37 +103,92 @@ export async function setProfile(
   profile: ProfileName,
   profiles: Profiles,
 ): Promise<void> {
+  const meta = await tx.doc(ConversationMeta, conversationId);
+  const refused = profileRefusal(meta.kind, profile);
+  if (refused !== undefined) throw new Error(refused);
   await configure(tx, conversationId, { tools: profiles.toolsFor(profile) });
-  (await tx.doc(ConversationMeta, conversationId)).profile = profile;
+  meta.profile = profile;
+}
+
+/** Why a conversation of `kind` can't switch to `profile`: MiPi alone runs on `main`, and always does (COD-197). */
+export function profileRefusal(
+  kind: BotKind | undefined,
+  profile: ProfileName,
+): string | undefined {
+  if (kind === "main" && profile !== MAIN_PROFILE) return "MiPi always runs on the main profile.";
+  if (kind !== "main" && profile === MAIN_PROFILE) return "Only MiPi runs on the main profile.";
+  return undefined;
 }
 
 /**
- * The conversation a channel key is bound to, creating and binding a new one on `profile` when there is none (or
- * when `rebind` asks for a fresh one, as Telegram's `/new` will).
+ * The bots (COD-197): which conversation is MiPi, which one the relay's PiDu, and every bot's name. A session document,
+ * so finding a bot by name (and, later, counting the active ones) never scans conversations. Written once by
+ * `ensureBots` (`bots.ts`), then as bots are made and renamed.
+ */
+export type BotsState = {
+  /** MiPi, the main bot. Unset until the first start of a build with bots. */
+  mainId?: number;
+  /** PiDu, the relay's bot. */
+  piduId?: number;
+  /** Every bot's name, lowercased, to its conversation. */
+  names?: Record<string, number>;
+  /** When MiPi was made, and older chats archived. */
+  madeAt?: number;
+};
+
+export const Bots = defineDoc<BotsState>({
+  kind: "app.bots",
+  version: 1,
+  scope: "session",
+  initial: () => ({}),
+  checkpointWhen: () => true,
+});
+
+/** Where a binding older than bots goes once MiPi exists: the relay's to PiDu, every other door's to MiPi. */
+function botFor(key: string, bots: Readonly<BotsState>): number | undefined {
+  return key.startsWith("relay:") ? (bots.piduId ?? bots.mainId) : bots.mainId;
+}
+
+/**
+ * The conversation a channel key is bound to.
+ *
+ * Once MiPi exists (`Bots.mainId`), a binding written before bots, or none at all, moves to its bot on its first read
+ * and is marked `bots`: so every door reaches MiPi (the relay PiDu) without core having to list the doors' keys, which
+ * Pi Durable can't do for a document family. A binding marked `bots` stays where it is (a `/bot` choice survives a
+ * restart). `rebind` binds a new chat of its own, as Telegram's `/new` does until cobots (COD-200).
+ *
+ * Before MiPi exists (an agent opened without `ensureBots`), an unbound key gets a new conversation on `profile`.
  */
 export async function boundConversation(
   tx: Tx,
   key: string,
   profile: ProfileName,
   profiles: Profiles,
-  options: { readonly rebind?: boolean; readonly existing?: ConversationId } = {},
+  options: { readonly rebind?: boolean } = {},
 ): Promise<ConversationId> {
   const binding = await tx.doc(ChannelBindings, key, null);
-  if (options.rebind !== true && binding.conversationId !== undefined) {
-    const bound = await tx.conversation(binding.conversationId as ConversationId);
-    if (bound !== undefined) return bound.id;
-  }
-  if (options.existing !== undefined) {
-    // An existing conversation keeps its agent, model included. One older than profiles gets the profile, tools and
-    // all: recording only the name left it showing a profile whose tools it didn't offer.
-    const meta = await tx.doc(ConversationMeta, options.existing);
-    if (meta.profile === undefined) await setProfile(tx, options.existing, profile, profiles);
-    binding.conversationId = options.existing;
-    return options.existing;
+  const bots = await tx.doc(Bots);
+  if (options.rebind !== true) {
+    const target = binding.bots === true ? binding.conversationId : botFor(key, bots);
+    const current = target ?? binding.conversationId;
+    if (current !== undefined) {
+      const bound = await tx.conversation(current as ConversationId);
+      if (bound === undefined) {
+        // MiPi or a bound bot gone means the data is broken: say so rather than quietly start another chat.
+        if (target !== undefined) throw new Error(`Conversation ${current} for ${key} is missing`);
+      } else {
+        if (target !== undefined && binding.bots !== true) {
+          binding.conversationId = bound.id;
+          binding.bots = true;
+        }
+        return bound.id;
+      }
+    }
   }
   const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });
   await setProfile(tx, id, profile, profiles);
   binding.conversationId = id;
+  if (bots.mainId !== undefined) binding.bots = true;
   return id;
 }
 

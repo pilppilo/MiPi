@@ -24,7 +24,7 @@ import { BUILT_IN_EXTENSIONS } from "../src/extensions/builtins.ts";
 import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
 import { AnswerSettlement } from "../src/agent/answers.ts";
 import { earliestWake } from "../src/agent/wake-sources.ts";
-import { PROFILES } from "./mipi.ts";
+import { botsOnModel, PROFILES } from "./mipi.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { goModelListSource } from "../src/extensions/optional/opencode-go/models.ts";
 import {
@@ -122,6 +122,7 @@ async function openAgent(
         }),
   });
   const harness = await Harness.open(await storage(), composition.options, ctx);
+  await botsOnModel(harness, { provider: "faux", modelId: "faux-1" });
   const resetsAt = options.planResetAt;
   if (resetsAt !== undefined) {
     bindLimitRecorder(
@@ -472,13 +473,24 @@ describe("Telegram commands", () => {
     inObject(async (storage) => {
       const agent = await openAgent(storage);
       try {
+        // The chat reaches MiPi first, which always runs on `main` (COD-197).
         await agent.channel.admit(command(1, "profile"));
-        await agent.channel.admit(command(2, "profile", "nope"));
-        await agent.channel.admit(command(3, "profile", "empty"));
+        await agent.channel.admit(command(2, "profile", "empty"));
+        await agent.channel.admit(command(3, "new"));
+        await agent.channel.admit(command(4, "profile"));
+        await agent.channel.admit(command(5, "profile", "nope"));
+        await agent.channel.admit(command(6, "profile", "main"));
+        await agent.channel.admit(command(7, "profile", "empty"));
         await agent.settle();
-        const [shown, refused, set] = agent.sent.map(({ text: sent }) => sent);
+        const [mipi, kept, , shown, refused, onlyMipi, set] = agent.sent.map(
+          ({ text: sent }) => sent,
+        );
+        expect(mipi).toMatch(/^Profile: main /);
+        expect(kept).toBe("MiPi always runs on the main profile.");
         expect(shown).toMatch(/^Profile: default /);
+        expect(shown).toMatch(/default, empty, pidu\.$/);
         expect(refused).toBe("nope is not a profile. Pick one of: default, empty, pidu.");
+        expect(onlyMipi).toBe("Only MiPi runs on the main profile.");
         expect(set).toBe("Profile set to empty.");
         const conversationId = (await boundId(agent.harness))!;
         const profile = await agent.harness.commit(
@@ -951,18 +963,22 @@ describe("Telegram bursts (COD-174)", () => {
       const release = Promise.withResolvers<void>();
       const agent = await openAgent(storage, { responses: [held(release.promise, "Done")] });
       try {
-        await agent.channel.admit(text(1, "wait for me"));
-        await agent.channel.admit(command(2, "profile", "empty"));
-        await agent.channel.admit(command(3, "model", "deepseek-v4.1-flash"));
+        // A chat of its own: MiPi's profile never changes (COD-197).
+        await agent.channel.admit(command(1, "new"));
+        await agent.channel.admit(text(2, "wait for me"));
+        await agent.channel.admit(command(3, "profile", "empty"));
+        await agent.channel.admit(command(4, "model", "deepseek-v4.1-flash"));
         // The plain forms still answer.
-        await agent.channel.admit(command(4, "profile"));
+        await agent.channel.admit(command(5, "profile"));
         await endWindow(agent);
-        await agent.channel.admit(command(5, "profile", "empty"));
+        await agent.channel.admit(command(6, "profile", "empty"));
         release.resolve();
         await agent.settle();
-        await agent.channel.admit(command(6, "profile", "empty"));
+        await agent.channel.admit(command(7, "profile", "empty"));
         await agent.settle();
-        const texts = agent.sent.map(({ text: sent }) => sent);
+        const texts = agent.sent
+          .map(({ text: sent }) => sent)
+          .filter((sent) => sent !== "Started a new conversation.");
         expect(texts.slice(0, 2)).toEqual([BUSY_REPLY, BUSY_REPLY]);
         expect(texts[2]).toMatch(/^Profile: default /);
         expect(texts.slice(3)).toEqual([BUSY_REPLY, "Done", "Profile set to empty."]);

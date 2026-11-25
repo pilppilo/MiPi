@@ -21,4 +21,9 @@ export const PROFILE_TABLE: ProfileTable = {
     description: "The PiDu relay: the default tools for now",
     tools: EVERYDAY,
   },
+  main: {
+    // MiPi, the main bot (COD-197). The bot tools (create_bot, message_bot, list_bots, stop_bot) join in COD-199.
+    description: "MiPi, the main bot: the everyday tools",
+    tools: EVERYDAY,
+  },
 };

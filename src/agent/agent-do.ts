@@ -20,6 +20,7 @@ import type { AgentComposition } from "./harness.ts";
 import { composeMipi } from "./composition.ts";
 import {
   boundConversation,
+  clearBotFields,
   ConversationMeta,
   profileOf,
   setProfile,
@@ -28,7 +29,8 @@ import {
 } from "./conversations.ts";
 import { ModelList } from "./model-list.ts";
 import { DEFAULT_MODEL_ID } from "./pi/models.ts";
-import { isProfileName, PROFILE_NAMES, profileOrDefault } from "./profiles.ts";
+import { isProfileName, PICKABLE_PROFILES, profileOrDefault } from "./profiles.ts";
+import { ensureBots } from "./bots.ts";
 import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
@@ -759,6 +761,10 @@ export class MipiAgent extends DurableObject<Env> {
         },
         end: () => {},
       });
+      // MiPi and PiDu, once: before any door reads a binding, so every door reaches its bot (COD-197).
+      if (await ensureBots(harness, profiles, Date.now())) {
+        console.log(JSON.stringify({ message: "Made the main bot and archived older chats" }));
+      }
       // Before anything runs: every conversation offers its profile's tools (older ones may lack them).
       const synced = await syncProfileTools(harness, profiles);
       if (synced.length > 0) {
@@ -1136,21 +1142,19 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   async #connect(server: WebSocket): Promise<void> {
-    const root = await this.#harness.root(BACKGROUND_CONTEXT);
-    // The web door talks to the root conversation first; the binding also gives the root its starting profile once.
-    await this.#harness.commit(
+    // The web door opens the bot its binding names: MiPi, until the owner picks another (COD-197).
+    const bound = await this.#harness.commit(
       (tx) =>
         boundConversation(
           tx,
           "web",
           startingProfile("web", profileOrDefault(this.env.MIPI_PROFILE)),
           this.#composition!.profiles,
-          { existing: root.id },
         ),
       BACKGROUND_CONTEXT,
     );
     await this.#sendSessionSnapshot(server);
-    await this.#watchConversation(server, root.id);
+    await this.#watchConversation(server, bound);
   }
 
   async #handleCommand(socket: WebSocket, command: ClientCommand): Promise<void> {
@@ -1247,6 +1251,8 @@ export class MipiAgent extends DurableObject<Env> {
           const fork = await tx.forkConversation(parentConversationId, entryId, {
             ownership: { kind: "ownerless" },
           });
+          // A fork is a chat of its own, never a second copy of its bot (the meta forks with it).
+          clearBotFields(await tx.doc(ConversationMeta, fork.id));
           doc.receipt = {
             command: command.type,
             conversationId: fork.id,
@@ -1347,7 +1353,7 @@ export class MipiAgent extends DurableObject<Env> {
         );
         if (command.profile !== undefined && !isProfileName(command.profile)) {
           throw new Error(
-            `${command.profile} is not a profile: pick one of ${PROFILE_NAMES.join(", ")}`,
+            `${command.profile} is not a profile: pick one of ${PICKABLE_PROFILES.join(", ")}`,
           );
         }
         // Checked before the commit: a model outside the live list ∩ catalog is refused.
@@ -1422,7 +1428,7 @@ export class MipiAgent extends DurableObject<Env> {
   /** What the web pickers offer. A failed live model list leaves the model picker empty, with the reason. */
   async #options(): Promise<Options> {
     const table = this.#composition!.profiles;
-    const profiles = PROFILE_NAMES.map((name) => ({ id: name, name: table.description(name) }));
+    const profiles = PICKABLE_PROFILES.map((name) => ({ id: name, name: table.description(name) }));
     const defaultModel = this.env.MIPI_MODEL || DEFAULT_MODEL_ID;
     try {
       return { models: await this.#modelList.models(), profiles, defaultModel };

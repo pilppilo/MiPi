@@ -10,7 +10,7 @@
  */
 import type { ToolRegistration } from "./pi/durable.ts";
 
-export const PROFILE_NAMES = ["default", "empty", "pidu"] as const;
+export const PROFILE_NAMES = ["default", "empty", "pidu", "main"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
 
 export interface ProfileEntry {
@@ -24,6 +24,14 @@ export interface ProfileEntry {
 export type ProfileTable = Readonly<Record<ProfileName, ProfileEntry>>;
 
 export const DEFAULT_PROFILE: ProfileName = "default";
+
+/** The main bot's profile (COD-197): MiPi alone runs on it, so no other conversation may be switched to it. */
+export const MAIN_PROFILE: ProfileName = "main";
+
+/** The profiles a picker offers (web, Telegram's `/profile`): every one but `main`. */
+export const PICKABLE_PROFILES: readonly ProfileName[] = PROFILE_NAMES.filter(
+  (name) => name !== MAIN_PROFILE,
+);
 
 export function isProfileName(value: unknown): value is ProfileName {
   return typeof value === "string" && (PROFILE_NAMES as readonly string[]).includes(value);

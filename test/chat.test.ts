@@ -15,6 +15,7 @@ import {
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { withSpikeToken } from "./spike.ts";
+import { Bots } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import { HEARTBEAT_MS } from "../src/agent/alarm.ts";
 import { MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
@@ -119,9 +120,15 @@ const jsonMessages = (socket: WebSocket) => {
         await next();
       }
     },
-    /** Session snapshot, root conversation view, and typing presence. */
-    skipConnectFrames: async (): Promise<void> => {
-      for (let index = 0; index < 3; index++) await next();
+    /** Session snapshot, the bound bot's view (MiPi's at first), and typing presence: the bot's id. */
+    skipConnectFrames: async (): Promise<number> => {
+      let opened: number | undefined;
+      for (let index = 0; index < 3; index++) {
+        const frame = await next<{ type?: string; conversationId?: number }>();
+        if (frame.type === "conversation.view") opened = frame.conversationId;
+      }
+      if (opened === undefined) throw new Error("The session opened no conversation");
+      return opened;
     },
   };
 };
@@ -151,18 +158,28 @@ async function seedSession<T>(
   return result;
 }
 
-const configureOfflineModel = (sessionId: string, conversationId: number = 1): Promise<void> =>
+/**
+ * Puts a conversation on a model that never answers, and returns its id: MiPi (which the web door opens) unless named,
+ * or `root`, Pi Durable's root conversation, which stands for a chat from before bots.
+ */
+const configureOfflineModel = (
+  sessionId: string,
+  target: "main" | "root" | number = "main",
+): Promise<number> =>
   seedSession(sessionId, createHarnessOptions(), async (harness) => {
-    await harness.root(BACKGROUND_CONTEXT);
-    const conversation = await harness.conversation(
-      conversationId as ConversationId,
-      BACKGROUND_CONTEXT,
-    );
-    if (conversation === undefined) throw new Error(`Conversation ${conversationId} is missing`);
+    const id =
+      target === "root"
+        ? (await harness.root(BACKGROUND_CONTEXT)).id
+        : target === "main"
+          ? await harness.commit(async (tx) => (await tx.doc(Bots)).mainId, BACKGROUND_CONTEXT)
+          : target;
+    const conversation = await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT);
+    if (conversation === undefined) throw new Error(`Conversation ${id} is missing`);
     await conversation.configure(
       { model: { provider: "offline", modelId: "offline" }, tools: [] },
       BACKGROUND_CONTEXT,
     );
+    return id!;
   });
 
 const seedUserEntry = (sessionId: string, content: string): Promise<number> => {
@@ -203,22 +220,29 @@ describe("chat application", () => {
     const bobMessages = jsonMessages(bobSocket);
     aliceSocket.accept();
     bobSocket.accept();
-    await Promise.all([aliceMessages.skipConnectFrames(), bobMessages.skipConnectFrames()]);
-    aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: true }));
+    const [main] = await Promise.all([
+      aliceMessages.skipConnectFrames(),
+      bobMessages.skipConnectFrames(),
+    ]);
+    aliceSocket.send(
+      JSON.stringify({ type: "presence.typing", conversationId: main, typing: true }),
+    );
     const [alicePresence, bobPresence] = await Promise.all([
       aliceMessages.nextMatching<ProtocolMessage>(
-        (message) => message.type === "presence.typing" && message.conversationId === 1,
+        (message) => message.type === "presence.typing" && message.conversationId === main,
       ),
       bobMessages.nextMatching<ProtocolMessage>(
-        (message) => message.type === "presence.typing" && message.conversationId === 1,
+        (message) => message.type === "presence.typing" && message.conversationId === main,
       ),
     ]);
     expect(alicePresence.usernames).toEqual([]);
     expect(bobPresence.usernames).toEqual(["jerome"]);
 
-    aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: false }));
+    aliceSocket.send(
+      JSON.stringify({ type: "presence.typing", conversationId: main, typing: false }),
+    );
     const stoppedTyping = await bobMessages.nextMatching<ProtocolMessage>(
-      (message) => message.type === "presence.typing" && message.conversationId === 1,
+      (message) => message.type === "presence.typing" && message.conversationId === main,
     );
     expect(stoppedTyping.usernames).toEqual([]);
 
@@ -226,30 +250,30 @@ describe("chat application", () => {
       JSON.stringify({
         type: "prompt.submit",
         requestId: "alice-prompt",
-        conversationId: 1,
+        conversationId: main,
         content: "Start the plan",
       }),
     );
 
     const aliceText = "[jerome]\nStart the plan";
     await Promise.all([
-      aliceMessages.untilView(1, (view) => submittedTexts(view).includes(aliceText)),
-      bobMessages.untilView(1, (view) => submittedTexts(view).includes(aliceText)),
+      aliceMessages.untilView(main, (view) => submittedTexts(view).includes(aliceText)),
+      bobMessages.untilView(main, (view) => submittedTexts(view).includes(aliceText)),
     ]);
 
     bobSocket.send(
       JSON.stringify({
         type: "prompt.submit",
         requestId: "bob-prompt",
-        conversationId: 1,
+        conversationId: main,
         content: "Add the risks",
       }),
     );
 
     const bobText = "[jerome]\nAdd the risks";
     await Promise.all([
-      aliceMessages.untilView(1, (view) => submittedTexts(view).includes(bobText)),
-      bobMessages.untilView(1, (view) => submittedTexts(view).includes(bobText)),
+      aliceMessages.untilView(main, (view) => submittedTexts(view).includes(bobText)),
+      bobMessages.untilView(main, (view) => submittedTexts(view).includes(bobText)),
     ]);
 
     aliceSocket.close(1000, "test complete");
@@ -263,13 +287,13 @@ describe("chat application", () => {
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
-    await messages.skipConnectFrames();
+    const main = await messages.skipConnectFrames();
 
     socket.send(
       JSON.stringify({
         type: "prompt.submit",
         requestId: "heartbeat-prompt",
-        conversationId: 1,
+        conversationId: main,
         content: "Answer and go idle",
       }),
     );
@@ -297,12 +321,12 @@ describe("chat application", () => {
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
-    await messages.skipConnectFrames();
+    const main = await messages.skipConnectFrames();
 
     const command = JSON.stringify({
       type: "prompt.submit",
       requestId: "stable-request",
-      conversationId: 1,
+      conversationId: main,
       content: "Only once",
     });
     socket.send(command);
@@ -332,9 +356,9 @@ describe("chat application", () => {
     const reopenedSocket = reopened.webSocket!;
     const reopenedMessages = jsonMessages(reopenedSocket);
     reopenedSocket.accept();
-    await reopenedMessages.skipConnectFrames();
+    expect(await reopenedMessages.skipConnectFrames()).toBe(main);
     expect(
-      submittedTexts(reopenedMessages.views.get(1)).filter(
+      submittedTexts(reopenedMessages.views.get(main)).filter(
         (text) => text === "[jerome]\nOnly once",
       ),
     ).toHaveLength(1);
@@ -342,7 +366,8 @@ describe("chat application", () => {
   });
   it("titles a conversation from its first message and switches its profile", async () => {
     const sessionId = "titles-and-profiles";
-    await configureOfflineModel(sessionId);
+    // A chat from before bots (the root): MiPi's profile never changes (COD-197).
+    const chat = await configureOfflineModel(sessionId, "root");
     const response = await openSession(sessionSocketUrl(sessionId, "Alice", "titles-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -354,13 +379,14 @@ describe("chat application", () => {
       session?: { conversations: Array<{ id: number; title?: string; profile?: string }> };
     };
     type Result = { type: string; requestId?: string; ok?: boolean; error?: { message: string } };
-    const root = (snapshot: Snapshot) => snapshot.session?.conversations.find(({ id }) => id === 1);
+    const root = (snapshot: Snapshot) =>
+      snapshot.session?.conversations.find(({ id }) => id === chat);
 
     socket.send(
       JSON.stringify({
         type: "prompt.submit",
         requestId: "first",
-        conversationId: 1,
+        conversationId: chat,
         content: "Plan the week",
       }),
     );
@@ -373,7 +399,7 @@ describe("chat application", () => {
       JSON.stringify({
         type: "conversation.configure",
         requestId: "to-empty",
-        conversationId: 1,
+        conversationId: chat,
         profile: "empty",
       }),
     );
@@ -386,7 +412,7 @@ describe("chat application", () => {
       JSON.stringify({
         type: "conversation.configure",
         requestId: "bad",
-        conversationId: 1,
+        conversationId: chat,
         profile: "coding",
       }),
     );
@@ -410,7 +436,7 @@ describe("chat application", () => {
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
-    await messages.skipConnectFrames();
+    const main = await messages.skipConnectFrames();
 
     socket.send(command);
     type CreateEvent = {
@@ -424,7 +450,7 @@ describe("chat application", () => {
         ({ type, requestId }) => type === "command.result" && requestId === "stable-create-request",
       ) ||
       !creationFrames.some(
-        ({ type, conversationId }) => type === "conversation.view" && conversationId !== 1,
+        ({ type, conversationId }) => type === "conversation.view" && conversationId !== main,
       )
     ) {
       creationFrames.push(await messages.next<CreateEvent>());
@@ -433,7 +459,7 @@ describe("chat application", () => {
       ({ type, requestId }) => type === "command.result" && requestId === "stable-create-request",
     );
     const watchIndex = creationFrames.findIndex(
-      ({ type, conversationId }) => type === "conversation.view" && conversationId !== 1,
+      ({ type, conversationId }) => type === "conversation.view" && conversationId !== main,
     );
     expect(watchIndex).toBeLessThan(acknowledgementIndex);
     const first = creationFrames[acknowledgementIndex]!;
@@ -460,7 +486,8 @@ describe("chat application", () => {
       type: string;
       session: { conversations: Array<{ id: number }> };
     }>();
-    expect(snapshot.session.conversations).toHaveLength(2);
+    // MiPi, PiDu and the new conversation.
+    expect(snapshot.session.conversations).toHaveLength(3);
     for (let index = 0; index < 2; index++) await reopenedMessages.next();
 
     reopenedSocket.send(command);
@@ -501,7 +528,7 @@ describe("chat application", () => {
     await response.body?.cancel();
   });
 
-  it("opens a session WebSocket with the root conversation", async () => {
+  it("opens a session WebSocket with MiPi, beside PiDu", async () => {
     const response = await exports.default.fetch(
       withSpikeToken("https://example.com/api/sessions/jerome", {
         headers: { Upgrade: "websocket" },
@@ -521,16 +548,24 @@ describe("chat application", () => {
         activity: { tasks: Record<string, unknown> };
       };
     }>();
+    // A new agent has only its bots: MiPi and the relay's PiDu (COD-197).
     expect(session).toEqual({
       type: "session.snapshot",
-      session: { conversations: [{ id: 1, profile: "default" }], activity: { tasks: {} } },
+      session: {
+        conversations: [
+          { id: expect.any(Number), profile: "main" },
+          { id: expect.any(Number), profile: "pidu" },
+        ],
+        activity: { tasks: {} },
+      },
     });
+    const main = session.session.conversations[0]!.id;
 
     await expect(messages.next()).resolves.toMatchObject({
       type: "conversation.view",
-      conversationId: 1,
+      conversationId: main,
       view: {
-        conversation: { id: 1 },
+        conversation: { id: main },
         entries: [],
         docs: {
           "pi.agent": {
@@ -543,7 +578,7 @@ describe("chat application", () => {
     });
     await expect(messages.next()).resolves.toEqual({
       type: "presence.typing",
-      conversationId: 1,
+      conversationId: main,
       usernames: [],
     });
 
@@ -604,14 +639,19 @@ describe("chat application", () => {
     const bobMessages = jsonMessages(bobSocket);
     aliceSocket.accept();
     bobSocket.accept();
-    await Promise.all([aliceMessages.skipConnectFrames(), bobMessages.skipConnectFrames()]);
+    const [main] = await Promise.all([
+      aliceMessages.skipConnectFrames(),
+      bobMessages.skipConnectFrames(),
+    ]);
 
-    aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: true }));
+    aliceSocket.send(
+      JSON.stringify({ type: "presence.typing", conversationId: main, typing: true }),
+    );
     await expect(
       bobMessages.nextMatching<ProtocolMessage>(
         (message) =>
           message.type === "presence.typing" &&
-          message.conversationId === 1 &&
+          message.conversationId === main &&
           message.usernames?.includes("jerome") === true,
       ),
     ).resolves.toMatchObject({ usernames: ["jerome"] });
@@ -621,7 +661,7 @@ describe("chat application", () => {
       JSON.stringify({
         type: "conversation.open",
         requestId: "wake-after-eviction",
-        conversationId: 1,
+        conversationId: main,
       }),
     );
 
@@ -629,7 +669,7 @@ describe("chat application", () => {
       bobMessages.nextMatching<ProtocolMessage>(
         (message) =>
           message.type === "presence.typing" &&
-          message.conversationId === 1 &&
+          message.conversationId === main &&
           message.usernames?.includes("jerome") === true,
       ),
     ).resolves.toMatchObject({ usernames: ["jerome"] });
@@ -850,25 +890,30 @@ describe("chat application", () => {
   it("lists subagent conversations with their owner", async () => {
     const sessionId = "owned-conversations-listed";
     // A task-owned conversation, as history search creates for its subagent.
-    const childId = await seedSession(sessionId, createHarnessOptions(), async (harness) => {
-      const root = await harness.root(BACKGROUND_CONTEXT);
-      return root.commit(async (tx) => {
-        const task = await tx.createTask(
-          DeliverScheduledInstruction,
-          {
-            id: "schedule:owner",
-            conversationId: root.id,
-            instruction: "Owner only",
-            runAt: Date.now() + 3_600_000,
-          },
-          { ownership: { kind: "conversation" }, background: true },
-        );
-        const child = await tx.createConversation({
-          ownership: { kind: "task", taskId: task },
-        });
-        return child.id;
-      }, BACKGROUND_CONTEXT);
-    });
+    const { childId, rootId } = await seedSession(
+      sessionId,
+      createHarnessOptions(),
+      async (harness) => {
+        const root = await harness.root(BACKGROUND_CONTEXT);
+        const childId = await root.commit(async (tx) => {
+          const task = await tx.createTask(
+            DeliverScheduledInstruction,
+            {
+              id: "schedule:owner",
+              conversationId: root.id,
+              instruction: "Owner only",
+              runAt: Date.now() + 3_600_000,
+            },
+            { ownership: { kind: "conversation" }, background: true },
+          );
+          const child = await tx.createConversation({
+            ownership: { kind: "task", taskId: task },
+          });
+          return child.id;
+        }, BACKGROUND_CONTEXT);
+        return { childId, rootId: root.id };
+      },
+    );
 
     const response = await openSession(`https://example.com/api/sessions/${sessionId}`);
     const socket = response.webSocket!;
@@ -885,13 +930,16 @@ describe("chat application", () => {
     expect(snapshot).toMatchObject({
       type: "session.snapshot",
       session: {
-        conversations: [{ id: 1 }, { id: childId, owner: { conversationId: 1 } }],
+        conversations: expect.arrayContaining([
+          expect.objectContaining({ id: rootId }),
+          { id: childId, owner: { conversationId: rootId } },
+        ]),
       },
     });
     expect(Object.values(snapshot.session.activity.tasks)).toEqual([
       expect.objectContaining({
         kind: "app.deliver-scheduled-instruction",
-        conversationId: 1,
+        conversationId: rootId,
         background: true,
         conversations: [childId],
       }),
