@@ -569,7 +569,7 @@ export class TelegramChannelRuntime {
       }
       case "new": {
         // Messages waiting in the chat's window belong to the old conversation: they go there first, in the same
-        // commit, before the chat is rebound (the submit before any table write, the new conversation's included).
+        // commit, before the chat is rebound (the admit before any table write, the new conversation's included).
         const window = await this.#commit(async (tx) => {
           const open = (await tx.doc(TelegramChannel)).staged?.find(
             (staged) => staged.chatId === chatId,

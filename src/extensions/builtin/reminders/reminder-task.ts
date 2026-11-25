@@ -137,14 +137,14 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
         return;
       }
       const now = runtime.now();
-      // Today's spend first, in a commit of its own: the next one submits, and its submit must be its first write.
+      // Today's spend first, in a commit of its own: the next one admits, and its admit must be its first write.
       await runtime.commit(async (tx) => {
         await measureToday(tx, now);
         return undefined;
       }, context);
       const { delivery } = connectorsOf(runtime.registry);
       await runtime.commit(async (tx) => {
-        // Reads first; the submit is this commit's first table write. Documents may change before it.
+        // Reads first; the admit is this commit's first table write. Documents may change before it.
         const previous =
           state.sent === 0
             ? undefined
@@ -184,7 +184,7 @@ export const ScheduledReminder = defineTask<ReminderInput, ReminderState, null>(
             ? await tx.submissionByRequest(conversation.id, requestId)
             : undefined;
         let sent = state.sent;
-        // pi-ledger L7. The run's first model round is checked here, and counted after the submit. A pause or the
+        // pi-ledger L7. The run's first model round is checked here, and counted after the admit. A pause or the
         // spend cap holds it as the run cap does (M9).
         const held: ProactiveHold | undefined =
           decision !== "send" || existing !== undefined ? undefined : await proactiveHold(tx, now);

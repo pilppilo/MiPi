@@ -203,7 +203,7 @@ describe("Pi seam contract", () => {
         );
 
         // Telegram admission (M5): a document read, then `admit(tx, …)`, then document writes, in one commit; a table
-        // write before the submit is refused. The settled record and its answer are read back in a commit, and a
+        // write before the admit is refused. The settled record and its answer are read back in a commit, and a
         // submission is reacquired by id to wait for it.
         await expect(
           harness.commit(async (tx) => {
