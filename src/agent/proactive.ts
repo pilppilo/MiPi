@@ -343,7 +343,9 @@ export const proactiveExtension = defineExtension({
   hooks: [
     hook(GenerationTask, {
       onYield: async (_answer, api) =>
-        (await reminderRun(api, "some")) ? { tasks: [hookTask(RecordRun, {})] } : undefined,
+        (await reminderRun(api, "some"))
+          ? { kind: "tasks" as const, tasks: [hookTask(RecordRun, {})] }
+          : undefined,
       afterTools: async (_assistant, results, api) =>
         (await reminderRun(api, "every"))
           ? { tasks: [hookTask(RoundBudget, { results: results.map(Number) })] }

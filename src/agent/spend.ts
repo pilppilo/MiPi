@@ -121,7 +121,7 @@ export function holdOf(state: Readonly<SpendState>, now: number): Hold | undefin
 
 /**
  * Brings today's count up to date: adds what every conversation spent since the last measure. Writes only what
- * changed. Call it before a decision, in a commit that submits nothing (or after the submit): it reads every
+ * changed. Call it before a decision, in a commit that admits nothing (or after the admit): it reads every
  * conversation's usage.
  */
 export async function measureSpend(tx: Tx, now: number): Promise<SpendState> {
