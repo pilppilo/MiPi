@@ -996,6 +996,7 @@ export class MipiAgent extends DurableObject<Env> {
   async spikeProbe(): Promise<{
     readonly pitrBookmark: { readonly ok: boolean; readonly detail: string };
   }> {
+    this.#flushPendingAlarmLost();
     try {
       const bookmark = await this.ctx.storage.getCurrentBookmark();
       return {
@@ -1039,6 +1040,7 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async webSocketMessage(socket: WebSocket, message: WSMessage): Promise<void> {
+    this.#flushPendingAlarmLost();
     if (this.#state.kind !== "open") {
       // A socket that outlived a restart into maintenance or refusal: tell the client to come back later.
       socket.close(1012, "Unavailable");
@@ -1107,6 +1109,7 @@ export class MipiAgent extends DurableObject<Env> {
     reason: string,
     _wasClean: boolean,
   ): Promise<void> {
+    this.#flushPendingAlarmLost();
     try {
       await this.#connectionOperations.run(socket, async () => {
         this.#setTyping(socket, false);
@@ -1120,6 +1123,7 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   override async webSocketError(socket: WebSocket, error: unknown): Promise<void> {
+    this.#flushPendingAlarmLost();
     try {
       await this.#connectionOperations.run(socket, async () => {
         reportError("Session WebSocket failed", error);

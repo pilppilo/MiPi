@@ -44,7 +44,7 @@ export async function readHeartbeat(
     overdue: schedules
       .filter(({ dueAt }) => now - dueAt > OVERDUE_MS)
       .map((schedule) => ({ ...schedule, overdueMs: now - schedule.dueAt })),
-    alarmLost: Number.isFinite(alarmLostAt) ? { at: alarmLostAt } : undefined,
+    alarmLost: Number.isFinite(alarmLostAt) && alarmLostAt > 0 ? { at: alarmLostAt } : undefined,
     held,
     heldUntil,
   };

@@ -8,6 +8,27 @@ const fixtures = import.meta.glob<unknown>("../evals/proactive/*.json", {
 });
 
 describe("proactive evals", () => {
+  it("accepts natural reports of unreadable pages and failed requests", () => {
+    const unreadable = { kind: "unreadable" } as const;
+    for (const answer of [
+      "I couldn't check the feed.",
+      "I could not determine its status.",
+      "I couldn’t see the dashboard.",
+      "I can't view the current status.",
+      "I couldn't tell whether the service is healthy.",
+      "I couldn't get the latest report.",
+      "The page led to a login wall.",
+      "It redirects to a sign-in page.",
+      "The dashboard requires authentication.",
+      "The dashboard needs JavaScript.",
+      "The dashboard requires JavaScript.",
+      "The request returned 503.",
+      "The server returned Service Unavailable.",
+    ]) {
+      expect(gradeProactiveAnswer(unreadable, answer), answer).toEqual([]);
+    }
+  });
+
   it("validates every fixture offline and checks coverage", () => {
     const cases = Object.entries(fixtures).map(([file, raw]) => {
       const test = parseProactiveEval(raw, file);

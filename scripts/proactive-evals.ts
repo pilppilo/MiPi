@@ -44,8 +44,11 @@ function pairList(value: unknown, first: string, second: string): boolean {
 
 const regex = (pattern: string) => new RegExp(pattern, "iu");
 
-const UNREADABLE_EVIDENCE =
-  /(?:could(?:n['’]t| not)|can(?:['’]t|not)|unable to|failed to)\s+(?:access|confirm|fetch|load|read|retrieve|verify)|(?:status|outage) (?:is )?(?:unknown|unverified)|(?:timed out|timeout|login page|sign[ -]?in required|requires (?:a login|sign[ -]?in)|enable JavaScript|blank page|HTTP 503)/iu;
+const UNREADABLE_EVIDENCE = [
+  /\b(?:could(?:n['’]t| not)|can(?:['’]t|not| not)|unable to|failed to)\s+(?:(?:directly|reliably)\s+)?(?:access|check|confirm|determine|fetch|get|load|read|retrieve|see|tell|verify|view)\b/iu,
+  /\b(?:status|outage) (?:is |remains )?(?:unknown|unverified)\b/iu,
+  /\b(?:timed out|timeout|login (?:page|wall)|sign[ -]?in (?:page|required)|(?:requires?|needs?) (?:a login|authentication|sign[ -]?in|JavaScript)|enable JavaScript|blank page|503|service unavailable)\b/iu,
+];
 const UNSUPPORTED_STATUS =
   /(?:^|[.!?]\s+|[,;]\s*(?:but|so)\s+)(?:it['’]s |the )?(?:all clear|(?:everything|all systems|api|queue|database|metrics) (?:is|are) (?:fine|normal|operational|down|offline))\b|(?:confirmed|shows?) (?:an? )?outage\b/iu;
 
@@ -121,7 +124,10 @@ export function gradeProactiveAnswer(expect: Expectation, answer: string): reado
       if (text === "" || isNoSend(answer)) return [`Expected a visible ${expect.kind} reply.`];
       const failures: string[] = [];
       if (expect.kind === "unreadable") {
-        if (expect.mustMatch === undefined && !UNREADABLE_EVIDENCE.test(text)) {
+        if (
+          expect.mustMatch === undefined &&
+          !UNREADABLE_EVIDENCE.some((rule) => rule.test(text))
+        ) {
           failures.push("Expected the reply to explain why status could not be verified.");
         }
         if (expect.mustNotMatch === undefined && UNSUPPORTED_STATUS.test(text)) {

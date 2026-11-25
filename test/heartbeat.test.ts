@@ -151,6 +151,47 @@ describe("alarm loss", () => {
     expect((await stub.adminStatus()).heartbeat?.alarmLost).toBeUndefined();
   });
 
+  it("records the incident when a hibernated WebSocket wakes the object before its alarm", async () => {
+    const name = "heartbeat-hibernated-socket";
+    const stub = env.AGENT.getByName(name);
+    const response = await stub.fetch(
+      new Request(`https://example.com/api/sessions/${name}?username=Alice&_pk=heartbeat`, {
+        headers: { Upgrade: "websocket" },
+      }),
+    );
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    socket.accept();
+    try {
+      await coldObject(name);
+      const requestId = "heartbeat-after-eviction";
+      const reply = new Promise<{ ok: boolean }>((resolve) => {
+        const receive = (event: MessageEvent) => {
+          const message = JSON.parse(String(event.data));
+          if (message.type !== "command.result" || message.requestId !== requestId) return;
+          socket.removeEventListener("message", receive);
+          resolve(message);
+        };
+        socket.addEventListener("message", receive);
+      });
+      socket.send(
+        JSON.stringify({
+          type: "conversation.entries",
+          conversationId: 1,
+          requestId,
+          order: "descending",
+          limit: 1,
+        }),
+      );
+      expect(await reply).toMatchObject({ ok: true });
+      // Clear any in-memory candidate before reading status. The WebSocket event must have persisted it.
+      await runInDurableObject(stub, (instance) => instance.alarm());
+      expect((await stub.adminStatus()).heartbeat?.alarmLost?.at).toBeGreaterThan(0);
+    } finally {
+      socket.close(1000, "test complete");
+    }
+  });
+
   it("skips the alarm deleted by export, restore, and stale export recovery", async () => {
     const { stub } = await coldObject("heartbeat-maintenance");
     await runInDurableObject(stub, async (instance, state) => {
@@ -178,6 +219,21 @@ describe("alarm loss", () => {
 });
 
 describe("heartbeat status", () => {
+  it("ignores blank or invalid alarm-loss timestamps in stored metadata", async () => {
+    await runInDurableObject(
+      env.AGENT.getByName("heartbeat-invalid-marker"),
+      async (agent, state) => {
+        await state.blockConcurrencyWhile(async () => {});
+        for (const value of ["", "  ", "bad", "0", "-1"]) {
+          writeMeta(state.storage.sql, { alarm_lost_at: value });
+          const { heartbeat } = await agent.adminStatus();
+          expect(heartbeat).toBeDefined();
+          expect(heartbeat?.alarmLost).toBeUndefined();
+        }
+      },
+    );
+  });
+
   it("reads both schedule formats, the latest run, and effective holds without writing", async () => {
     await runInDurableObject(env.AGENT.getByName("heartbeat-reader"), async (_instance, state) => {
       const composition = composeMipi();
