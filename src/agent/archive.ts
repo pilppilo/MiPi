@@ -37,38 +37,12 @@ import { DEFAULT_PROFILE, RELAY_PROFILE, type Profiles } from "./profiles.ts";
 import { expectProactive, recentProactiveSends } from "./proactive.ts";
 import { AgentSettings } from "./settings.ts";
 import { DEFAULT_TIME_ZONE, localTime } from "./stamp.ts";
-import { formatReminder } from "../protocol.ts";
+import { formatReminder, MAX_BOT_NAME_CHARACTERS } from "../protocol.ts";
 
 export type { HeldReminder };
 
 /** What a door says to a message for an archived conversation. */
 export const ARCHIVED_REPLY = "This bot is archived. Restore it to talk to it again.";
-
-/** `BOT_NAME_MAX` (`bots.ts`), kept here because `bots.ts` imports this module. */
-const NAME_MAX = 40;
-
-/** The refusal for a message or change to an archived conversation, worded for what it is (COD-201). */
-export function archivedReply(kind: BotKind | undefined): string {
-  switch (kind) {
-    case undefined:
-      return "This chat is archived. Restore it to talk to it again.";
-    case "cobot":
-      return "This cobot is archived with its bot. Restore the bot to talk to it again.";
-    case "main":
-    case "bot":
-      return ARCHIVED_REPLY;
-    default: {
-      const _: never = kind;
-      return ARCHIVED_REPLY;
-    }
-  }
-}
-
-/** `archivedReply` for `id` when it is archived, in a commit; undefined when it is live. */
-export async function archivedRefusal(tx: Tx, id: number): Promise<string | undefined> {
-  if (!(await isArchived(tx, id))) return undefined;
-  return archivedReply((await tx.doc(ConversationMeta, id as ConversationId)).kind);
-}
 
 /** Whether a conversation is archived, from the session index alone. */
 export function archivedIn(bots: Readonly<BotsState>, id: number): boolean {
@@ -78,6 +52,32 @@ export function archivedIn(bots: Readonly<BotsState>, id: number): boolean {
 /** `archivedIn`, in a commit. */
 export async function isArchived(tx: Tx, id: number): Promise<boolean> {
   return archivedIn(await tx.doc(Bots), id);
+}
+
+/**
+ * The refusal for a message or change to an archived conversation, in a commit, worded for what it is (COD-201): a
+ * cobot's by whether its bot is archived too. Undefined when it is live.
+ */
+export async function archivedRefusal(tx: Tx, id: number): Promise<string | undefined> {
+  const bots = await tx.doc(Bots);
+  if (!archivedIn(bots, id)) return undefined;
+  const meta = await tx.doc(ConversationMeta, id as ConversationId);
+  const kind: BotKind | undefined = meta.kind;
+  switch (kind) {
+    case undefined:
+      return "This chat is archived. Restore it to talk to it again.";
+    case "cobot":
+      return meta.bot !== undefined && archivedIn(bots, meta.bot)
+        ? "This cobot is archived with its bot. Restore the bot to talk to it again."
+        : "This cobot is archived. Restore it to talk to it again.";
+    case "main":
+    case "bot":
+      return ARCHIVED_REPLY;
+    default: {
+      const _: never = kind;
+      return ARCHIVED_REPLY;
+    }
+  }
 }
 
 /** Where a schedule made in a conversation runs now. */
@@ -222,6 +222,8 @@ export async function restoreBot(
   tx: Tx,
   id: ConversationId,
   profiles: Profiles,
+  /** An untitled earlier chat's first line, to name it by (`firstLineOf`): read by the caller, outside the commit. */
+  firstLine?: string,
 ): Promise<Restored> {
   const meta = await tx.doc(ConversationMeta, id);
   const kind = meta.kind;
@@ -233,7 +235,7 @@ export async function restoreBot(
     case "cobot":
       return restoreCobot(tx, id, meta);
     case undefined:
-      return restoreEarlierChat(tx, id, meta, profiles);
+      return restoreEarlierChat(tx, id, meta, profiles, firstLine);
     default: {
       const _: never = kind;
       throw new Error("Only a bot can be restored.");
@@ -281,7 +283,7 @@ async function restoreCobot(
 }
 
 /**
- * A chat from before bots, restored: a cobot under MiPi, named from its title, on its own profile, or `default` for
+ * A chat from before bots, restored: a cobot under MiPi, named from its title or else its first line, on its own profile, or `default` for
  * the relay's old `pidu`, which no live chat newly keeps. It stays out of the bot name index and the active bot limit.
  * Its reminders, which ran in MiPi while it was archived (`routeSchedule`), run in it again from this commit.
  */
@@ -290,6 +292,7 @@ async function restoreEarlierChat(
   id: ConversationId,
   meta: ConversationMetaState,
   profiles: Profiles,
+  firstLine: string | undefined,
 ): Promise<Restored> {
   const bots = await tx.doc(Bots);
   if (bots.mainId === undefined) throw new Error("MiPi isn't set up yet.");
@@ -298,24 +301,33 @@ async function restoreEarlierChat(
   }
   meta.kind = "cobot";
   meta.bot = bots.mainId;
-  meta.name = earlierChatName(meta.title);
+  meta.name = earlierChatName(meta.title ?? firstLine);
   meta.createdBy ??= "owner";
   if (profileOf(meta) === RELAY_PROFILE) await setProfile(tx, id, DEFAULT_PROFILE, profiles);
   await unarchive(tx, [id]);
   return { restored: [id], conversations: [id] };
 }
 
-/** A restored earlier chat's cobot name: its title, cut to a name's length. */
-function earlierChatName(title: string | undefined): string {
-  const line = title?.split("\n")[0]?.trim() ?? "";
+/** A restored earlier chat's cobot name: its title or first line, cut to a name's length. */
+function earlierChatName(text: string | undefined): string {
+  const line = firstLineOf(text ?? "") ?? "";
   if (line.length === 0) return "Earlier chat";
   const chars = [...line];
-  return chars.length <= NAME_MAX
+  return chars.length <= MAX_BOT_NAME_CHARACTERS
     ? line
     : `${chars
-        .slice(0, NAME_MAX - 1)
+        .slice(0, MAX_BOT_NAME_CHARACTERS - 1)
         .join("")
         .trimEnd()}…`;
+}
+
+/** A message's first line of text, after the `[speaker · time]` stamp (`stampInput`), if it has one. */
+export function firstLineOf(text: string): string | undefined {
+  return text
+    .replace(/^\[[^\]\n]*\]\n/, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
 }
 
 /** Clears `archivedAt` and the index entry of each, and binds back the channel keys that fell back from them. */

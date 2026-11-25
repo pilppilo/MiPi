@@ -306,6 +306,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     ) {
       session.openConversation(conversationId);
     }
+    // Back or forward lands on a conversation: Settings would hide it.
+    setSettingsOpen(false);
   });
 
   useEffect(() => {
@@ -368,6 +370,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
       return;
     }
     event.preventDefault();
+    // Settings covers the conversation: picking one from the sidebar shows it.
+    setSettingsOpen(false);
     if (conversationId !== session.activeConversationId) {
       window.history.pushState(null, "", event.currentTarget.href);
       session.openConversation(conversationId);
@@ -501,7 +505,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 disabled={!isConnected}
                 onCreate={async (bot) => {
                   const created = await session.createBot(bot);
-                  if (created) setNewBotOpen(false);
+                  if (created) {
+                    setNewBotOpen(false);
+                    setSettingsOpen(false);
+                  }
                   return created;
                 }}
                 onCancel={() => setNewBotOpen(false)}
@@ -543,6 +550,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                               setNewCobotUnder((current) =>
                                 current === bot.id ? undefined : current,
                               );
+                              setSettingsOpen(false);
                             }
                           }}
                           onCancel={() => setNewCobotUnder(undefined)}
@@ -576,7 +584,11 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           </div>
           {!readOnly ? null : (
             <div className="read-only-banner" role="status">
-              <p>Archived: read-only. Restore it to talk to it again.</p>
+              <p>
+                {restoreHint === undefined
+                  ? "Archived: read-only. Restore it to talk to it again."
+                  : "Archived: read-only."}
+              </p>
               <button
                 type="button"
                 disabled={!isConnected || restoreHint !== undefined}
@@ -1030,6 +1042,11 @@ function ConversationDetails({
                 disabled={disabled || options === undefined}
                 onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
               >
+                {/* A profile no picker offers (the relay's old `pidu`) is shown as it is, never as another. */}
+                {options === undefined ||
+                options.profiles.some(({ id }) => id === (profile ?? "default")) ? null : (
+                  <option value={profile ?? "default"}>{profile ?? "default"}</option>
+                )}
                 {(options?.profiles ?? [{ id: profile ?? "default", name: "" }]).map((choice) => (
                   <option key={choice.id} value={choice.id} title={choice.name}>
                     {choice.id}

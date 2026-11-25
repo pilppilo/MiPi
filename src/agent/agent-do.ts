@@ -42,10 +42,10 @@ import { createBot, createCobot, ensureBots, renameBot } from "./bots.ts";
 import { bindBotDoor, BOT_LIST_CHANGE } from "./bot-tools.ts";
 import {
   abortArchived,
-  ARCHIVED_REPLY,
+  archivedIn,
   archivedRefusal,
   archiveBot,
-  isArchived,
+  firstLineOf,
   replayHeld,
   restoreBot,
 } from "./archive.ts";
@@ -173,6 +173,11 @@ type SessionConnectionState = {
   readonly username: string;
   readonly conversationId?: number;
   readonly typing?: true;
+  /**
+   * The conversation was archived when this socket opened it (COD-201): a read-only view, which archive changes never
+   * move to MiPi. Cleared when it is restored. Kept in the attachment, so it survives hibernation.
+   */
+  readonly readOnly?: true;
 };
 
 type LegacyPartyServerAttachment = {
@@ -190,7 +195,8 @@ const isSessionConnectionState = (value: unknown): value is SessionConnectionSta
       (typeof state.conversationId === "number" &&
         Number.isSafeInteger(state.conversationId) &&
         state.conversationId > 0)) &&
-    (state.typing === undefined || state.typing === true)
+    (state.typing === undefined || state.typing === true) &&
+    (state.readOnly === undefined || state.readOnly === true)
   );
 };
 
@@ -300,11 +306,6 @@ export class MipiAgent extends DurableObject<Env> {
   #activity!: WatchHandle<TaskGraph>;
   readonly #views = new Map<WebSocket, WatchHandle<ConversationView>>();
   readonly #typingConnections = new Set<WebSocket>();
-  /**
-   * The archive index as the commit observer last saw it (COD-201): only conversations archived since move their
-   * watchers to MiPi, so an archived conversation opened read-only stays open through unrelated changes.
-   */
-  #archivedSeen: ReadonlySet<number> | undefined;
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
   /**
    * The parts that need the alarm besides Pi Durable (`wake-sources.ts`): registered while the harness opens
@@ -821,17 +822,12 @@ export class MipiAgent extends DurableObject<Env> {
               Promise.resolve()
                 .then(async () => {
                   if (this.#harness !== harness || this.#state.kind !== "open") return;
-                  const archived = Object.keys(
-                    (await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {},
-                  ).map(Number);
+                  const archived =
+                    (await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {};
                   if (this.#harness !== harness || this.#state.kind !== "open") return;
-                  const seen = this.#archivedSeen;
-                  this.#archivedSeen = new Set(archived);
-                  // Archived since the last look (by a tool, say): their watchers move. One opened while archived stays.
+                  // Archived by a tool (`stop_bot`), say: its watchers move. A read-only view stays (`readOnly`).
                   await this.#leaveArchived(
-                    (seen === undefined
-                      ? archived
-                      : archived.filter((id) => !seen.has(id))) as ConversationId[],
+                    Object.keys(archived).map(Number) as ConversationId[],
                     harness,
                   );
                   if (this.#harness === harness && this.#state.kind === "open") {
@@ -852,9 +848,6 @@ export class MipiAgent extends DurableObject<Env> {
       if (await ensureBots(harness, profiles, Date.now())) {
         console.log(JSON.stringify({ message: "Made the main bot and archived older chats" }));
       }
-      this.#archivedSeen = new Set(
-        Object.keys((await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {}).map(Number),
-      );
       // Before anything runs: every conversation offers its profile's tools (older ones may lack them).
       const synced = await syncProfileTools(harness, profiles);
       if (synced.length > 0) {
@@ -1354,7 +1347,8 @@ export class MipiAgent extends DurableObject<Env> {
             ) {
               throw new Error(`Request ${command.requestId} was already used for another command`);
             }
-            if (await isArchived(tx, existing.conversationId)) throw new Error(ARCHIVED_REPLY);
+            const archived = await archivedRefusal(tx, existing.conversationId);
+            if (archived !== undefined) throw new Error(archived);
             return existing.conversationId;
           }
           const id = await createCobot(tx, bot, command.name, this.#composition!.profiles);
@@ -1437,10 +1431,13 @@ export class MipiAgent extends DurableObject<Env> {
         const conversation = await this.#requireConversation(
           command.conversationId as ConversationId,
         );
-        const { conversations } = await this.#harness.commit(
-          (tx) => restoreBot(tx, conversation.id, this.#composition!.profiles),
+        const firstLine = await this.#earlierChatFirstLine(conversation);
+        const { restored, conversations } = await this.#harness.commit(
+          (tx) => restoreBot(tx, conversation.id, this.#composition!.profiles, firstLine),
           BACKGROUND_CONTEXT,
         );
+        // Live again: its views stop being read-only, so a later archive moves them to MiPi as any.
+        this.#clearReadOnly(restored);
         // Held reminders go out marked late; while paused they stay held for the next start (`replayHeld`).
         await replayHeld(this.#harness, conversations, Date.now(), BACKGROUND_CONTEXT, () =>
           this.#alarm.schedule({ ...this.#harness.wake(), active: true }),
@@ -1710,6 +1707,11 @@ export class MipiAgent extends DurableObject<Env> {
     const username = connectionState(socket)?.username ?? "Guest";
     setConnectionState(socket, { username });
     const conversation = await this.#requireConversation(conversationId);
+    // Opened while archived: read-only, and it stays here through archive changes until it is restored (COD-201).
+    const readOnly = archivedIn(
+      (await this.#harness.snapshot(Bots, BACKGROUND_CONTEXT)) ?? {},
+      conversationId,
+    );
     // A window over the transcript and the conversation's built-in documents: the run, the streamed answer, tool
     // progress, the queue, the agent, and usage. The client pages older entries with `conversation.entries`.
     const view = await conversation.watch(BACKGROUND_CONTEXT);
@@ -1718,6 +1720,7 @@ export class MipiAgent extends DurableObject<Env> {
       username,
       conversationId,
       ...(restoreTyping ? { typing: true } : {}),
+      ...(readOnly ? { readOnly: true } : {}),
     });
     if (restoreTyping) this.#typingConnections.add(socket);
     this.#send(socket, { type: "conversation.view", conversationId, view: view.value });
@@ -1731,6 +1734,47 @@ export class MipiAgent extends DurableObject<Env> {
     this.#broadcastTyping(conversationId);
   }
 
+  /** Drops the read-only mark of every socket watching one of `restored`. */
+  #clearReadOnly(restored: readonly ConversationId[]): void {
+    const live = new Set<number>(restored);
+    for (const socket of this.#connections()) {
+      const state = connectionState(socket);
+      if (state?.readOnly !== true || state.conversationId === undefined) continue;
+      if (!live.has(state.conversationId)) continue;
+      const { readOnly: _, ...rest } = state;
+      setConnectionState(socket, rest);
+    }
+  }
+
+  /**
+   * An untitled chat from before bots' first line, to name it when it is restored (COD-201): its first message's
+   * text, after the stamp. Undefined for anything else, and for a chat with a title or no message.
+   */
+  async #earlierChatFirstLine(conversation: Conversation): Promise<string | undefined> {
+    const meta = await this.#harness.snapshot(
+      ConversationMeta,
+      conversation.id,
+      BACKGROUND_CONTEXT,
+    );
+    if (meta === undefined || meta.kind !== undefined || meta.title !== undefined) return undefined;
+    const page = await conversation.entries(
+      { order: "ascending" },
+      20,
+      undefined,
+      BACKGROUND_CONTEXT,
+    );
+    for (const entry of page.items) {
+      const message = entry.model?.[0];
+      if (message?.role !== "user") continue;
+      const text =
+        typeof message.content === "string"
+          ? message.content
+          : message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
+      return firstLineOf(text);
+    }
+    return undefined;
+  }
+
   /** Moves every socket watching an archived conversation to where the web door is bound now (MiPi). */
   async #leaveArchived(
     archived: readonly ConversationId[],
@@ -1738,8 +1782,13 @@ export class MipiAgent extends DurableObject<Env> {
   ): Promise<void> {
     const gone = new Set<number>(archived);
     const watching = this.#connections().filter((socket) => {
-      const id = connectionState(socket)?.conversationId;
-      return id !== undefined && gone.has(id);
+      const state = connectionState(socket);
+      // A read-only view was opened on an archived conversation on purpose: it stays.
+      return (
+        state?.conversationId !== undefined &&
+        state.readOnly !== true &&
+        gone.has(state.conversationId)
+      );
     });
     if (watching.length === 0) return;
     const bound = await harness.commit(
@@ -1754,8 +1803,14 @@ export class MipiAgent extends DurableObject<Env> {
     );
     for (const socket of watching) {
       if (this.#harness !== harness || this.#state.kind !== "open") return;
-      const id = connectionState(socket)?.conversationId;
-      if (id !== undefined && gone.has(id)) await this.#watchConversation(socket, bound);
+      const state = connectionState(socket);
+      if (
+        state?.conversationId !== undefined &&
+        state.readOnly !== true &&
+        gone.has(state.conversationId)
+      ) {
+        await this.#watchConversation(socket, bound);
+      }
     }
   }
 
@@ -1817,6 +1872,7 @@ export class MipiAgent extends DurableObject<Env> {
         username: state.username,
         conversationId,
         ...(typing ? { typing: true } : {}),
+        ...(state.readOnly === true ? { readOnly: true } : {}),
       });
     }
     if (changed) this.#broadcastTyping(conversationId as ConversationId);

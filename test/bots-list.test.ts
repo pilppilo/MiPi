@@ -224,5 +224,9 @@ describe("Settings → Archived (COD-201)", () => {
         conversations,
       ),
     ).toBe(undefined);
+    // A cobot whose bot isn't there: the agent would refuse it too.
+    expect(restoreHintFor({ id: 30, kind: "cobot", bot: 99, archivedAt: 1 }, conversations)).toBe(
+      "Its bot is missing.",
+    );
   });
 });

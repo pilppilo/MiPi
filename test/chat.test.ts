@@ -812,6 +812,143 @@ describe("chat application", () => {
     socket.close(1000, "test complete");
   });
 
+  it("keeps a read-only view through other changes until its bot is restored, then archive moves it (COD-201)", async () => {
+    const sessionId = "read-only-after-archive";
+    const main = await configureOfflineModel(sessionId);
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "read-only-a"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Frame = {
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      conversationId?: number;
+      error?: { message: string };
+      session?: { conversations: ConversationSummary[] };
+    };
+    const run = async (command: Record<string, unknown>): Promise<Frame> => {
+      const requestId = crypto.randomUUID();
+      socket.send(JSON.stringify({ ...command, requestId }));
+      return messages.nextMatching<Frame>(
+        (message) => message.type === "command.result" && message.requestId === requestId,
+      );
+    };
+    const garden = (
+      await run({
+        type: "bot.create",
+        name: "Garden",
+        purpose: "Look after the garden.",
+        profile: "default",
+      })
+    ).conversationId!;
+    const cobot = (await run({ type: "cobot.create", bot: garden, name: "Seedlings" }))
+      .conversationId!;
+    // Archived from the web, while this tab is on the cobot: it moves to MiPi.
+    socket.send(
+      JSON.stringify({ type: "bot.archive", requestId: "archive", conversationId: garden }),
+    );
+    await messages.nextMatching<Frame>(
+      (message) => message.type === "conversation.view" && message.conversationId === main,
+    );
+    await messages.nextMatching<Frame>(({ requestId }) => requestId === "archive");
+    // Opened again on purpose, now read-only.
+    expect(await run({ type: "conversation.open", conversationId: cobot })).toMatchObject({
+      ok: true,
+    });
+
+    // Another tab makes a cobot under MiPi: the list refreshes twice, and this tab stays.
+    const other = await openSession(sessionSocketUrl(sessionId, "Alice", "read-only-b"));
+    const otherSocket = other.webSocket!;
+    const otherMessages = jsonMessages(otherSocket);
+    otherSocket.accept();
+    await otherMessages.skipConnectFrames();
+    otherSocket.send(
+      JSON.stringify({ type: "cobot.create", requestId: "unrelated", bot: main, name: "Errands" }),
+    );
+    expect(
+      await otherMessages.nextMatching<Frame>(({ requestId }) => requestId === "unrelated"),
+    ).toMatchObject({ ok: true });
+    otherSocket.close(1000, "test complete");
+    const moved: number[] = [];
+    for (let snapshots = 0; snapshots < 2;) {
+      const message = await messages.next<Frame>();
+      if (message.type === "conversation.view") moved.push(message.conversationId!);
+      if (
+        message.type === "session.snapshot" &&
+        message.session?.conversations.some(({ name }) => name === "Errands") === true
+      ) {
+        snapshots += 1;
+      }
+    }
+    expect(moved).toEqual([]);
+
+    // Restored: no longer read-only, so archiving again moves this tab to MiPi.
+    expect(await run({ type: "bot.restore", conversationId: garden })).toMatchObject({ ok: true });
+    socket.send(
+      JSON.stringify({ type: "bot.archive", requestId: "again", conversationId: garden }),
+    );
+    await messages.nextMatching<Frame>(
+      (message) => message.type === "conversation.view" && message.conversationId === main,
+    );
+    expect(
+      await messages.nextMatching<Frame>(({ requestId }) => requestId === "again"),
+    ).toMatchObject({ ok: true });
+    socket.close(1000, "test complete");
+  });
+
+  it("names an untitled chat from before bots by its first line when restored (COD-201)", async () => {
+    const sessionId = "archived-first-line";
+    const main = await configureOfflineModel(sessionId);
+    await seedUserEntry(
+      sessionId,
+      "[jerome · Mon, Nov 23, 2026, 15:42 CST]\n\nBook the dentist\nand the vet",
+    );
+    const older = await configureOfflineModel(sessionId, "root");
+    await seedSession(sessionId, createHarnessOptions(), (harness) =>
+      harness.commit(async (tx) => {
+        const meta = await tx.doc(ConversationMeta, older as ConversationId);
+        delete meta.title;
+        meta.archivedAt = 1;
+        const bots = await tx.doc(Bots);
+        bots.archived = { ...bots.archived, [String(older)]: 1 };
+      }, BACKGROUND_CONTEXT),
+    );
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "first-line"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Frame = {
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      session?: { conversations: ConversationSummary[] };
+    };
+    socket.send(
+      JSON.stringify({ type: "bot.restore", requestId: "restore", conversationId: older }),
+    );
+    const restored = await messages.nextMatching<Frame>(
+      (message) =>
+        message.type === "session.snapshot" &&
+        message.session?.conversations.some(
+          ({ id, archivedAt }) => id === older && archivedAt === undefined,
+        ) === true,
+    );
+    expect(restored.session!.conversations.find(({ id }) => id === older)).toMatchObject({
+      kind: "cobot",
+      bot: main,
+      name: "Book the dentist",
+    });
+    expect(
+      await messages.nextMatching<Frame>(({ requestId }) => requestId === "restore"),
+    ).toMatchObject({
+      ok: true,
+    });
+    socket.close(1000, "test complete");
+  });
+
   it("opens a chat from before bots read-only, keeps it open, and restores it under MiPi (COD-201)", async () => {
     const sessionId = "archived-read-only";
     const main = await configureOfflineModel(sessionId);

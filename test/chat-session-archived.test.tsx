@@ -10,19 +10,30 @@ const conversations: ConversationSummary[] = [
   { id: 4, kind: "main", name: "MiPi", profile: "main" },
   { id: 20, kind: "bot", name: "Garden", purpose: "Look after it.", archivedAt: 30 },
   { id: 21, kind: "cobot", bot: 20, name: "Seedlings", archivedAt: 30 },
-  { id: 1, title: "Plan the trip", archivedAt: 10 },
+  { id: 1, title: "Plan the trip", profile: "pidu", archivedAt: 10 },
 ];
+
+/** Which conversation the mocked session has open. */
+const open = vi.hoisted(() => ({ id: 21 }));
 
 vi.mock("../src/client/usePiSession.ts", () => ({
   usePiSession: (): Pick<
     PiSession,
-    "status" | "conversations" | "activeConversationId" | "activeConversation"
+    "status" | "conversations" | "activeConversationId" | "activeConversation" | "options"
   > => ({
     status: "connected",
     conversations,
-    activeConversationId: 21,
+    activeConversationId: open.id,
+    options: {
+      models: [],
+      profiles: [
+        { id: "default", name: "" },
+        { id: "empty", name: "" },
+      ],
+      defaultModel: "x",
+    },
     activeConversation: {
-      id: 21,
+      id: open.id,
       entries: [],
       earlier: false,
       gaps: [],
@@ -40,7 +51,7 @@ it("opens an archived cobot read-only, with Restore off until its bot is back (C
   try {
     const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
     expect(html).toMatch(/<button[^>]*aria-controls="settings-panel"[^>]*>.*Settings<\/button>/);
-    expect(html).toContain("Archived: read-only.");
+    expect(html).toContain("<p>Archived: read-only.</p>");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="Restore Garden first.">Restore</);
     expect(html).toMatch(
       /<textarea[^>]*placeholder="Archived: restore it to send a message."[^>]*disabled=""/,
@@ -75,4 +86,19 @@ it("lists archived bots, cobots and earlier chats in Settings, each to open or r
   );
   expect(html).not.toContain(">Delete<");
   expect(html).not.toContain(">MiPi<");
+});
+
+it("shows an archived chat's own profile, even one no picker offers (COD-201)", () => {
+  vi.stubGlobal("window", { location: { search: "" } });
+  open.id = 1;
+  try {
+    const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
+    expect(html).toContain("Archived: read-only. Restore it to talk to it again.");
+    expect(html).toMatch(
+      /<select id="profile-picker"[^>]*disabled=""[^>]*>.*<option value="pidu" selected="">pidu<\/option>/,
+    );
+  } finally {
+    open.id = 21;
+    vi.unstubAllGlobals();
+  }
 });

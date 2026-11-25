@@ -266,7 +266,7 @@ export function restoreHintFor(
 ): string | undefined {
   if (summary?.archivedAt === undefined || summary.kind !== "cobot") return undefined;
   const parent = conversations.find(({ id }) => id === summary.bot);
-  return parent?.archivedAt === undefined
-    ? undefined
-    : `Restore ${parent.name ?? "its bot"} first.`;
+  // The agent refuses a cobot with no bot to come back under, too.
+  if (parent === undefined) return "Its bot is missing.";
+  return parent.archivedAt === undefined ? undefined : `Restore ${parent.name ?? "its bot"} first.`;
 }
