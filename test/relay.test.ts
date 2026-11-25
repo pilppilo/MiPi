@@ -11,11 +11,18 @@ import {
   fauxProvider,
   fauxText,
 } from "@earendil-works/pi-ai/providers/faux";
-import { Harness } from "@earendil-works/pi-durable";
+import { type ConversationId, Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { ensureBots } from "../src/agent/bots.ts";
-import { Bots, ChannelBindings, ConversationMeta, profileOf } from "../src/agent/conversations.ts";
+import { archiveBot } from "../src/agent/archive.ts";
+import { createBot, ensureBots } from "../src/agent/bots.ts";
+import {
+  bindChannel,
+  Bots,
+  ChannelBindings,
+  ConversationMeta,
+  profileOf,
+} from "../src/agent/conversations.ts";
 import { bindLimitRecorder } from "../src/agent/limits.ts";
 import { ProviderUsageCache } from "../src/agent/providers.ts";
 import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
@@ -61,7 +68,12 @@ interface Relay {
 
 async function openRelay(
   responses: readonly FauxResponseStep[],
-  options: { readonly waitMs?: number; readonly planLimits?: boolean } = {},
+  options: {
+    readonly waitMs?: number;
+    readonly planLimits?: boolean;
+    /** Runs where the relay arms the alarm: between reading the binding and admitting. */
+    readonly armAlarm?: (harness: Harness) => Promise<void>;
+  } = {},
 ): Promise<Relay> {
   const requests: Message[][] = [];
   const faux = fauxProvider();
@@ -107,7 +119,7 @@ async function openRelay(
     timeZone: "America/Chicago",
     profile: "default",
     profiles: PROFILES,
-    armAlarm: async () => {},
+    armAlarm: () => options.armAlarm?.(harness) ?? Promise.resolve(),
     report: (message, error) => {
       throw new Error(`${message}: ${String(error)}`);
     },
@@ -195,6 +207,53 @@ describe("relay keys", () => {
 });
 
 describe("relay admission", () => {
+  it("goes to MiPi when its bot is archived between reading the binding and admitting (COD-198)", async () => {
+    let bot: ConversationId | undefined;
+    let archived = false;
+    const { harness, relay, close } = await openRelay(answers("MiPi here."), {
+      armAlarm: async (open) => {
+        if (archived || bot === undefined) return;
+        archived = true;
+        await open.commit((tx) => archiveBot(tx, bot!, 0), ctx);
+      },
+    });
+    try {
+      bot = await harness.commit(async (tx) => {
+        const id = await createBot(
+          tx,
+          {
+            kind: "bot",
+            name: "Inbox",
+            purpose: "Sort mail.",
+            profile: "default",
+            createdBy: "owner",
+          },
+          PROFILES,
+        );
+        await bindChannel(tx, "relay:pidu", id);
+        return id;
+      }, ctx);
+      expect(await relay.admit("archived-race", "Hello")).toEqual({
+        kind: "done",
+        answer: "MiPi here.",
+      });
+      const { mainId, released } = (await harness.snapshot(Bots, ctx))!;
+      expect(released).toEqual({ "relay:pidu": bot });
+      const inBot = await (await harness.conversation(bot, ctx))!.entries(
+        { order: "ascending" },
+        10,
+        undefined,
+        ctx,
+      );
+      expect(inBot.items).toEqual([]);
+      expect((await harness.snapshot(ChannelBindings, "relay:pidu", ctx))?.conversationId).toBe(
+        mainId,
+      );
+    } finally {
+      await close();
+    }
+  });
+
   it("answers as MiPi, stamped as PiDu and fenced", async () => {
     const agent = await openRelay(answers("Hi PiDu"));
     try {

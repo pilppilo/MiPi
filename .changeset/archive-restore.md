@@ -9,7 +9,9 @@ COD-198: archive and restore a bot (settings slice 1, agent side).
 - Protocol: `bot.archive { conversationId }` and `bot.restore { conversationId }`. MiPi can't be archived or restored, and neither can a chat from before bots yet (COD-201).
 - Archiving a bot archives its cobots in the same commit, then aborts what they were doing (`Conversation.abort()`: queued inputs withdrawn, the run stopped). From that commit on, an archived bot is out of the bots list, out of `search_history` and the memory pass, and takes no message (`prompt.submit` refuses with a clear reason). A web tab open on it moves to MiPi.
 - A door bound to an archived bot (the web, a Telegram chat, the relay) reaches MiPi instead, and the key is remembered. Restoring binds it back, unless it was bound somewhere else meanwhile.
-- An archived bot's schedules hold: a repeat skips its times (`skippedArchived`), and a one-time reminder parks itself and ends. Restoring sends each parked reminder once, marked late (`held:<reminderId>`), where it would have answered; a second restore sends nothing twice. The admin heartbeat counts an archived bot's schedules as `archivedSchedules`, never active or overdue.
+- An archived bot's schedules hold: a repeat skips its times (`skippedArchived`), and a one-time reminder parks itself and ends. Restoring sends each parked reminder once, marked late (`held:<reminderId>`), where it would have answered; a second restore sends nothing twice. While MiPi is paused (`MIPI_PAUSED`) they stay parked, and the next start without the pause sends them; one whose bot is archived again first waits for the next restore. The daily caps don't hold them back: the owner asked for the restore, and each still counts as a run. The admin heartbeat counts an archived bot's schedules as `archivedSchedules`, never active or overdue.
+- A message arriving as its bot is archived goes to MiPi: the relay and Telegram look again in the commit that admits it.
+- An archived bot keeps its name, so restoring it never collides. A new bot asking for it is told the name belongs to an archived bot.
 
 **Changed**
 

@@ -911,6 +911,14 @@ export class MipiAgent extends DurableObject<Env> {
       void telegram
         .start()
         .catch((error) => reportError("Starting the Telegram door failed", error));
+      // Held reminders a restore left (cut short, or paused then): sent now, if MiPi isn't paused (COD-198).
+      void replayHeld(harness, undefined, Date.now(), BACKGROUND_CONTEXT, () =>
+        this.#alarm.schedule({ ...harness.wake(), active: true }),
+      )
+        .then((sent) => {
+          if (sent > 0) console.log(JSON.stringify({ message: "Sent held reminders", sent }));
+        })
+        .catch((error) => reportError("Sending held reminders failed", error));
     } catch (error) {
       // A failed open leaves no source behind for the next one to register again.
       this.#wakeSources.close();
@@ -1329,9 +1337,10 @@ export class MipiAgent extends DurableObject<Env> {
           (tx) => restoreBot(tx, conversation.id),
           BACKGROUND_CONTEXT,
         );
-        // Arm before admitting work: an early alarm is harmless, a missing one strands the turn.
-        await this.#alarm.schedule({ ...this.#harness.wake(), active: true });
-        await replayHeld(this.#harness, conversations, Date.now(), BACKGROUND_CONTEXT);
+        // Held reminders go out marked late; while paused they stay held for the next start (`replayHeld`).
+        await replayHeld(this.#harness, conversations, Date.now(), BACKGROUND_CONTEXT, () =>
+          this.#alarm.schedule({ ...this.#harness.wake(), active: true }),
+        );
         await this.#broadcastSessionSnapshot();
         this.#send(socket, {
           type: "command.result",

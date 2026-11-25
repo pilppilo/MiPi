@@ -18,7 +18,12 @@ import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/stora
 import { describe, expect, it } from "vitest";
 import { archiveBot } from "../src/agent/archive.ts";
 import { createBot, renameBot } from "../src/agent/bots.ts";
-import { Bots, ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
+import {
+  bindChannel,
+  Bots,
+  ChannelBindings,
+  ConversationMeta,
+} from "../src/agent/conversations.ts";
 import { stampInput } from "../src/agent/stamp.ts";
 import { webRequest } from "../src/doors/web/index.ts";
 import { composeMipi } from "../src/agent/composition.ts";
@@ -84,6 +89,8 @@ interface AgentOptions {
   readonly send?: SendBehaviour;
   readonly modelIds?: () => Promise<string[]>;
   readonly onSubmitted?: (conversationId: number, text: string) => Promise<void>;
+  /** Runs where the door arms the alarm: between reading the binding and admitting. */
+  readonly armAlarm?: (harness: Harness) => Promise<void>;
 }
 
 type Storage = Awaited<ReturnType<typeof openDurableObjectSqliteStorage>>;
@@ -174,7 +181,7 @@ async function openAgent(
       return result;
     },
     delivery: composition.connectors.delivery,
-    armAlarm: async () => {},
+    armAlarm: () => options.armAlarm?.(harness) ?? Promise.resolve(),
     ...(options.onSubmitted === undefined ? {} : { onSubmitted: options.onSubmitted }),
     onWakeChange: () => {},
     report: (message, error) => {
@@ -566,6 +573,33 @@ describe("Telegram /bot (COD-197)", () => {
         await agent.settle();
         expect(await userTexts(agent.harness, main)).toEqual(["hello"]);
         expect(agent.sent.at(-1)?.text).toBe("MiPi here");
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("sends a message to MiPi when its bot is archived between reading the binding and admitting", () =>
+    inObject(async (storage) => {
+      let bot: number | undefined;
+      let archived = false;
+      const agent = await openAgent(storage, {
+        responses: answers("MiPi here"),
+        armAlarm: async (harness) => {
+          if (archived || bot === undefined) return;
+          archived = true;
+          await harness.commit((tx) => archiveBot(tx, bot as never, Date.now()), ctx);
+        },
+      });
+      try {
+        const main = await mainId(agent.harness);
+        bot = await makeBot(agent.harness, "Groceries", "Keep the shopping list.");
+        await agent.harness.commit((tx) => bindChannel(tx, `tg:${CHAT}`, bot as never), ctx);
+        await agent.channel.admit(text(1, "milk"));
+        await agent.settle();
+        expect(archived).toBe(true);
+        expect(await userTexts(agent.harness, bot)).toEqual([]);
+        expect(await userTexts(agent.harness, main)).toEqual(["milk"]);
+        expect(agent.sent.map(({ text: sent }) => sent)).toEqual(["MiPi here"]);
       } finally {
         await agent.close();
       }

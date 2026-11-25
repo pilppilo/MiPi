@@ -27,6 +27,7 @@ import {
   type HeldReminder,
 } from "./conversations.ts";
 import type { Delivery, DeliveryDestination } from "./delivery.ts";
+import { isPaused } from "./gates.ts";
 import { expectProactive, recentProactiveSends } from "./proactive.ts";
 import { AgentSettings } from "./settings.ts";
 import { DEFAULT_TIME_ZONE, localTime } from "./stamp.ts";
@@ -201,26 +202,37 @@ export async function restoreBot(
 }
 
 /**
- * Sends the reminders held for `conversations`, marked late, each in a commit of its own (an admit must be its
- * commit's first table write), and drops each from the hold in the commit that sends it. A reminder sent before (its
- * `held:` request id admitted) is only dropped. Returns how many it sent.
+ * Sends the reminders held for `conversations` (every live conversation's, when undefined: what a start finds left),
+ * marked late, each in a commit of its own (an admit must be its commit's first table write), and drops each from the
+ * hold in the commit that sends it. A reminder sent before (its `held:` request id admitted) is only dropped.
+ *
+ * Nothing goes while MiPi is paused (`MIPI_PAUSED` holds every model call): the reminders stay held, and the next start
+ * without the pause sends them. Nor into a conversation archived again meanwhile: it stays held for the next restore.
+ * Returns how many it sent.
  */
 export async function replayHeld(
   harness: Harness,
-  conversations: readonly ConversationId[],
+  conversations: readonly ConversationId[] | undefined,
   now: number,
   context: Context,
+  /** Arms the alarm before the first admit: an early alarm is harmless, a missing one strands the turn. */
+  arm: () => Promise<void> = async () => {},
 ): Promise<number> {
-  const wanted = new Set<number>(conversations);
-  const held = await harness.commit(
-    async (tx) =>
-      ((await tx.doc(Bots)).held ?? [])
-        .filter(({ conversationId }) => wanted.has(conversationId))
+  const wanted = conversations === undefined ? undefined : new Set<number>(conversations);
+  const held = await harness.commit(async (tx) => {
+    if (await isPaused(tx)) return [];
+    const bots = await tx.doc(Bots);
+    return (
+      (bots.held ?? [])
+        .filter(({ conversationId }) =>
+          wanted === undefined ? !archivedIn(bots, conversationId) : wanted.has(conversationId),
+        )
         // Copies, destination included: the drafts end with this commit.
-        .map((entry) => ({ ...entry, destination: { ...entry.destination } })),
-    context,
-  );
+        .map((entry) => ({ ...entry, destination: { ...entry.destination } }))
+    );
+  }, context);
   let sent = 0;
+  if (held.length > 0) await arm();
   for (const reminder of held) {
     const conversation = await harness.conversation(
       reminder.conversationId as ConversationId,
@@ -236,6 +248,8 @@ export async function replayHeld(
       const existing = await tx.submissionByRequest(conversation.id, requestId);
       const bots = await tx.doc(Bots);
       if (bots.held?.some(({ id }) => id === reminder.id) !== true) return false;
+      // Archived again, or paused, since the list was read: it stays held.
+      if (archivedIn(bots, conversation.id) || (await isPaused(tx))) return false;
       let admittedNow = false;
       if (existing === undefined) {
         const zone = reminder.zone ?? (await tx.doc(AgentSettings)).timeZone ?? DEFAULT_TIME_ZONE;

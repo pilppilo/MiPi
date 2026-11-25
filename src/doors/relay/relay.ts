@@ -16,6 +16,7 @@ import {
   type Tx,
 } from "../../agent/pi/durable.ts";
 import { boundConversation, ChannelBindings } from "../../agent/conversations.ts";
+import { isArchived } from "../../agent/archive.ts";
 import { isPaused } from "../../agent/gates.ts";
 import { settledLimit } from "../../agent/limits.ts";
 import type { Providers } from "../../agent/providers.ts";
@@ -195,7 +196,9 @@ export interface RelayRuntimeOptions {
 type Admission =
   | { readonly kind: "submitted"; readonly submissionId: SubmissionId }
   | { readonly kind: "existing"; readonly submissionId: SubmissionId }
-  | { readonly kind: "refused"; readonly result: RelayResult };
+  | { readonly kind: "refused"; readonly result: RelayResult }
+  // Its bot was archived after the binding was read (COD-198): read the binding again, which now falls back to MiPi.
+  | { readonly kind: "archived" };
 
 export class RelayRuntime {
   readonly #options: RelayRuntimeOptions;
@@ -223,6 +226,10 @@ export class RelayRuntime {
     if (new TextEncoder().encode(text).byteLength > RELAY_MAX_TEXT_BYTES) {
       return { kind: "too-large", limitBytes: RELAY_MAX_TEXT_BYTES };
     }
+    return this.#admitValid(key, text, false);
+  }
+
+  async #admitValid(key: string, text: string, rebound: boolean): Promise<RelayResult> {
     const { harness } = this.#options;
     // Creating the conversation writes tables, and `admit(tx, …)` must come first in its commit: so on its own.
     const conversationId = await harness.commit(
@@ -249,6 +256,8 @@ export class RelayRuntime {
       // Admitted before and its receipt pruned: the stored input is the answer, never a conflict.
       const existing = await tx.submissionByRequest(conversation.id, requestId);
       if (existing !== undefined) return { kind: "existing", submissionId: existing.id };
+      // An archived bot never runs: nothing goes in, and the caller reads the binding again.
+      if (await isArchived(tx, conversation.id)) return { kind: "archived" };
       // Paused (`MIPI_PAUSED`, M9): nothing new is admitted, so nothing waits to run later. A key admitted before still
       // gets its answer above.
       if (await isPaused(tx)) {
@@ -289,6 +298,10 @@ export class RelayRuntime {
         return this.#wait(key, admission.submissionId);
       case "existing":
         return this.#wait(key, admission.submissionId);
+      case "archived":
+        // Once: the binding read again reaches MiPi, which is never archived.
+        if (rebound) throw new Error(`Relay conversation ${conversation.id} is archived`);
+        return this.#admitValid(key, text, true);
       default: {
         const _: never = admission;
         throw new Error("Unknown relay admission");

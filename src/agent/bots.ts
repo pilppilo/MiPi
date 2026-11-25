@@ -15,7 +15,7 @@ import {
   type Harness,
   type Tx,
 } from "./pi/durable.ts";
-import { backfillArchived } from "./archive.ts";
+import { archivedIn, backfillArchived } from "./archive.ts";
 import { Bots, type BotsState, ConversationMeta, setProfile } from "./conversations.ts";
 import { MAIN_PROFILE, type ProfileName, type Profiles } from "./profiles.ts";
 
@@ -39,7 +39,12 @@ export function botNameRefusal(
   if ([...trimmed].length > BOT_NAME_MAX)
     return `A bot's name is at most ${BOT_NAME_MAX} characters.`;
   const taken = bots.names?.[botNameKey(trimmed)];
-  if (taken !== undefined && taken !== self) return `There is already a bot named ${trimmed}.`;
+  if (taken !== undefined && taken !== self) {
+    // An archived bot keeps its name (COD-198), so restoring it never collides: say why, since it isn't listed.
+    return archivedIn(bots, taken)
+      ? `There is already an archived bot named ${trimmed}. Restore it or pick another name.`
+      : `There is already a bot named ${trimmed}.`;
+  }
   return undefined;
 }
 

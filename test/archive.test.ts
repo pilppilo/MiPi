@@ -13,7 +13,7 @@ import {
   restoreBot,
   routeSchedule,
 } from "../src/agent/archive.ts";
-import { createBot, liveBots } from "../src/agent/bots.ts";
+import { botNameRefusal, createBot, liveBots } from "../src/agent/bots.ts";
 import {
   bindChannel,
   Bots,
@@ -21,6 +21,7 @@ import {
   ConversationMeta,
 } from "../src/agent/conversations.ts";
 import { readHeartbeat } from "../src/agent/heartbeat.ts";
+import { Spend } from "../src/agent/spend.ts";
 import { listVisible, OWNER_SCOPE } from "../src/agent/visibility.ts";
 import {
   type ReminderInput,
@@ -216,6 +217,72 @@ describe("archive and restore (COD-198)", () => {
         await agent.advance(30 * 60_000);
         expect(agent.sent.at(-1)).toEqual({ chatId: CHAT, text: "Soil is fine." });
         expect((await userTexts(harness, cobot)).at(-1)).toMatch(/Check the soil/);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("keeps held reminders while paused or archived again, and a later start sends them", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage, said("Watering now, late."));
+      try {
+        const { harness } = agent;
+        const { bot } = await gardenBot(harness);
+        await remind(harness, bot, {
+          id: "reminder:once",
+          instruction: "Water",
+          first: clock.now + 60_000,
+        });
+        await archive(harness, bot);
+        await agent.advance(60_000);
+        const held = async () => (await harness.snapshot(Bots, ctx))?.held?.map(({ id }) => id);
+        expect(await held()).toEqual(["reminder:once"]);
+
+        // Paused (`MIPI_PAUSED`): restore brings the bot back, and its reminder waits.
+        await harness.commit(async (tx) => {
+          (await tx.doc(Spend)).paused = true;
+        }, ctx);
+        expect(await restore(harness, bot)).toBe(0);
+        expect(await held()).toEqual(["reminder:once"]);
+        expect(await harness.commit((tx) => isArchived(tx, bot), ctx)).toBe(false);
+
+        // Archived again before it went: a later start leaves it for the next restore.
+        await harness.commit(async (tx) => {
+          (await tx.doc(Spend)).paused = false;
+        }, ctx);
+        await archive(harness, bot);
+        expect(await replayHeld(harness, [bot], clock.now, ctx)).toBe(0);
+        expect(await replayHeld(harness, undefined, clock.now, ctx)).toBe(0);
+        expect(await held()).toEqual(["reminder:once"]);
+
+        // Restored while paused, then a start without the pause sends it, once.
+        await harness.commit(async (tx) => {
+          (await tx.doc(Spend)).paused = true;
+        }, ctx);
+        await restore(harness, bot);
+        await harness.commit(async (tx) => {
+          (await tx.doc(Spend)).paused = false;
+        }, ctx);
+        expect(await replayHeld(harness, undefined, clock.now, ctx)).toBe(1);
+        await agent.settle();
+        expect(agent.sent).toEqual([{ chatId: CHAT, text: "Watering now, late." }]);
+        expect(await held()).toEqual([]);
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("says an archived bot keeps its name", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage);
+      try {
+        const { harness } = agent;
+        const { bot } = await gardenBot(harness);
+        await archive(harness, bot);
+        const bots = (await harness.snapshot(Bots, ctx))!;
+        expect(botNameRefusal(bots, "garden")).toBe(
+          "There is already an archived bot named garden. Restore it or pick another name.",
+        );
       } finally {
         await agent.close();
       }
