@@ -13,7 +13,7 @@ import {
   startingProfile,
   syncProfileTools,
 } from "../src/agent/conversations.ts";
-import { createHarnessOptions } from "../src/agent/composition.ts";
+import { composeMipi, createHarnessOptions } from "../src/agent/composition.ts";
 import { PROFILES } from "./mipi.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
 import { PROFILE_NAMES, type ProfileName } from "../src/agent/profiles.ts";
@@ -59,6 +59,17 @@ async function openRecording(profile?: ProfileName) {
 }
 
 describe("tool profiles", () => {
+  it("keeps tools marked writesOutside out of purpose-bot profiles until approvals exist", () => {
+    const { profiles } = composeMipi();
+    for (const name of PROFILE_NAMES.filter((name) => name !== "main")) {
+      expect(
+        profiles
+          .toolsFor(name)
+          .filter((tool) => "writesOutside" in tool && tool.writesOutside === true),
+      ).toEqual([]);
+    }
+  });
+
   it.each(PROFILE_NAMES)("offers a %s conversation exactly its profile's tools", async (name) => {
     const { harness, requests } = await openRecording();
     try {

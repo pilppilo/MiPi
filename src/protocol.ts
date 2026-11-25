@@ -279,6 +279,13 @@ export type ClientCommand =
       readonly name: string;
     }
   | {
+      /** Binds an owner-configurable door to a live bot. */
+      readonly type: "bot.bind";
+      readonly requestId: string;
+      readonly conversationId: number;
+      readonly channel: string;
+    }
+  | {
       /** Archives a bot and its cobots (COD-198): it stops working and keeps all its data. Never MiPi. */
       readonly type: "bot.archive";
       readonly requestId: string;
@@ -565,6 +572,7 @@ const commandTypes = new Set<ClientCommandType>([
   "conversation.open",
   "conversation.entries",
   "bot.create",
+  "bot.bind",
   "bot.rename",
   "bot.archive",
   "bot.restore",
@@ -770,6 +778,13 @@ export function parseClientCommand(message: string): ClientCommand {
         requestId,
         conversationId: requireId(value.conversationId, "conversationId"),
         name: botText(value.name, "name", MAX_BOT_NAME_CHARACTERS),
+      };
+    case "bot.bind":
+      return {
+        type: value.type,
+        requestId,
+        conversationId: requireId(value.conversationId, "conversationId"),
+        channel: botText(value.channel, "channel", 128),
       };
     case "bot.archive":
     case "bot.restore":

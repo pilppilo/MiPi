@@ -6,6 +6,8 @@
 /** What a relay `Idempotency-Key` may be. Checked, never cleaned: cleaning could make two keys one. */
 export const RELAY_KEY_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
+export const RELAY_BINDING = "relay:pidu";
+
 export const isRelayKey = (key: string): boolean => RELAY_KEY_PATTERN.test(key);
 
 /** A relay message (M7), keyed by the client's `Idempotency-Key`. */

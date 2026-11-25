@@ -25,6 +25,7 @@ export interface OriginRegistration {
   readonly prefix: string;
   readonly source: string;
   readonly automated: boolean;
+  readonly authority?: "owner" | "external";
   /**
    * Where a reply to this input goes, when that isn't in the id (Telegram's chat is in the door's state). Undefined:
    * nothing to say for this input.
@@ -40,6 +41,7 @@ export type RunInput = {
   readonly submissionId: number;
   readonly requestId?: string;
   readonly origin: InputOrigin;
+  readonly authority?: OriginRegistration["authority"];
 };
 
 const PREFIX = /^[a-z]+$/;
@@ -92,10 +94,12 @@ export class Origins {
     const inputs: RunInput[] = [];
     for (const id of placed) {
       const requestId = (await tx.submission(id as SubmissionId))?.requestId;
+      const authority = this.#registration(requestId)?.authority;
       inputs.push({
         submissionId: id,
         ...(requestId === undefined ? {} : { requestId }),
         origin: this.originOf(requestId),
+        ...(authority === undefined ? {} : { authority }),
       });
     }
     return inputs;

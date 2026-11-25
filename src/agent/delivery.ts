@@ -26,6 +26,8 @@ export type DeliveryMessage = {
   readonly text: string;
   /** A proactive answer's source (a reminder's id): once confirmed, it joins the recent sends. Never on notices. */
   readonly proactive?: { readonly sourceId: string };
+  /** Highest hop of the turn that answered, for bot follow-ups. */
+  readonly botHop?: number;
 };
 
 type AdapterBase = {

@@ -11,6 +11,8 @@ import type { Extension, RegistrySnapshot, Tx } from "./pi/durable.ts";
 import { Delivery, type DeliveryAdapter, type DeliveryDestination } from "./delivery.ts";
 import { type OriginRegistration, Origins } from "./origin.ts";
 import { CORE_EXTENSION_NAME } from "./untrusted.ts";
+import { BOT_ORIGIN } from "./bot-hops.ts";
+import { botReplyDelivery } from "./bot-messages.ts";
 
 /** One input a door admitted and answers: a "direct" expectation, delivered to `destination` when it settles. */
 export type PendingInput = {
@@ -35,6 +37,7 @@ export interface PendingSource {
 /** What one door registers with core. Its runtime (admitting, sending) stays with the composition root. */
 export interface DoorRegistration {
   readonly name: string;
+  readonly rebindableKeys?: readonly string[];
   readonly origins?: readonly OriginRegistration[];
   readonly delivery?: DeliveryAdapter;
   readonly pending?: PendingSource;
@@ -45,6 +48,7 @@ export interface DoorRegistration {
 /** The connectors of one agent. */
 export interface Connectors {
   readonly origins: Origins;
+  readonly rebindableKeys: ReadonlySet<string>;
   readonly delivery: Delivery;
   readonly pending: readonly PendingSource[];
   /** Every document kind a pending source watches. */
@@ -67,9 +71,17 @@ export function createConnectors(
   if (transcripts.length > 1) throw new Error("More than one door registers a transcript");
   const pending = doors.flatMap((door) => (door.pending === undefined ? [] : [door.pending]));
   return {
-    origins: new Origins([...doors.flatMap((door) => door.origins ?? []), ...extensionOrigins]),
+    origins: new Origins([
+      ...doors.flatMap((door) => door.origins ?? []),
+      ...extensionOrigins,
+      BOT_ORIGIN,
+    ]),
+    rebindableKeys: new Set(doors.flatMap(({ rebindableKeys }) => rebindableKeys ?? [])),
     delivery: new Delivery(
-      doors.flatMap((door) => (door.delivery === undefined ? [] : [door.delivery])),
+      [
+        ...doors.flatMap((door) => (door.delivery === undefined ? [] : [door.delivery])),
+        botReplyDelivery,
+      ],
       transcripts[0],
     ),
     pending,

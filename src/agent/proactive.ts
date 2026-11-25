@@ -45,6 +45,7 @@ import {
   TRANSIENT_REMINDER_COOLDOWN_MS,
 } from "./limits.ts";
 import type { Providers } from "./providers.ts";
+import { BOT_REPLY_KIND, BOT_TRANSCRIPT_KIND, BotHops, maxBotHop } from "./bot-hops.ts";
 
 export { afterNextChicagoMidnight, CAP_ZONE, chicagoDay } from "../lib/cap-day.ts";
 
@@ -494,6 +495,15 @@ export async function reconcileAnswers(
   const pushable = (destination: DeliveryDestination) =>
     delivery.canPush(destination) ? destination : undefined;
   const stopNotice = async (input: ProactiveState["pending"][number], reason: StopReason) => {
+    if (input.destination.kind === BOT_REPLY_KIND) {
+      if (reason !== "paused") {
+        await send(input.destination, {
+          id: `bot-stop:${input.submissionId}`,
+          text: `The bot's work stopped (${reason}).`,
+        });
+      }
+      return;
+    }
     const prefer = pushable(input.destination);
     switch (reason) {
       case "daily-cap":
@@ -576,6 +586,17 @@ export async function reconcileAnswers(
       if (destination === undefined) continue;
       const identity = delivery.identity(destination);
       const id = `answer:${answer}:${keyOf(destination)}`;
+      if (destination.kind === BOT_REPLY_KIND) {
+        if (reminderOnly && isNoSend(text) && errors.length === 0) continue;
+        if (answered.has(identity)) continue;
+        answered.add(identity);
+        await send(destination, {
+          id,
+          text: quiet ? (errors[0]?.reason ?? "The bot produced no answer.") : text,
+          botHop: await maxBotHop(tx, run?.inputs ?? group.map(({ input }) => input)),
+        });
+        continue;
+      }
       if (!reminderOnly) {
         // Mixed, or not recorded: answered like a message, once per destination, never quietly.
         if (answered.has(identity)) continue;
@@ -626,6 +647,13 @@ export async function reconcileAnswers(
       continue;
     }
     const destination = pushable(item.input.destination);
+    if (destination?.kind === BOT_REPLY_KIND) {
+      await send(destination, {
+        id: `bot-unanswered:${item.input.submissionId}`,
+        text: `The bot couldn't answer (${item.record.reason}).`,
+      });
+      continue;
+    }
     const notice =
       item.record.reason === "model_error"
         ? await settledLimit(tx, providers, item.record.detail, now)
@@ -683,6 +711,15 @@ export async function reconcileAnswers(
   }
 
   const done = new Set(settled.map((item) => item.input.submissionId));
+  const botIds = settled.flatMap(({ input }) =>
+    input.destination.kind === BOT_REPLY_KIND || input.destination.kind === BOT_TRANSCRIPT_KIND
+      ? [input.submissionId]
+      : [],
+  );
+  if (botIds.length > 0) {
+    const hops = await tx.doc(BotHops);
+    for (const id of botIds) delete hops[id];
+  }
   for (const { source, ids } of settledDirect) await source.clearSettled(tx, ids);
   proactive.pending = keptPending;
   proactive.runs = proactive.runs.filter((entry) => !groups.has(entry.answer));

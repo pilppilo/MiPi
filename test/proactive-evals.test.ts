@@ -35,7 +35,13 @@ describe("proactive evals", () => {
       expect(file).toMatch(new RegExp(`/${test.id}\\.json$`));
       return test;
     });
-    expect(cases).toHaveLength(10);
+    expect(cases).toHaveLength(12);
+    expect(
+      cases
+        .filter(({ botSender }) => botSender !== undefined)
+        .map(({ expect }) => expect.kind)
+        .sort(),
+    ).toEqual(["quiet", "send"]);
     expect(new Set(cases.map(({ expect }) => expect.kind))).toEqual(
       new Set(["send", "quiet", "unreadable"]),
     );

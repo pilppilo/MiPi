@@ -854,7 +854,17 @@ describe("chat application", () => {
           "pi.agent": {
             model: { provider: "opencode-go", modelId: "deepseek-v4.1-flash" },
             thinkingLevel: "low",
-            tools: ["schedule", "search_history", "remember", "forget", "web_fetch"],
+            tools: [
+              "schedule",
+              "search_history",
+              "remember",
+              "forget",
+              "web_fetch",
+              "create_bot",
+              "message_bot",
+              "list_bots",
+              "stop_bot",
+            ],
           },
         },
       },

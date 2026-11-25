@@ -14,6 +14,7 @@ import type { Connectors } from "./connectors.ts";
 import { pendingSubmissions, PROACTIVE_DOC_KIND, reconcileAnswers } from "./proactive.ts";
 import type { CommitChanges, SourceWake, WakeSource } from "./wake-sources.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
+import { BotReplies, deliverBotReplies } from "./bot-messages.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -36,6 +37,7 @@ export class AnswerSettlement implements WakeSource {
   readonly #queue = new KeyedSerialQueue<"reconcile">();
   readonly #watched = new Set<number>();
   #wake: SourceWake = { active: false };
+  #replyDue: number | undefined;
   #closed = false;
   #refreshing = false;
   #refreshAgain = false;
@@ -47,7 +49,7 @@ export class AnswerSettlement implements WakeSource {
 
   /** Active while any input waits for its answer, which keeps the heartbeat. */
   wake(): SourceWake {
-    return this.#wake;
+    return this.#replyDue === undefined ? this.#wake : { ...this.#wake, at: this.#replyDue };
   }
 
   /** What the alarm runs: every settled input, delivered. */
@@ -109,11 +111,31 @@ export class AnswerSettlement implements WakeSource {
   reconcile(): Promise<void> {
     return this.#queue.run("reconcile", async () => {
       if (this.#closed) return;
+      const now = this.#now();
       const queued = await this.#commit((tx) =>
-        reconcileAnswers(tx, this.#now(), this.#options.connectors, this.#options.providers),
+        reconcileAnswers(tx, now, this.#options.connectors, this.#options.providers),
       );
-      if (queued && !this.#closed) this.#options.onQueued?.();
+      if (this.#closed) return;
+      if (queued) this.#options.onQueued?.();
+      if (queued || this.#replyDue === undefined || this.#replyDue <= now) {
+        const replies = (await this.#options.harness.snapshot(BotReplies, context))?.pending ?? [];
+        if (this.#closed) return;
+        if (replies.length === 0) {
+          this.#setReplyDue(undefined);
+          return;
+        }
+        // Keep an alarm armed if an admission throws before we can compute the next deadline.
+        this.#setReplyDue(now + 60_000);
+        const next = await deliverBotReplies(this.#options.harness, replies, now);
+        this.#setReplyDue(next === Infinity ? undefined : next);
+      }
     });
+  }
+
+  #setReplyDue(at: number | undefined): void {
+    if (this.#closed || at === this.#replyDue) return;
+    this.#replyDue = at;
+    this.#options.onWakeChange();
   }
 
   /** Every pending input, read in a commit that also refreshes the wake from it. */

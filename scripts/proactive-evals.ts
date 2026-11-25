@@ -18,6 +18,7 @@ export interface ProactiveEval {
   readonly description: string;
   readonly instruction: string;
   readonly deliveredAt: string;
+  readonly botSender?: string;
   readonly repeats?: string;
   readonly recentSends?: readonly { readonly at: string; readonly snippet: string }[];
   readonly memory?: readonly { readonly id: string; readonly text: string }[];
@@ -100,6 +101,8 @@ export function parseProactiveEval(value: unknown, source: string): ProactiveEva
       nonempty(value.description) &&
       nonempty(value.instruction) &&
       nonempty(value.deliveredAt) &&
+      (value.botSender === undefined ||
+        (nonempty(value.botSender) && Number.isFinite(Date.parse(value.deliveredAt)))) &&
       (value.repeats === undefined || nonempty(value.repeats)) &&
       pairList(value.recentSends, "at", "snippet") &&
       pairList(value.memory, "id", "text") &&

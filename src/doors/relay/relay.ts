@@ -24,12 +24,12 @@ import { answerText } from "../../agent/proactive.ts";
 import type { ProfileName, Profiles } from "../../agent/profiles.ts";
 import { stampInput } from "../../agent/stamp.ts";
 import { defang } from "../../lib/fence.ts";
-import { isRelayKey, relayRequest } from "./requests.ts";
+import { isRelayKey, RELAY_BINDING, relayRequest } from "./requests.ts";
 
 const context = BACKGROUND_CONTEXT;
 
 /** The channel key the relay's conversation is bound under (`conversations.ts`). */
-export const RELAY_BINDING = "relay:pidu";
+export { RELAY_BINDING } from "./requests.ts";
 /** Who relay messages are from, in their stamp. */
 export const RELAY_SPEAKER = "PiDu";
 /** The most text one message may carry, in UTF-8 bytes. The Worker checks the same number. */

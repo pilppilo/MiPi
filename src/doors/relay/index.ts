@@ -3,8 +3,10 @@
  * client (`RelayRuntime.result`), never pushed, so it registers no delivery adapter and no pending inputs.
  */
 import type { DoorRegistration } from "../../agent/connectors.ts";
+import { RELAY_BINDING } from "./requests.ts";
 
 export const relayDoor: DoorRegistration = {
   name: "relay",
-  origins: [{ prefix: "relay", source: "relay", automated: false }],
+  origins: [{ prefix: "relay", source: "relay", automated: false, authority: "external" }],
+  rebindableKeys: [RELAY_BINDING],
 };

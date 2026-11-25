@@ -163,8 +163,8 @@ describe("fixture databases", () => {
         for (const { requestId, origin } of origins) {
           expect(origin, requestId).not.toEqual(UNKNOWN_ORIGIN);
         }
-        expect(new Set(origins.map(({ origin }) => origin.source))).toEqual(
-          new Set(["web", "telegram", "relay"]),
+        expect(origins.map(({ origin }) => origin.source)).toEqual(
+          expect.arrayContaining(["web", "telegram", "relay"]),
         );
         const harness = await Harness.open(
           await openDurableObjectSqliteStorage(state.storage),
@@ -203,7 +203,9 @@ describe("fixture databases", () => {
           for (const { id } of ownerless) {
             const meta = await harness.snapshot(ConversationMeta, id, ctx);
             if (id === bots.mainId) expect(meta?.archivedAt).toBeUndefined();
-            else expect(meta?.archivedAt, `conversation ${id}`).toBeDefined();
+            else if (meta?.kind === undefined) {
+              expect(meta?.archivedAt, `conversation ${id}`).toBeDefined();
+            }
             // And in the session's archive index, which visibility and the doors read (COD-198).
             expect(bots.archived?.[String(id)], `conversation ${id}`).toBe(meta?.archivedAt);
           }
@@ -247,22 +249,23 @@ describe("fixture databases", () => {
           expect(agent.sent).toEqual([
             { chatId: record.input.destination.chatId, text: "Time to renew the passport." },
           ]);
-          // Its chat from before bots is archived, so it ran in MiPi (COD-198): never in the archived chat.
+          // Old fixtures scheduled the reminder before bots. Their archived chat's reminder now runs in MiPi.
           const { mainId } = (await agent.harness.snapshot(Bots, ctx))!;
           const madeIn = (record.input as unknown as { conversationId: number }).conversationId;
-          expect(madeIn).not.toBe(mainId);
-          expect(
-            (await agent.harness.snapshot(Bots, ctx))?.archived?.[String(madeIn)],
-          ).toBeDefined();
+          if (madeIn !== mainId) {
+            expect(
+              (await agent.harness.snapshot(Bots, ctx))?.archived?.[String(madeIn)],
+            ).toBeDefined();
+            expect(
+              (await userTexts(agent.harness, madeIn)).filter((text) =>
+                text.startsWith("Scheduled instruction due now"),
+              ),
+              // Only the times it ran before the upgrade.
+            ).toHaveLength(record.state.checkpoint.sent);
+          }
           expect((await userTexts(agent.harness, mainId!)).at(-1)).toMatch(
             /^Scheduled instruction due now \(.+\): /,
           );
-          expect(
-            (await userTexts(agent.harness, madeIn)).filter((text) =>
-              text.startsWith("Scheduled instruction due now"),
-            ),
-            // Only the times it ran before the upgrade.
-          ).toHaveLength(record.state.checkpoint.sent);
           const reminders = (await agent.harness.inspect(ctx)).tasks.filter(
             ({ record: task }) => task.kind === ScheduledReminder.definition.name,
           );

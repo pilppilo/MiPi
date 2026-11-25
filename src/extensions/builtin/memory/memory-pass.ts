@@ -50,6 +50,7 @@ import { recordUsage, sideCall } from "../../../agent/side-calls.ts";
 import { listVisible, OWNER_SCOPE, visiblePage } from "../../../agent/visibility.ts";
 import { afterNextChicagoMidnight, chicagoDay } from "../../../lib/cap-day.ts";
 import { entryTouches } from "../../../agent/untrusted.ts";
+import { isFencedBotInput } from "../../../agent/bot-messages.ts";
 import type { CommitChanges } from "../../../agent/wake-sources.ts";
 import { defang } from "../../../lib/fence.ts";
 import { isNoSend, visibleAnswer } from "../../../lib/proactive-text.ts";
@@ -127,14 +128,18 @@ const messageText = (entry: EntryRecord): string =>
 
 /**
  * The lines of a range that a pass reads: a person's messages and MiPi's answers. Scheduled deliveries are left out
- * (nobody said them); so are tool calls and results.
+ * (nobody said them); so are messages from bots and tool calls and results.
  */
 export function passLines(entries: readonly EntryRecord[]): PassLine[] {
   const lines: PassLine[] = [];
   for (const entry of entries) {
     if (UserEntry.is(entry)) {
       const text = messageText(entry);
-      if (text.trim().length > 0 && parseScheduledInstruction(text) === undefined) {
+      if (
+        text.trim().length > 0 &&
+        !isFencedBotInput(text) &&
+        parseScheduledInstruction(text) === undefined
+      ) {
         lines.push({ speaker: "user", text });
       }
     } else if (AssistantEntry.is(entry)) {

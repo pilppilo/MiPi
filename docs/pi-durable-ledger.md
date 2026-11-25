@@ -104,6 +104,15 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **MiPi:** every reminder asks core where it runs when it comes due (`routeSchedule`, `src/agent/archive.ts`). An archived bot's repeat skips that time (`skippedArchived`); a one-time reminder parks itself in `app.bots.held` and ends, and restore sends it marked late (`held:<reminderId>`). Nothing polls. A reminder of a chat from before bots (archived when MiPi was made) runs in MiPi instead, with an answer for its transcript going to MiPi's: its task keeps its old conversation, since it can't be moved. The heartbeat counts an archived bot's schedules as a known hold, not overdue.
 - **Remove when:** Pi Durable can pause and resume a conversation's tasks: archive pauses them, restore resumes them, and the held list goes.
 
+### L12 · Purpose bots exchange durable follow-ups
+
+- **Kind:** choice
+- **Since:** 0.2.0-alpha.3
+- **Upstream:** Pi Durable's `22-subagent-background` example submits work to a child conversation and reports back after it settles.
+- **Upstream link:** https://github.com/earendil-works/pi/blob/main/packages/durable/README.md#abort-and-subagents
+- **MiPi:** purpose bots own their conversations independently of the tool that sends work. Admission stores `bot:<from>:<toolCallId>`, the hop and the proactive expectation together. Answer settlement durably queues a follow-up for the sender, then admits it separately under a stable request id. Bot-only turns share the proactive caps and can return `NO_SEND`. Each new delegation advances the highest hop of the turn, up to three. Returning an answer preserves that hop.
+- **Revisit when:** Pi Durable offers durable messaging and answer routing between ownerless conversations.
+
 ## Closed
 
 None yet.

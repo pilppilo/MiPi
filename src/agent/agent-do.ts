@@ -20,6 +20,8 @@ import type { AgentComposition } from "./harness.ts";
 import { composeMipi } from "./composition.ts";
 import {
   boundConversation,
+  Bots,
+  BOTS_DOC_KIND,
   clearBotFields,
   ConversationMeta,
   type ConversationMetaState,
@@ -38,6 +40,7 @@ import {
   profileOrDefault,
 } from "./profiles.ts";
 import { createBot, ensureBots, renameBot } from "./bots.ts";
+import { bindBotDoor } from "./bot-tools.ts";
 import {
   abortArchived,
   ARCHIVED_REPLY,
@@ -795,6 +798,23 @@ export class MipiAgent extends DurableObject<Env> {
           for (const [conversationId, latestEntryId] of heads) {
             this.#broadcast({ type: "conversation.head", conversationId, latestEntryId });
           }
+          if (
+            this.#connections().length > 0 &&
+            publication.changes.some(
+              (change) => change.type === "document" && change.record?.kind === BOTS_DOC_KIND,
+            )
+          ) {
+            this.ctx.waitUntil(
+              Promise.resolve()
+                .then(async () => {
+                  const archived =
+                    (await harness.snapshot(Bots, BACKGROUND_CONTEXT))?.archived ?? {};
+                  await this.#leaveArchived(Object.keys(archived).map(Number) as ConversationId[]);
+                  await this.#broadcastSessionSnapshot();
+                })
+                .catch((error) => reportError("Refreshing the web bot list failed", error)),
+            );
+          }
         },
         end: () => {},
       });
@@ -1289,6 +1309,27 @@ export class MipiAgent extends DurableObject<Env> {
         });
         return;
       }
+      case "bot.bind": {
+        const conversationId = command.conversationId as ConversationId;
+        await this.#harness.commit(
+          (tx) =>
+            bindBotDoor(
+              tx,
+              this.#composition!.connectors.rebindableKeys,
+              command.channel,
+              conversationId,
+            ),
+          BACKGROUND_CONTEXT,
+        );
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId,
+        });
+        return;
+      }
       case "bot.rename": {
         const conversation = await this.#requireConversation(
           command.conversationId as ConversationId,
@@ -1505,6 +1546,10 @@ export class MipiAgent extends DurableObject<Env> {
           conversationId: conversation.id,
         });
         return;
+      }
+      default: {
+        const _: never = command;
+        throw new Error("Unknown client command");
       }
     }
   }
