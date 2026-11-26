@@ -1,5 +1,123 @@
 # mipi
 
+## 0.2.0-alpha.0
+
+### Minor Changes
+
+- f349b10: COD-198: archive and restore a bot (settings slice 1, agent side).
+
+  **Added**
+
+  - Protocol: `bot.archive { conversationId }` and `bot.restore { conversationId }`. MiPi can't be archived or restored, and neither can a chat from before bots yet (COD-201).
+  - Archiving a bot archives its cobots in the same commit, then aborts what they were doing (`Conversation.abort()`: queued inputs withdrawn, the run stopped). From that commit on, an archived bot is out of the bots list, out of `search_history` and the memory pass, and takes no message (`prompt.submit` refuses with a clear reason). A web tab open on it moves to MiPi.
+  - A door bound to an archived bot (the web, a Telegram chat, the relay) reaches MiPi instead, and the key is remembered. Restoring binds it back, unless it was bound somewhere else meanwhile.
+  - An archived bot's schedules hold: a repeat skips its times (`skippedArchived`), and a one-time reminder parks itself and ends. Restoring sends each parked reminder once, marked late (`held:<reminderId>`), where it would have answered; a second restore sends nothing twice. While MiPi is paused (`MIPI_PAUSED`) they stay parked, and the next start without the pause sends them; one whose bot is archived again first waits for the next restore. The daily caps don't hold them back: the owner asked for the restore, and each still counts as a run. The admin heartbeat counts an archived bot's schedules as `archivedSchedules`, never active or overdue.
+  - A message arriving as its bot is archived goes to MiPi: the relay and Telegram look again in the commit that admits it.
+  - An archived bot keeps its name, so restoring it never collides. A new bot asking for it is told the name belongs to an archived bot.
+
+  **Changed**
+
+  - Archived conversations, chats from before bots included, are no longer the owner's for history search and the memory pass: core's visibility reads them from one session index (`app.bots.archived`), so the memory pass's wake still reads no conversation's documents.
+  - Reminders made in a chat from before bots run in MiPi now, so an archived conversation never runs one itself: an answer meant for that chat's transcript goes to MiPi's, and one for a Telegram chat still goes to the chat.
+  - `held` is a request-id prefix of the reminders (automated, like `sched`).
+
+  **Pi Durable**
+
+  - No version change (1.6.1). Ledger: L11 added (workaround): Pi Durable can't pause a task, so each reminder asks core where it runs when it comes due, and holds itself for an archived bot. L10's entry now also covers archive: a binding to an archived bot falls back to MiPi on its first read, since bindings can't be listed. `abortConversation` joins the seam, with a contract test.
+
+  **Migration**
+
+  - `app.bots` gains `archived`, `released` and `held` (optional, still version 1). On the first start of this build, the archive index is filled once from each conversation's `archivedAt`.
+  - Reminders keep their stored tasks: a chat-from-before-bots reminder is routed to MiPi when it comes due, not rewritten (a task's conversation can't change). Covered against the 0.1.0-beta.1 fixture.
+  - Rolling back works: an older build ignores the new fields and still hides archived bots by `archivedAt`. One-time reminders parked while a bot was archived wait in `app.bots.held` until this build restores the bot. Not one-way.
+
+- 8b2a9c0: COD-197: MiPi becomes the main bot (bots slice 1).
+
+  **Added**
+
+  - MiPi, the main bot, on a new `main` profile (the everyday tools; the bot tools come in COD-199), made on the first start of this build.
+  - Bot fields on `app.conversation` (`kind`, `name`, `purpose`, `bot`, `createdBy`, `archivedAt`) and the session document `app.bots` (MiPi and the name index). Bot names are unique, ignoring case, and 1 to 40 characters. A purpose bot's purpose is its instructions.
+  - Protocol: `bot.create { name, purpose, profile }` makes a purpose bot (on a profile the pickers offer; a retry with the same request id makes it once), and `bot.rename` renames a bot, MiPi included. Conversation summaries carry `kind`, `name`, `purpose`, `bot`, `archivedAt` and `latestEntryId`, and a `conversation.head` event tells the list when a conversation gets a new entry, from the commit itself.
+  - The web app lists bots: MiPi first, by its own name, then the purpose bots with their purposes, each with a dot while it works or waits (its subagents' tasks count; a sleeping reminder doesn't) and a dot for anything unread since this browser last read it. A new browser starts with nothing unread. "New bot" asks for a name, a purpose and a profile.
+  - Telegram's `/bot` lists the bots, this chat's marked, and `/bot <name>` switches the chat to one (the whole name, in any case). The choice survives restarts, and messages still waiting in the chat's window go to the bot they were written to first. Telegram and the web on the same bot share one conversation.
+
+  **Changed**
+
+  - Every door reaches MiPi: the web opens it instead of Pi Durable's root conversation, and Telegram and the PiDu relay talk to it. Relay messages stay fenced and stamped as PiDu's. Pointing the relay at a purpose bot of its own comes with COD-199.
+  - Only MiPi runs on `main`, and MiPi always does. `pidu` stays only for the relay's chats from before bots: no conversation newly takes it, and the relay starts on the configured profile like the other doors. The web and Telegram's `/profile` refuse these switches, and pickers list only `default` and `empty`.
+  - A fork is a chat of its own, never a copy of its bot, and a fork of MiPi leaves `main` for `default`. The web app no longer offers forking until forks become cobots (COD-200): the bots list doesn't show plain chats.
+  - MiPi's profile shows as text in the web app, not as a picker.
+  - `conversation.create` is gone: "New conversation" became "New bot". Receipts stored by older builds still read.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). Ledger: L10 added (workaround): a transaction can't list a document family's keys, so each door's binding moves to MiPi on its first read. A contract test pins how Pi Durable renders a bot's purpose (`instructions`).
+
+  **Migration**
+
+  - On the first start, every chat from before bots is archived (`archivedAt`), kept whole: transcripts, reminders, relay receipts and memory are untouched. History search and the memory pass still read them (archiving's effects come with COD-198).
+  - Each door's binding moves to its bot the first time the door reads it, and is marked `bots`: Pi Durable can't list the bindings to move them all at once. A binding chosen since stays where it is.
+  - An older build ignores the new fields, so rolling back works: its doors find their bindings on MiPi, which works as an ordinary chat. Not one-way.
+
+- b0be761: **Added** · MiPi can create, list, message and archive purpose bots. Bot answers arrive as follow-ups. The owner can bind a relay to a live bot.
+
+  **Changed** · Bot-only turns share the proactive caps. Delegation can go three hops deep. Bot and relay input is excluded from both memory paths. Creating and archiving bots and binding doors require an owner-only turn with no external tool content.
+
+  **Fixed** · MiPi sends delegated follow-ups to the Telegram chat that asked for them. Proactive limit notices go to the owner without spending another model round.
+
+  **Pi Durable** · Ledger L12 documents durable bot submissions and follow-ups.
+
+  **Migration** · Startup refreshes the main profile's tools. The new bot records extend existing storage.
+
+- 28c80ac: COD-201: a settings menu with Archived (settings slice 2).
+
+  **Added**
+
+  - A Settings button in the web sidebar's header opens a wide panel with a list of sections. The first is Archived: archived bots with their cobots, then the chats from before bots, each with its purpose or first line and when it was archived.
+  - Each archived entry can be opened read-only or restored. There is no Delete yet: Pi Durable can't delete a conversation (ledger L13).
+  - Restoring a chat from before bots makes it a cobot under MiPi, named from its title, or its first message's first line when it has none. Its reminders run in it again, not in MiPi.
+
+  **Changed**
+
+  - An archived conversation opens read-only on the web. The composer and the pickers are off, the profile shows as stored (even the relay's old `pidu`), and a banner offers Restore. The agent refuses its messages and its profile or model changes, with wording for a bot, a cobot or a chat from before bots.
+  - Picking a conversation in the sidebar, making a bot or cobot, or going back in the browser closes Settings.
+  - A cobot archived with its bot comes back only with the bot. Restoring it alone is refused with "Restore <bot> first.", and the web shows the same hint by a disabled Restore.
+
+  **Fixed**
+
+  - A web tab that opens an archived conversation stays on it, read-only, through other changes (another tab making a cobot, say), until it is restored. Before, any such change moved it to MiPi. The mark lives on the socket, so it survives hibernation. A conversation archived while a tab is on it still moves the tab to MiPi.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). Ledger: L13 added (watch): Pi Durable 1.6.1 can't delete a conversation, so Archived offers no Delete. Upstream: earendil-works/pi#11026, with an open PR (earendil-works/pi#12562).
+
+  **Migration**
+
+  - Nothing changes until the owner restores a chat from before bots. Then its conversation meta gains `kind: "cobot"`, `bot` (MiPi) and `name`, and it leaves `app.bots.archived`. It keeps its profile, except the relay's old `pidu`, which becomes `default`.
+  - Rolling back works: the fields are optional and the meta stays version 1, so a build with cobots (COD-200) shows the restored chat as a cobot under MiPi. Not one-way.
+
+### Patch Changes
+
+- a79ecdd: **Added** · Create named side chats under a bot from the web sidebar or Telegram. Cobots inherit their bot's purpose and tool profile. MiPi's cobots start on the default profile.
+
+  **Changed** · Telegram `/new [name]` opens a cobot, and `/help` lists the commands. The web sidebar nests cobots and subagents and shows their activity and unread entries on parent rows.
+
+  **Fixed** · Reconnected web clients receive unread entry heads for task-owned subagents.
+
+  **Pi Durable** · The contract test pins the conversation and task IDs in the subagent ownership record.
+
+  **Migration** · Cobots use the existing conversation fields and archive index. Web creation receipts add a cobot variant.
+
+- COD-175: release 0.2.0-alpha.0, the bots and settings stack (COD-197 to COD-201), with its fixture database.
+
+  **Added**
+
+  - `test/fixtures/db/0.2.0-alpha.0.json`: this release's stored data (bot records, the bots index, archive holds, bot hops and cobots, beside everything 0.1.0 stored). Every later build restores it on each `pnpm test`, beside the 0.1.0 betas'.
+
+  **Migration**
+
+  - None in this step. The fixture is test data. The data changes themselves (pre-bot conversations folded into Archived, doors moved to MiPi, pre-bot reminders moved to MiPi) are in the COD-197 and COD-198 notes.
+
 ## 0.1.0
 
 ### Minor Changes
