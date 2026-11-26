@@ -25,11 +25,14 @@ import { describe, expect, it } from "vitest";
 import { boundConversation, startingProfile } from "../src/agent/conversations.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import { AnswerSettlement } from "../src/agent/answers.ts";
-import { PROFILES } from "./mipi.ts";
+import { botsOnModel, PROFILES } from "./mipi.ts";
+import { BOT_REPLY_KIND } from "../src/agent/bot-hops.ts";
+import { admitBotInput, BotReplies } from "../src/agent/bot-messages.ts";
+import { createBot } from "../src/agent/bots.ts";
 import { MemoryPassRuntime, MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { goModelListSource } from "../src/extensions/optional/opencode-go/models.ts";
-import { Proactive } from "../src/agent/proactive.ts";
+import { Proactive, reconcileAnswers } from "../src/agent/proactive.ts";
 import { ProviderLimits } from "../src/agent/limits.ts";
 import { Spend } from "../src/agent/spend.ts";
 import { RelayRuntime } from "../src/doors/relay/relay.ts";
@@ -69,7 +72,9 @@ async function seed(): Promise<void> {
     const faux = fauxProvider();
     // Answers by what was asked, so the doors' order of requests doesn't matter.
     const answer: FauxResponseStep = (context) => {
-      const last = context.messages.at(-1);
+      const last = context.messages.findLast(
+        (message) => message.role === "user" || message.role === "toolResult",
+      );
       if (last?.role === "toolResult") return fauxAssistantMessage([fauxText("Done.")]);
       const text = JSON.stringify(last?.content ?? "");
       if (text.includes("long-term memory")) {
@@ -157,6 +162,7 @@ async function seed(): Promise<void> {
     const pass = new MemoryPassRuntime({
       harness,
       models,
+      origins: composition.connectors.origins,
       untrustedTools: new Set(["web_fetch"]),
       onWakeChange: () => {},
       report: (message, error) => {
@@ -165,6 +171,7 @@ async function seed(): Promise<void> {
       now: () => clock.now,
     });
     try {
+      await botsOnModel(harness, { provider: "faux", modelId: "faux-1" });
       await harness.commit(async (tx) => {
         const settings = await tx.doc(AgentSettings);
         settings.timeZone = "America/Chicago";
@@ -173,8 +180,8 @@ async function seed(): Promise<void> {
         (await tx.doc(ProviderLimits)).entries = {
           "opencode-go": {
             label: "OpenCode Go",
-            at: clock.now - 60 * 60_000,
-            resetAt: clock.now - 1,
+            at: harnessClock - 60 * 60_000,
+            resetAt: harnessClock - 1,
             resetFrom: "usage",
           },
         };
@@ -224,14 +231,69 @@ async function seed(): Promise<void> {
       await answers.reconcile();
       await telegram.recover();
 
+      // The owner's idle range can save a lesson before a relay exchange starts a new range.
+      clock.now = Date.now() + MEMORY_IDLE_MS + 60_000;
+      await pass.run();
+      await harness.waitForIdle(ctx);
+
       expect(await relay.admit("fixture-relay", "Hello from PiDu")).toEqual({
         kind: "done",
         answer: "Hi PiDu.",
       });
 
-      clock.now = Date.now() + MEMORY_IDLE_MS + 60_000;
-      await pass.run();
-      await harness.waitForIdle(ctx);
+      // Capture both an undelivered follow-up and a submitted bot message awaiting settlement. The exporter
+      // sees them on disk even if some work hasn't reached the caller yet.
+      const botId = await harness.commit(
+        (tx) =>
+          createBot(
+            tx,
+            {
+              kind: "bot",
+              name: "Fixture bot",
+              purpose: "Check the fixture notes",
+              profile: "empty",
+              createdBy: "bot:MiPi",
+            },
+            composition.profiles,
+          ),
+        ctx,
+      );
+      const bot = (await harness.conversation(botId, ctx))!;
+      for (const id of [1, 2]) {
+        const submissionId = await harness.commit(
+          (tx) =>
+            admitBotInput(
+              tx,
+              bot,
+              {
+                requestId: `bot:${webId}:fixture-${id}`,
+                sender: "MiPi",
+                text: "Read the fixture notes",
+                hop: 1,
+                destination: {
+                  kind: BOT_REPLY_KIND,
+                  conversationId: webId,
+                  name: "Fixture bot",
+                  hop: 1,
+                },
+              },
+              harnessClock,
+            ),
+          ctx,
+        );
+        const submission = (await harness.submission(submissionId, ctx))!;
+        expect((await submission.wait(ctx)).status).toBe("done");
+        if (id === 1) {
+          expect(
+            await harness.commit(
+              (tx) => reconcileAnswers(tx, clock.now, composition.connectors),
+              ctx,
+            ),
+          ).toBe(true);
+        }
+      }
+      expect((await harness.snapshot(Proactive, ctx))?.pending).toHaveLength(1);
+      expect((await harness.snapshot(BotReplies, ctx))?.pending).toHaveLength(1);
     } finally {
       pass.close();
       answers.close();

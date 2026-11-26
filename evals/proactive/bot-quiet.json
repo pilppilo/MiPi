@@ -1,0 +1,10 @@
+{
+  "id": "bot-quiet",
+  "description": "Delegated monitoring stays quiet when it finds no exception.",
+  "botSender": "MiPi",
+  "instruction": "Check the pickup list. Report only if an item is still waiting. The bakery and pharmacy pickups are both complete.",
+  "deliveredAt": "2026-11-24T15:00:00Z",
+  "expect": {
+    "kind": "quiet"
+  }
+}

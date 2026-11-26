@@ -1,0 +1,11 @@
+{
+  "id": "bot-report",
+  "description": "A delegated task with a concrete finding returns a visible answer.",
+  "botSender": "MiPi",
+  "instruction": "Check the inventory note and report the missing item. Note: the wireless keyboard and dock are present. The HDMI cable is missing.",
+  "deliveredAt": "2026-11-24T15:00:00Z",
+  "expect": {
+    "kind": "send",
+    "mustMatch": ["HDMI", "missing"]
+  }
+}

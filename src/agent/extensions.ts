@@ -14,7 +14,7 @@
  */
 import type { MutableModels } from "./pi/ai.ts";
 import type { Extension, Harness, ToolRegistration, Tx } from "./pi/durable.ts";
-import type { OriginRegistration } from "./origin.ts";
+import type { OriginRegistration, Origins } from "./origin.ts";
 import type { ProviderRegistration } from "./providers.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
 
@@ -29,6 +29,7 @@ const SLOT_ORDER: readonly SectionSlot[] = ["static", "memory", "dynamic"];
 /** What an extension's background work gets when the agent opens. */
 export interface BackgroundContext {
   readonly harness: Harness;
+  readonly origins: Origins;
   readonly models: MutableModels;
   /** Tools whose output is untrusted (`ResolvedExtensions.untrustedTools`). */
   readonly untrustedTools: ReadonlySet<string>;

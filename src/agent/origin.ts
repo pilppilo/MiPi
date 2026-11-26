@@ -25,6 +25,9 @@ export interface OriginRegistration {
   readonly prefix: string;
   readonly source: string;
   readonly automated: boolean;
+  readonly authority?: "owner" | "external";
+  /** Recognizes older stamped entries when only the transcript is available (pi-ledger L8). */
+  readonly matchesTranscript?: (text: string) => boolean;
   /**
    * Where a reply to this input goes, when that isn't in the id (Telegram's chat is in the door's state). Undefined:
    * nothing to say for this input.
@@ -40,6 +43,7 @@ export type RunInput = {
   readonly submissionId: number;
   readonly requestId?: string;
   readonly origin: InputOrigin;
+  readonly authority?: OriginRegistration["authority"];
 };
 
 const PREFIX = /^[a-z]+$/;
@@ -78,6 +82,14 @@ export class Origins {
     return colon <= 0 ? undefined : this.#registrations.get(requestId.slice(0, colon));
   }
 
+  isExternalTranscript(text: string): boolean {
+    for (const registration of this.#registrations.values()) {
+      if (registration.authority === "external" && registration.matchesTranscript?.(text))
+        return true;
+    }
+    return false;
+  }
+
   /** The origin of one input, from its request id. Bound, so it can be passed on alone. */
   readonly originOf = (requestId: string | undefined): InputOrigin => {
     if (requestId === undefined) return UNKNOWN_ORIGIN;
@@ -92,10 +104,12 @@ export class Origins {
     const inputs: RunInput[] = [];
     for (const id of placed) {
       const requestId = (await tx.submission(id as SubmissionId))?.requestId;
+      const authority = this.#registration(requestId)?.authority;
       inputs.push({
         submissionId: id,
         ...(requestId === undefined ? {} : { requestId }),
         origin: this.originOf(requestId),
+        ...(authority === undefined ? {} : { authority }),
       });
     }
     return inputs;

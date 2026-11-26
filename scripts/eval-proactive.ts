@@ -1,6 +1,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { loadEnvFile } from "node:process";
 import { parseArgs } from "node:util";
+import { botInput } from "../src/agent/bot-messages.ts";
 import { CORE_PREAMBLE } from "../src/agent/harness.ts";
 import type { Message } from "../src/agent/pi/ai.ts";
 import { createGoModels, DEFAULT_MODEL_ID, MODEL_PROVIDER } from "../src/agent/pi/models.ts";
@@ -57,7 +58,10 @@ async function main(): Promise<void> {
     const messages: Message[] = [
       {
         role: "user",
-        content: formatReminder(test, test.deliveredAt, test.repeats, test.recentSends),
+        content:
+          test.botSender === undefined
+            ? formatReminder(test, test.deliveredAt, test.repeats, test.recentSends)
+            : botInput(test.botSender, test.instruction, undefined, Date.parse(test.deliveredAt)),
         timestamp: started,
       },
     ];

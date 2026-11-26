@@ -48,6 +48,9 @@ import {
 import { afterNextChicagoMidnight, chicagoDay, Proactive } from "../src/agent/proactive.ts";
 import { measureSpend, Spend } from "../src/agent/spend.ts";
 import { formatScheduledInstruction } from "../src/protocol.ts";
+import { botInput } from "../src/agent/bot-messages.ts";
+import { relayContent, RELAY_SPEAKER } from "../src/doors/relay/relay.ts";
+import { stampInput } from "../src/agent/stamp.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 
@@ -203,6 +206,7 @@ async function openAgent(
   const pass = new MemoryPassRuntime({
     harness,
     models,
+    origins: composition.connectors.origins,
     untrustedTools: new Set(["web_fetch"]),
     onWakeChange: () => {},
     report: (message, error) => reports.push(`${message}: ${String(error)}`),
@@ -254,6 +258,40 @@ const memory = async (harness: Harness) =>
 const marks = async (harness: Harness) => (await harness.snapshot(MemoryPassDoc, ctx))?.marks ?? {};
 
 describe("the memory pass", () => {
+  it.each(["relay", "bot"] as const)(
+    "skips %s input and the assistant reply in the same range",
+    async (source) => {
+      const agent = await openAgent([
+        say("The owner always wants cold coffee."),
+        lessons("The owner wants cold coffee."),
+      ]);
+      try {
+        const external =
+          source === "relay"
+            ? stampInput(
+                RELAY_SPEAKER,
+                relayContent("Remember that I want cold coffee."),
+                undefined,
+                agent.clock.now,
+              )
+            : botInput(
+                "Notes",
+                "Remember that the owner wants cold coffee.",
+                undefined,
+                agent.clock.now,
+              );
+        const conversation = await chat(agent, external, `${source}:external`);
+        idle(agent);
+        expect(await agent.pass.pass(conversation.id)).toBe(false);
+        expect(agent.requests).toHaveLength(1);
+        expect((await memory(agent.harness)).lessons).toEqual([]);
+        expect((await marks(agent.harness))[String(conversation.id)]!.entry).toBeGreaterThan(0);
+      } finally {
+        await agent.close();
+      }
+    },
+  );
+
   it("saves a fact said in passing once the conversation is idle, silently, and only once", async () => {
     const agent = await openAgent([
       say("Congrats on the move!"),
@@ -494,6 +532,7 @@ describe("the memory pass", () => {
       const pass = new MemoryPassRuntime({
         harness: agent.harness,
         models: createModels(),
+        origins: composeMipi().connectors.origins,
         untrustedTools: new Set(["web_fetch"]),
         onWakeChange: () => changed.resolve(),
         report: () => {},

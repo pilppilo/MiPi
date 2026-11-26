@@ -15,6 +15,7 @@ import { type ConversationId, Harness } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
 import { archiveBot } from "../src/agent/archive.ts";
+import { bindBotDoor } from "../src/agent/bot-tools.ts";
 import { createBot, ensureBots } from "../src/agent/bots.ts";
 import {
   bindChannel,
@@ -207,6 +208,44 @@ describe("relay keys", () => {
 });
 
 describe("relay admission", () => {
+  it("polls and retries an old receipt after the owner rebinds the relay", async () => {
+    const { harness, relay, close } = await openRelay(
+      answers("MiPi handled it.", "PiDu handled it."),
+    );
+    try {
+      const first = { kind: "done", answer: "MiPi handled it." };
+      expect(await relay.admit("first", "Before rebinding")).toEqual(first);
+      const bot = await harness.commit(
+        (tx) =>
+          createBot(
+            tx,
+            {
+              kind: "bot",
+              name: "PiDu",
+              purpose: "Answer relay messages.",
+              profile: "empty",
+              createdBy: "owner",
+            },
+            PROFILES,
+          ),
+        ctx,
+      );
+      await harness.commit(
+        (tx) => bindBotDoor(tx, new Set([RELAY_BINDING]), RELAY_BINDING, bot),
+        ctx,
+      );
+      expect(await relay.admit("second", "After rebinding")).toEqual({
+        kind: "done",
+        answer: "PiDu handled it.",
+      });
+      expect(await boundId(harness)).toBe(bot);
+      expect(await relay.result("first")).toEqual(first);
+      expect(await relay.admit("first", "Before rebinding")).toEqual(first);
+    } finally {
+      await close();
+    }
+  });
+
   it("goes to MiPi when its bot is archived between reading the binding and admitting (COD-198)", async () => {
     let bot: ConversationId | undefined;
     let archived = false;

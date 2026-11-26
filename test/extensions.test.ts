@@ -172,13 +172,15 @@ describe("input origin", () => {
     }
   });
 
-  it("names no prefix in core: each door and the reminders register their own", () => {
-    expect(createConnectors([], []).origins.prefixes()).toEqual([]);
+  it("registers bot origin in core and door and reminder origins from their registrations", () => {
+    expect(createConnectors([], []).origins.prefixes()).toEqual(["bot"]);
     // Bare core still has the doors, but no reminders: `sched:` means nothing there.
     const bare = composeMipi({ extensions: [] }).connectors.origins;
-    expect(bare.prefixes()).toEqual(["web", "tg", "relay"]);
+    expect(bare.prefixes()).toEqual(["web", "tg", "relay", "bot"]);
     expect(bare.originOf("sched:r1:0")).toBe(UNKNOWN_ORIGIN);
-    expect(composeMipi({ extensions: [], doors: [] }).connectors.origins.prefixes()).toEqual([]);
+    expect(composeMipi({ extensions: [], doors: [] }).connectors.origins.prefixes()).toEqual([
+      "bot",
+    ]);
     expect(
       () =>
         new Origins([
@@ -358,6 +360,7 @@ describe("switching an extension off for one conversation", () => {
     const pass = new MemoryPassRuntime({
       harness,
       models,
+      origins: composition.connectors.origins,
       untrustedTools: composition.extensions.untrustedTools,
       onWakeChange: () => {},
       report: (message, error) => {

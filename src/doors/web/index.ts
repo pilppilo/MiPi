@@ -24,7 +24,7 @@ const transcript = (conversationId: number): DeliveryDestination => ({
 
 export const webDoor: DoorRegistration = {
   name: "web",
-  origins: [{ prefix: "web", source: "web", automated: false }],
+  origins: [{ prefix: "web", source: "web", automated: false, authority: "owner" }],
   delivery: {
     kind: WEB_DESTINATION,
     canPush: false,

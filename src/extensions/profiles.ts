@@ -23,8 +23,7 @@ export const PROFILE_TABLE: ProfileTable = {
     tools: EVERYDAY,
   },
   main: {
-    // MiPi, the main bot (COD-197). The bot tools (create_bot, message_bot, list_bots, stop_bot) join in COD-199.
-    description: "MiPi, the main bot: the everyday tools",
-    tools: EVERYDAY,
+    description: "MiPi, the main bot: everyday tools and bot management",
+    tools: [...EVERYDAY, "create_bot", "bind_door", "message_bot", "list_bots", "stop_bot"],
   },
 };

@@ -45,7 +45,7 @@ export function isProfileName(value: unknown): value is ProfileName {
 
 /** The profile a var names (`MIPI_PROFILE`), or the default when it is unset or unknown. */
 export function profileOrDefault(value: string | undefined): ProfileName {
-  return isProfileName(value) ? value : DEFAULT_PROFILE;
+  return isProfileName(value) && value !== MAIN_PROFILE ? value : DEFAULT_PROFILE;
 }
 
 /** The profile table against the tools the installed extensions register. */

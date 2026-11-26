@@ -65,7 +65,7 @@ describe("delivery", () => {
 
   it("describes and keys Telegram and web destinations as the doors register them", () => {
     const { delivery } = composeMipi().connectors;
-    expect(delivery.kinds()).toEqual(["web", "telegram"]);
+    expect(delivery.kinds()).toEqual(["web", "telegram", "bot"]);
     expect(delivery.canPush({ kind: "telegram", chatId: CHAT })).toBe(true);
     expect(delivery.canPush({ kind: "web", conversationId: 1 })).toBe(false);
     expect(delivery.key({ kind: "telegram", chatId: CHAT })).toBe(String(CHAT));

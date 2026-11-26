@@ -17,7 +17,9 @@ import {
 } from "./pi/durable.ts";
 import { archivedIn, backfillArchived } from "./archive.ts";
 import { Bots, type BotsState, ConversationMeta, setProfile } from "./conversations.ts";
-import { MAIN_PROFILE, type ProfileName, type Profiles } from "./profiles.ts";
+import { MAIN_PROFILE, PICKABLE_PROFILES, type ProfileName, type Profiles } from "./profiles.ts";
+
+export const ACTIVE_BOT_LIMIT = 20;
 
 /** The main bot's name. */
 export const MAIN_BOT_NAME = "MiPi";
@@ -63,6 +65,18 @@ export async function createBot(
   const bots = await tx.doc(Bots);
   const refused = botNameRefusal(bots, bot.name);
   if (refused !== undefined) throw new Error(refused);
+  if (bot.kind === "bot") {
+    if (!PICKABLE_PROFILES.includes(bot.profile)) {
+      throw new Error(
+        `${bot.profile} can't be a bot's profile: pick one of ${PICKABLE_PROFILES.join(", ")}.`,
+      );
+    }
+    const active = Object.values(bots.names ?? {}).filter(
+      (id) => id !== bots.mainId && !archivedIn(bots, id),
+    );
+    if (active.length >= ACTIVE_BOT_LIMIT)
+      throw new Error(`There are already ${ACTIVE_BOT_LIMIT} active purpose bots.`);
+  }
   const name = bot.name.trim();
   const purpose = bot.purpose?.trim();
   const { id } = await tx.createConversation({ ownership: { kind: "ownerless" } });

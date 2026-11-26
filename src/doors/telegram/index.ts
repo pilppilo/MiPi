@@ -43,6 +43,7 @@ export const telegramDoor: DoorRegistration = {
     {
       prefix: "tg",
       source: "telegram",
+      authority: "owner",
       automated: false,
       // The chat isn't in `tg:<update_id>`: it is the one the door recorded with the input.
       replyTo: async (tx, { submissionId }) => {

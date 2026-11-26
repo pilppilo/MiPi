@@ -26,6 +26,9 @@ export type DeliveryMessage = {
   readonly text: string;
   /** A proactive answer's source (a reminder's id): once confirmed, it joins the recent sends. Never on notices. */
   readonly proactive?: { readonly sourceId: string };
+  /** Highest hop of the turn that answered, for bot follow-ups. */
+  readonly botHop?: number;
+  readonly ownerReply?: DeliveryDestination;
 };
 
 type AdapterBase = {
@@ -55,7 +58,7 @@ export type DeliveryAdapter =
 /** The registered adapters of one agent. */
 export class Delivery {
   readonly #adapters: ReadonlyMap<string, DeliveryAdapter>;
-  readonly #transcript: ((conversationId: number) => DeliveryDestination) | undefined;
+  readonly #transcript: (conversationId: number) => DeliveryDestination;
 
   /**
    * `transcript` is the destination of a conversation's own transcript, where a reply goes when no door names a place
@@ -72,8 +75,16 @@ export class Delivery {
       }
       byKind.set(adapter.kind, adapter);
     }
+    if (transcript === undefined) {
+      byKind.set("transcript", {
+        kind: "transcript",
+        canPush: false,
+        key: ({ conversationId }) => String(conversationId),
+        describe: () => "this conversation",
+      });
+    }
     this.#adapters = byKind;
-    this.#transcript = transcript;
+    this.#transcript = transcript ?? ((conversationId) => ({ kind: "transcript", conversationId }));
   }
 
   /** The registered kinds, in registration order. */
@@ -104,9 +115,6 @@ export class Delivery {
 
   /** The conversation's own transcript, where a reply goes when no door names a place. */
   transcriptOf(conversationId: number): DeliveryDestination {
-    if (this.#transcript === undefined) {
-      throw new Error("No door registered a transcript destination");
-    }
     return this.#transcript(conversationId);
   }
 
