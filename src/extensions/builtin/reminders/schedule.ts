@@ -6,6 +6,7 @@ import {
   type Tx,
 } from "../../../agent/pi/durable.ts";
 import { type Connectors, connectorsOf } from "../../../agent/connectors.ts";
+import { routeSchedule } from "../../../agent/archive.ts";
 import {
   DeliverScheduledInstruction,
   nextRecurrenceRunAt,
@@ -362,10 +363,16 @@ export async function readSchedules(tx: Tx) {
     if (typeof input.id !== "string" || typeof dueAt !== "number" || !Number.isFinite(dueAt)) {
       throw new Error("Invalid scheduled task deadline or id");
     }
+    if (typeof input.conversationId !== "number") {
+      throw new Error("Invalid scheduled task conversation");
+    }
+    // An archived bot's schedule is a known hold (COD-198, pi-ledger L11), not an overdue alarm.
+    const held = (await routeSchedule(tx, input.conversationId)).kind === "held";
     schedules.push({
       id: input.id,
       dueAt,
       repeating: modern ? input.every !== undefined : input.recurrence !== undefined,
+      ...(held ? { held: "archived" as const } : {}),
     });
   }
   return schedules;

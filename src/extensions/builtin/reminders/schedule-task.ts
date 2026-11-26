@@ -2,6 +2,8 @@ import { type ConversationId, defineDoc, defineTask } from "../../../agent/pi/du
 import { formatScheduledInstruction } from "../../../protocol.ts";
 import { connectorsOf } from "../../../agent/connectors.ts";
 import { heldUntil, holdNow, tellHeld } from "../../../agent/gates.ts";
+import { holdReminder, routeSchedule } from "../../../agent/archive.ts";
+import { heldReminderRequest } from "./requests.ts";
 import { AgentSettings } from "../../../agent/settings.ts";
 import { localTime } from "../../../agent/stamp.ts";
 import { isTransientModelFailure, TRANSIENT_REMINDER_COOLDOWN_MS } from "../../../agent/limits.ts";
@@ -228,12 +230,46 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
     wait: (task, runtime, context) =>
       runtime.sleepUntil(task.input.runAt, { phase: "mark" }, context),
     mark: async (task, runtime, context) => {
+      const now = runtime.now();
       await runtime.commit(async (tx) => {
         const deliveries = await tx.doc(ScheduleDeliveries);
-        if (!deliveries.active.some(({ scheduleId }) => scheduleId === task.input.id)) {
+        const marked = deliveries.active.some(({ scheduleId }) => scheduleId === task.input.id);
+        // Where it runs (COD-198): its conversation, MiPi for a chat from before bots, or nowhere while its bot is
+        // archived. Marked already means it was routed before a restart: it goes on as marked.
+        const route = marked ? undefined : await routeSchedule(tx, task.input.conversationId);
+        if (route?.kind === "held") {
+          // pi-ledger L11: no task pause in Pi Durable, so an archived bot's delivery holds here when due.
+          const { recurrence } = task.input;
+          if (recurrence === undefined) {
+            await holdReminder(tx, {
+              id: task.input.id,
+              conversationId: task.input.conversationId,
+              instruction: task.input.instruction,
+              dueAt: task.input.runAt,
+              requestId: heldReminderRequest(task.input.id),
+              destination: connectorsOf(runtime.registry).delivery.transcriptOf(
+                task.input.conversationId,
+              ),
+            });
+          } else {
+            // A repeat skips this time and keeps its cadence, as under a hold.
+            await tx.createTask(
+              DeliverScheduledInstruction,
+              heldSuccessor(task.input, nextRecurrenceRunAt(task.input.runAt, recurrence, now)),
+              {
+                ownership: { kind: "conversation" },
+                conversationId: task.input.conversationId,
+                background: true,
+              },
+            );
+          }
+          return { status: "terminal", outcome: { status: "completed", result: null } };
+        }
+        if (route !== undefined) {
           deliveries.active.push({
             scheduleId: task.input.id,
-            conversationId: task.input.conversationId,
+            // The conversation it runs in, so its recurring successor is asked for there.
+            conversationId: route.conversationId,
             instruction: task.input.instruction,
             runAt: task.input.runAt,
             ...(task.input.recurrence === undefined ? {} : { recurrence: task.input.recurrence }),
@@ -248,13 +284,17 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
       // has already gone out.
       const now = runtime.now();
       let held = false;
+      // The conversation it runs in, as `mark` routed it: MiPi for a chat from before bots (COD-198).
+      let conversationId = task.input.conversationId;
       await runtime.commit(async (tx) => {
-        if (
-          (await tx.submissionByRequest(task.input.conversationId, task.input.id)) !== undefined
-        ) {
+        conversationId =
+          (await tx.doc(ScheduleDeliveries)).active.find(
+            ({ scheduleId }) => scheduleId === task.input.id,
+          )?.conversationId ?? task.input.conversationId;
+        if ((await tx.submissionByRequest(conversationId, task.input.id)) !== undefined) {
           return undefined;
         }
-        const { conversationId, previousRequestId, recurrence } = task.input;
+        const { previousRequestId, recurrence } = task.input;
         const hold = await holdNow(tx, now);
         let runAt: number | undefined;
         if (hold !== undefined) {
@@ -306,7 +346,7 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
             timeZone = (await tx.doc(AgentSettings)).timeZone;
           }, context);
         }
-        const conversation = await runtime.conversation(task.input.conversationId, context);
+        const conversation = await runtime.conversation(conversationId, context);
         if (conversation !== undefined) {
           const submission = await conversation.submit(
             {
@@ -347,7 +387,7 @@ export const DeliverScheduledInstruction = defineTask<ScheduledInstruction, Deli
         } else {
           runtime.report(
             new Error(
-              `Scheduled instruction ${task.input.id} conversation ${task.input.conversationId} is missing`,
+              `Scheduled instruction ${task.input.id} conversation ${conversationId} is missing`,
             ),
           );
         }

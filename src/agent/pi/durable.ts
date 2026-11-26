@@ -6,6 +6,17 @@
  *
  * Adding a name: export it here, then use it through this file.
  */
+import type { Conversation } from "@earendil-works/pi-durable";
+import type { Context } from "./context.ts";
+
+/**
+ * `Conversation.abort()` (COD-198): withdraws the queued inputs, aborts the run and waits until the conversation is
+ * idle. Background tasks (reminders) survive. Named here so an upgrade that changes it fails in this folder.
+ */
+export function abortConversation(conversation: Conversation, context: Context): Promise<void> {
+  return conversation.abort(context);
+}
+
 export {
   AssistantEntry,
   configure,

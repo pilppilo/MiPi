@@ -657,6 +657,89 @@ describe("chat application", () => {
     againSocket.close(1000, "test complete");
   });
 
+  it("archives and restores a bot over the WebSocket, never MiPi, and moves an open tab to MiPi (COD-198)", async () => {
+    const sessionId = "archive-over-websocket";
+    const main = await configureOfflineModel(sessionId);
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "archive-client"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Result = {
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      conversationId?: number;
+      error?: { message: string };
+    };
+    const run = async (command: Record<string, unknown>): Promise<Result> => {
+      const requestId = crypto.randomUUID();
+      socket.send(JSON.stringify({ ...command, requestId }));
+      return messages.nextMatching<Result>(
+        (message) => message.type === "command.result" && message.requestId === requestId,
+      );
+    };
+    expect(await run({ type: "bot.archive", conversationId: main })).toMatchObject({
+      ok: false,
+      error: { message: "MiPi can't be archived." },
+    });
+    const created = await run({
+      type: "bot.create",
+      name: "Garden",
+      purpose: "Look after the garden.",
+      profile: "default",
+    });
+    const garden = created.conversationId!;
+    // `bot.create` opened it in this tab: archiving moves the tab to MiPi, then tells every list, then answers.
+    type Snapshot = {
+      type: string;
+      session?: { conversations: Array<{ id: number; archivedAt?: number }> };
+    };
+    socket.send(
+      JSON.stringify({ type: "bot.archive", requestId: "archive", conversationId: garden }),
+    );
+    await messages.nextMatching<{ type: string; conversationId?: number }>(
+      (message) => message.type === "conversation.view" && message.conversationId === main,
+    );
+    await messages.nextMatching<Snapshot>(
+      (message) =>
+        message.type === "session.snapshot" &&
+        message.session?.conversations.find(({ id }) => id === garden)?.archivedAt !== undefined,
+    );
+    expect(
+      await messages.nextMatching<Result>(
+        (message) => message.type === "command.result" && message.requestId === "archive",
+      ),
+    ).toMatchObject({ ok: true });
+    // An archived bot takes no message.
+    expect(
+      await run({ type: "prompt.submit", conversationId: garden, content: "Hello?" }),
+    ).toMatchObject({
+      ok: false,
+      error: { message: "This bot is archived. Restore it to talk to it again." },
+    });
+    socket.send(
+      JSON.stringify({ type: "bot.restore", requestId: "restore", conversationId: garden }),
+    );
+    await messages.nextMatching<Snapshot>(
+      (message) =>
+        message.type === "session.snapshot" &&
+        message.session?.conversations.some(
+          ({ id, archivedAt }) => id === garden && archivedAt === undefined,
+        ) === true,
+    );
+    expect(
+      await messages.nextMatching<Result>(
+        (message) => message.type === "command.result" && message.requestId === "restore",
+      ),
+    ).toMatchObject({ ok: true, conversationId: garden });
+    expect(await run({ type: "bot.restore", conversationId: main })).toMatchObject({
+      ok: false,
+      error: { message: "MiPi can't be restored." },
+    });
+    socket.close(1000, "test complete");
+  });
+
   it("forks MiPi into a chat of its own on the default profile, never a second MiPi", async () => {
     const sessionId = "fork-the-main-bot";
     const { main, entry } = await seedMainEntry(sessionId, "Fork this");

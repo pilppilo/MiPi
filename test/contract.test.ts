@@ -70,6 +70,7 @@ describe("Pi seam contract", () => {
       "ProviderDoc",
       "UsageDoc",
       "UserEntry",
+      "abortConversation",
       "configure",
       "createRegistry",
       "defineDoc",
@@ -573,6 +574,67 @@ describe("Pi seam contract", () => {
           expect(second.messages.slice(0, first.messages.length)).toEqual(first.messages);
           expect(second.system).toEqual(first.system);
         }
+      } finally {
+        await harness.close(ctx);
+      }
+    });
+    await evictDurableObject(stub);
+  });
+
+  it("aborts a conversation's run and withdraws its queued input (COD-198)", async () => {
+    const stub = env.AGENT.getByName("contract-abort");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      const started = Promise.withResolvers<void>();
+      const faux = fauxProvider();
+      // The run's one request hangs until the abort cancels it.
+      faux.setResponses([
+        async (_request, options) => {
+          started.resolve();
+          return new Promise((_resolve, reject) => {
+            const abort = () => reject(new DOMException("Request interrupted", "AbortError"));
+            if (options?.signal?.aborted) abort();
+            else options?.signal?.addEventListener("abort", abort, { once: true });
+          });
+        },
+      ]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const storage = await openDurableObjectSqliteStorage(state.storage);
+      const harness = await durable.Harness.open(
+        storage,
+        {
+          models,
+          registry: durable.createRegistry(),
+          conversationCreated: (tx, conversation) =>
+            durable.configure(tx, conversation.id, {
+              model: { provider: "faux", modelId: "faux-1" },
+              thinkingLevel: "off",
+              tools: [],
+            }),
+        },
+        ctx,
+      );
+      try {
+        const root = await harness.root(ctx);
+        const running = await root.submit(
+          { type: "input", content: "Hang", requestId: "abort-1" },
+          ctx,
+        );
+        await started.promise;
+        const queued = await root.submit(
+          { type: "input", content: "Queued", requestId: "abort-2", whenBusy: "followUp" },
+          ctx,
+        );
+        await durable.abortConversation(root, ctx);
+        const [first, second] = await harness.commit(
+          async (tx) => [await tx.submission(running.id), await tx.submission(queued.id)] as const,
+          ctx,
+        );
+        // Settled, not left running: the run was aborted and the queued input withdrawn, unanswered both.
+        expect(first?.status).toBe("unanswered");
+        expect(second?.status).toBe("unanswered");
+        expect(faux.state.callCount).toBe(1);
       } finally {
         await harness.close(ctx);
       }

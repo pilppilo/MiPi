@@ -21,6 +21,7 @@ import {
   type SubmissionId,
   type Tx,
 } from "../../agent/pi/durable.ts";
+import { isArchived } from "../../agent/archive.ts";
 import { findLiveBot, type LiveBot, liveBots } from "../../agent/bots.ts";
 import {
   bindChannel,
@@ -90,6 +91,10 @@ export function isTelegramChange(publication: CommitChanges): boolean {
 
 /** The chat key a Telegram chat's binding lives under (`conversations.ts`). */
 export const telegramBinding = (chatId: number): string => `tg:${chatId}`;
+
+/** What a chat hears when its bot was archived before its waiting messages went out (COD-198). */
+export const ARCHIVED_WINDOW_REPLY =
+  "That bot was archived before your messages went out, so they weren't sent. Send them again to reach MiPi.";
 
 export const HELP_TEXT =
   "Hi, I'm MiPi. Send me a message and I'll answer here.\n\n" +
@@ -334,6 +339,27 @@ export class TelegramChannelRuntime {
     update: Extract<TelegramInbound, { kind: "text" }>,
     conversationId: ConversationId,
   ): Promise<boolean> {
+    const first = await this.#admitTextTo(update, conversationId);
+    if (first !== "archived") return first;
+    // Its bot was archived after the binding was read (COD-198): the binding read again falls back to MiPi, which is
+    // never archived. Nothing was stored for the message, so it goes in once, there.
+    const rebound = await this.#commit((tx) =>
+      boundConversation(
+        tx,
+        telegramBinding(update.chatId),
+        this.#options.profile,
+        this.#options.profiles,
+      ),
+    );
+    const second = await this.#admitTextTo(update, rebound);
+    if (second === "archived") throw new Error(`Telegram conversation ${rebound} is archived`);
+    return second;
+  }
+
+  async #admitTextTo(
+    update: Extract<TelegramInbound, { kind: "text" }>,
+    conversationId: ConversationId,
+  ): Promise<boolean | "archived"> {
     await this.#flushDueNow(update.chatId);
     const window = await this.#commit(async (tx) => {
       const open = (await tx.doc(TelegramChannel)).staged?.find(
@@ -353,15 +379,23 @@ export class TelegramChannelRuntime {
     await this.#options.armAlarm();
     // Whether this update is new: a replay Telegram sends again is stored already and accepts nothing.
     let accepted = false;
+    let archived = false;
     const submitted = await this.#commit(
       async (tx): Promise<{ id: SubmissionId; text: string } | undefined> => {
         const state = await tx.doc(TelegramChannel);
         if (hasReceipt(state, update.updateId)) return undefined;
-        accepted = true;
         const open = state.staged?.find(
           (staged) =>
             staged.chatId === update.chatId && staged.firstUpdateId === window?.firstUpdateId,
         );
+        // Archived since the binding (or the window) was read: an archived bot never runs, so nothing goes in. A window
+        // waiting for it is refused with a reply, and the message is admitted again where the binding is now.
+        if (await isArchived(tx, target.id)) {
+          if (open !== undefined) this.#refuseArchived(state, await tx.doc(TelegramOutbox), open);
+          archived = true;
+          return undefined;
+        }
+        accepted = true;
         if (open !== undefined) {
           const messages = [...open.messages.map((staged) => ({ ...staged })), message];
           if (messages.length < BATCH_MAX_MESSAGES && batchUnits(messages) < BATCH_MAX_UNITS) {
@@ -373,7 +407,8 @@ export class TelegramChannelRuntime {
           const id = await this.#submitBatch(tx, target, open.firstUpdateId, messages);
           this.#unstage(state, open.chatId, open.firstUpdateId);
           addReceipt(state, update.updateId, this.#now());
-          if (id === undefined) return undefined;
+          // Archived is caught above, before anything is written: here it can only be already sent.
+          if (id === undefined || id === "archived") return undefined;
           state.inputs.push({
             updateId: open.firstUpdateId,
             chatId: open.chatId,
@@ -432,6 +467,10 @@ export class TelegramChannelRuntime {
         return { id, text: update.text };
       },
     );
+    if (archived) {
+      this.#kickDrain();
+      return "archived";
+    }
     if (submitted !== undefined) await this.#submitted(target.id, submitted);
     return accepted;
   }
@@ -451,9 +490,17 @@ export class TelegramChannelRuntime {
     conversation: Conversation,
     firstUpdateId: number,
     messages: readonly { readonly text: string; readonly at: number }[],
-  ): Promise<SubmissionId | undefined> {
+  ): Promise<SubmissionId | "archived" | undefined> {
     const requestId = telegramBatchRequest(firstUpdateId);
     if ((await tx.submissionByRequest(conversation.id, requestId)) !== undefined) return undefined;
+    // Its bot was archived while the window waited (COD-198): an archived bot never runs, so nothing goes in. The
+    // chat reaches MiPi from its next message (`boundConversation`).
+    if (await isArchived(tx, conversation.id)) {
+      const state = await tx.doc(TelegramChannel);
+      const staged = state.staged?.find((window) => window.firstUpdateId === firstUpdateId);
+      if (staged !== undefined) this.#refuseArchived(state, await tx.doc(TelegramOutbox), staged);
+      return "archived";
+    }
     return conversation.admit(tx, {
       type: "input",
       content: batchContent(this.#options.owner, this.#options.timeZone, messages),
@@ -461,6 +508,24 @@ export class TelegramChannelRuntime {
       // Web or scheduled work may have started during the wait: then the batch is its follow-up.
       whenBusy: "followUp",
     });
+  }
+
+  /** Drops a window whose bot was archived, with a reply saying its messages weren't sent (COD-198). */
+  #refuseArchived(
+    state: TelegramChannelState,
+    outbox: Parameters<typeof enqueueReply>[0],
+    window: NonNullable<TelegramChannelState["staged"]>[number],
+  ): void {
+    this.#unstage(state, window.chatId, window.firstUpdateId);
+    enqueueReply(
+      outbox,
+      {
+        id: `archived:${window.firstUpdateId}`,
+        chatId: window.chatId,
+        text: ARCHIVED_WINDOW_REPLY,
+      },
+      this.#now(),
+    );
   }
 
   #unstage(state: TelegramChannelState, chatId: number, firstUpdateId: number): void {
@@ -520,7 +585,9 @@ export class TelegramChannelRuntime {
         const messages = open.messages.map((staged) => ({ ...staged }));
         const id = await this.#submitBatch(tx, conversation, open.firstUpdateId, messages);
         this.#unstage(state, window.chatId, window.firstUpdateId);
-        if (id === undefined) return undefined;
+        // Refused with a reply, as a paused window is: the drain sends it.
+        if (id === "archived") refused = true;
+        if (id === undefined || id === "archived") return undefined;
         state.inputs.push({
           updateId: window.firstUpdateId,
           chatId: window.chatId,
@@ -727,7 +794,8 @@ export class TelegramChannelRuntime {
         const messages = open.messages.map((staged) => ({ ...staged }));
         const id = await this.#submitBatch(tx, previous, open.firstUpdateId, messages);
         this.#unstage(state, open.chatId, open.firstUpdateId);
-        if (id !== undefined) {
+        // An archived bot's window is refused with a reply, which goes out with this command's.
+        if (id !== undefined && id !== "archived") {
           state.inputs.push({
             updateId: open.firstUpdateId,
             chatId,
