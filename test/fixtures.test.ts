@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 import { UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import type { AdminStatus, MipiAgent } from "../src/agent/agent-do.ts";
-import { ChannelBindings } from "../src/agent/conversations.ts";
+import { Bots, ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
@@ -94,6 +94,12 @@ describe("fixture databases", () => {
         instance.relayResult("fixture-relay"),
       );
       expect(relay).toEqual({ kind: "done", answer: "Hi PiDu." });
+      // Sent again through the relay, which now reaches MiPi (COD-197): its receipt still answers it, and nothing is
+      // admitted again.
+      const resent = await runInDurableObject(stub, (instance: MipiAgent) =>
+        instance.relayAdmit("fixture-relay", "Hello from PiDu"),
+      );
+      expect(resent).toEqual({ kind: "done", answer: "Hi PiDu." });
 
       // The web door opens a session on it.
       const socket = await worker.fetch(
@@ -105,6 +111,16 @@ describe("fixture databases", () => {
       expect(socket.status).toBe(101);
       socket.webSocket!.accept();
       socket.webSocket!.close(1000, "done");
+      // Its Telegram chat reaches MiPi now (COD-197): a command that needs no model moves the binding on first read.
+      await runInDurableObject(stub, (instance: MipiAgent) =>
+        instance.telegramAdmit({
+          kind: "command",
+          updateId: 9_000_001,
+          chatId: 4242,
+          command: "version",
+          argument: "",
+        }),
+      );
 
       // The repeat's stored time is long past: on opening, it is skipped as late and sleeps until its next time, without
       // a turn. Until it does, it may still be running.
@@ -165,11 +181,29 @@ describe("fixture databases", () => {
           );
           expect(lessons.some(({ from }) => from.source === "background")).toBe(true);
           // Snapshots only: this inspecting harness writes nothing beside the live agent.
-          for (const key of ["tg:4242", "web", "relay:pidu"]) {
-            expect(
-              (await harness.snapshot(ChannelBindings, key, ctx))?.conversationId,
-              key,
-            ).toBeDefined();
+          // The first start made MiPi (COD-197). Every chat from before bots is archived, kept whole.
+          const bots = (await harness.snapshot(Bots, ctx))!;
+          expect(bots.mainId).toBeDefined();
+          // Every door that wrote since reaches MiPi: the web, Telegram and the relay.
+          for (const key of ["web", "tg:4242", "relay:pidu"]) {
+            expect(await harness.snapshot(ChannelBindings, key, ctx), key).toEqual({
+              conversationId: bots.mainId,
+              bots: true,
+            });
+          }
+          // A commit that only reads: it writes nothing.
+          const ownerless = await harness.commit(
+            async (tx) =>
+              (await tx.scanConversations({}, 100)).items.filter(
+                ({ owner }) => owner === undefined,
+              ),
+            ctx,
+          );
+          expect(ownerless.length).toBeGreaterThan(1);
+          for (const { id } of ownerless) {
+            const meta = await harness.snapshot(ConversationMeta, id, ctx);
+            if (id === bots.mainId) expect(meta?.archivedAt).toBeUndefined();
+            else expect(meta?.archivedAt, `conversation ${id}`).toBeDefined();
           }
           const reminders = (await harness.inspect(ctx)).tasks.filter(
             ({ record }) => record.kind === ScheduledReminder.definition.name,

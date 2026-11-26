@@ -10,7 +10,7 @@
  */
 import type { ToolRegistration } from "./pi/durable.ts";
 
-export const PROFILE_NAMES = ["default", "empty", "pidu"] as const;
+export const PROFILE_NAMES = ["default", "empty", "pidu", "main"] as const;
 export type ProfileName = (typeof PROFILE_NAMES)[number];
 
 export interface ProfileEntry {
@@ -24,6 +24,20 @@ export interface ProfileEntry {
 export type ProfileTable = Readonly<Record<ProfileName, ProfileEntry>>;
 
 export const DEFAULT_PROFILE: ProfileName = "default";
+
+/** The main bot's profile (COD-197): MiPi alone runs on it, so no other conversation may be switched to it. */
+export const MAIN_PROFILE: ProfileName = "main";
+
+/** The relay's profile before bots: its chats from then still read it, but no conversation newly takes it. */
+export const RELAY_PROFILE: ProfileName = "pidu";
+
+/**
+ * The profiles a picker offers (web, Telegram's `/profile`): not `main` (MiPi's alone), nor `pidu`, which stays only so
+ * the relay's chats from before bots, now archived, still read their profile (COD-197).
+ */
+export const PICKABLE_PROFILES: readonly ProfileName[] = PROFILE_NAMES.filter(
+  (name) => name !== MAIN_PROFILE && name !== RELAY_PROFILE,
+);
 
 export function isProfileName(value: unknown): value is ProfileName {
   return typeof value === "string" && (PROFILE_NAMES as readonly string[]).includes(value);

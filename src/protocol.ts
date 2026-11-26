@@ -12,6 +12,9 @@ import type {
 
 export const ROOT_CONVERSATION_ID = 1;
 export const MAX_PROMPT_CHARACTERS = 100_000;
+/** A bot's name and purpose, as `bot.create` and `bot.rename` take them (COD-197). */
+export const MAX_BOT_NAME_CHARACTERS = 40;
+export const MAX_BOT_PURPOSE_CHARACTERS = 2_000;
 export const MAX_REQUEST_ID_CHARACTERS = 256;
 /** Entries one `conversation.entries` command may ask for. */
 export const MAX_ENTRY_PAGE = 100;
@@ -141,7 +144,31 @@ export interface ConversationSummary {
   readonly title?: string;
   /** The tool profile the conversation runs with. */
   readonly profile?: string;
+  // Bots (COD-197): unset on a chat from before bots and on subagents.
+  /** `main` (MiPi), `bot` (a purpose bot) or `cobot`. */
+  readonly kind?: BotKind;
+  readonly name?: string;
+  readonly purpose?: string;
+  /** A cobot's bot. */
+  readonly bot?: number;
+  /** When it was archived; an archived conversation isn't a live bot. */
+  readonly archivedAt?: number;
+  /** Its newest entry's id, for the unread dot; unset while it has none. */
+  readonly latestEntryId?: number;
 }
+
+export type BotKind = "main" | "bot" | "cobot";
+
+/** The conversation the web door opens first: MiPi (COD-197), or before bots the root conversation, or the first. */
+export const mainConversationId = (
+  conversations: readonly ConversationSummary[],
+): number | undefined =>
+  (
+    conversations.find(({ kind }) => kind === "main") ??
+    conversations.find(({ id }) => id === ROOT_CONVERSATION_ID) ??
+    conversations[0]
+  )?.id;
+const BOT_KINDS = new Set<string>(["main", "bot", "cobot"]);
 
 /** A model or tool profile a conversation can switch to. */
 export interface Choice {
@@ -230,8 +257,19 @@ export type ClientCommand =
       readonly limit: number;
     }
   | {
-      readonly type: "conversation.create";
+      /** Makes a purpose bot (COD-197): its purpose becomes its fixed instructions. */
+      readonly type: "bot.create";
       readonly requestId: string;
+      readonly name: string;
+      readonly purpose: string;
+      readonly profile: string;
+    }
+  | {
+      /** Renames a bot. Its purpose, and so its prompt, stays. */
+      readonly type: "bot.rename";
+      readonly requestId: string;
+      readonly conversationId: number;
+      readonly name: string;
     }
   | {
       readonly type: "conversation.fork";
@@ -304,6 +342,12 @@ export type ServerEvent =
       readonly conversation: ConversationSummary;
     }
   | {
+      /** A conversation's newest entry, sent as entries are stored: the list's unread dots, with no extra reads. */
+      readonly type: "conversation.head";
+      readonly conversationId: number;
+      readonly latestEntryId: number;
+    }
+  | {
       readonly type: "session.activity";
       readonly activity: TaskGraph;
     }
@@ -364,6 +408,17 @@ const optionalCommandId = (value: unknown, name: string): number | undefined => 
     throw new InvalidClientCommand(`${name} must be a non-negative integer`);
   }
   return value;
+};
+
+/** A bot's name or purpose: text, trimmed, not empty, at most `max` characters (counted as the agent counts them). */
+const botText = (value: unknown, name: string, max: number): string => {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new InvalidClientCommand(`${name} must contain text`);
+  }
+  if ([...value.trim()].length > max) {
+    throw new InvalidClientCommand(`${name} cannot exceed ${max} characters`);
+  }
+  return value.trim();
 };
 
 const optionalChoiceId = (value: unknown, name: string): string | undefined => {
@@ -490,7 +545,8 @@ export const parseUsageReadout = (value: unknown): UsageReadout => {
 const commandTypes = new Set<ClientCommandType>([
   "conversation.open",
   "conversation.entries",
-  "conversation.create",
+  "bot.create",
+  "bot.rename",
   "conversation.fork",
   "prompt.submit",
   "options.list",
@@ -628,6 +684,21 @@ const parseConversationSummary = (value: unknown): ConversationSummary => {
   }
   if (typeof value.title === "string") summary.title = value.title;
   if (typeof value.profile === "string") summary.profile = value.profile;
+  if (value.kind !== undefined) {
+    if (typeof value.kind !== "string" || !BOT_KINDS.has(value.kind)) {
+      throw new Error("Conversation kind is invalid");
+    }
+    summary.kind = value.kind as BotKind;
+  }
+  if (typeof value.name === "string") summary.name = value.name;
+  if (typeof value.purpose === "string") summary.purpose = value.purpose;
+  if (value.bot !== undefined) summary.bot = requireId(value.bot, "conversation.bot");
+  if (value.archivedAt !== undefined) {
+    summary.archivedAt = finite(value.archivedAt, "conversation.archivedAt");
+  }
+  if (value.latestEntryId !== undefined) {
+    summary.latestEntryId = requireId(value.latestEntryId, "conversation.latestEntryId");
+  }
   return summary;
 };
 
@@ -661,8 +732,24 @@ export function parseClientCommand(message: string): ClientCommand {
         requestId,
         conversationId: requireId(value.conversationId, "conversationId"),
       };
-    case "conversation.create":
-      return { type: value.type, requestId };
+    case "bot.create": {
+      const profile = optionalChoiceId(value.profile, "profile");
+      if (profile === undefined) throw new InvalidClientCommand("profile is required");
+      return {
+        type: value.type,
+        requestId,
+        name: botText(value.name, "name", MAX_BOT_NAME_CHARACTERS),
+        purpose: botText(value.purpose, "purpose", MAX_BOT_PURPOSE_CHARACTERS),
+        profile,
+      };
+    }
+    case "bot.rename":
+      return {
+        type: value.type,
+        requestId,
+        conversationId: requireId(value.conversationId, "conversationId"),
+        name: botText(value.name, "name", MAX_BOT_NAME_CHARACTERS),
+      };
     case "conversation.fork":
       return {
         type: value.type,
@@ -755,6 +842,12 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
     }
     case "conversation.created":
       return { type: value.type, conversation: parseConversationSummary(value.conversation) };
+    case "conversation.head":
+      return {
+        type: value.type,
+        conversationId: requireId(value.conversationId, "conversationId"),
+        latestEntryId: requireId(value.latestEntryId, "latestEntryId"),
+      };
     case "session.activity":
       return { type: value.type, activity: parseTaskGraph(value.activity) };
     case "conversation.view": {

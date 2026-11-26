@@ -87,6 +87,14 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **MiPi:** the provider extension recognizes its own plan limits. Core's `provider-limits` observer awaits one bound callback that reads usage and commits the provider's record off the Session line.
 - **Remove when:** pi-ai exposes structured limit information and a Pi Durable hook on failed responses can write or request a task.
 
+### L10 · Bindings move to MiPi one at a time
+
+- **Kind:** workaround
+- **Since:** 0.2.0-alpha.1
+- **Upstream:** Pi Durable 1.6.1 reads a document family only by key (`tx.doc(token, key, seed)`): a transaction can't list a family's keys, so core can't find every `app.channel-binding` (`tg:<chat>` for each Telegram chat) to move them in one commit.
+- **MiPi:** when MiPi is first made (COD-197), each binding moves to it the first time a door reads it, and is marked `bots`; a marked binding never moves again (`boundConversation`). Same result as moving them all at once, with no read of Pi Durable's tables.
+- **Remove when:** a transaction can list a document family's keys: then `ensureBots` moves every binding in its own commit, and the `bots` marker can go.
+
 ## Closed
 
 None yet.

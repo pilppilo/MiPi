@@ -24,7 +24,7 @@ import { BUILT_IN_EXTENSIONS } from "../src/extensions/builtins.ts";
 import { goLimit } from "../src/extensions/optional/opencode-go/limit.ts";
 import { AnswerSettlement } from "../src/agent/answers.ts";
 import { WakeSources } from "../src/agent/wake-sources.ts";
-import { PROFILES } from "./mipi.ts";
+import { PROFILES, botsOnModel } from "./mipi.ts";
 import { ModelList } from "../src/agent/model-list.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../src/doors/telegram/channel.ts";
 import {
@@ -109,6 +109,7 @@ export async function openAgent(
     },
     ctx,
   );
+  await botsOnModel(harness, { provider, modelId: "faux-1" });
   if (planResetAt !== undefined) {
     bindLimitRecorder(
       composition.limitExtension,

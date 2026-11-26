@@ -15,6 +15,7 @@ import {
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { withSpikeToken } from "./spike.ts";
+import { Bots } from "../src/agent/conversations.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import { HEARTBEAT_MS } from "../src/agent/alarm.ts";
 import { MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
@@ -119,9 +120,15 @@ const jsonMessages = (socket: WebSocket) => {
         await next();
       }
     },
-    /** Session snapshot, root conversation view, and typing presence. */
-    skipConnectFrames: async (): Promise<void> => {
-      for (let index = 0; index < 3; index++) await next();
+    /** Session snapshot, the bound bot's view (MiPi's at first), and typing presence: the bot's id. */
+    skipConnectFrames: async (): Promise<number> => {
+      let opened: number | undefined;
+      for (let index = 0; index < 3; index++) {
+        const frame = await next<{ type?: string; conversationId?: number }>();
+        if (frame.type === "conversation.view") opened = frame.conversationId;
+      }
+      if (opened === undefined) throw new Error("The session opened no conversation");
+      return opened;
     },
   };
 };
@@ -151,18 +158,28 @@ async function seedSession<T>(
   return result;
 }
 
-const configureOfflineModel = (sessionId: string, conversationId: number = 1): Promise<void> =>
+/**
+ * Puts a conversation on a model that never answers, and returns its id: MiPi (which the web door opens) unless named,
+ * or `root`, Pi Durable's root conversation, which stands for a chat from before bots.
+ */
+const configureOfflineModel = (
+  sessionId: string,
+  target: "main" | "root" | number = "main",
+): Promise<number> =>
   seedSession(sessionId, createHarnessOptions(), async (harness) => {
-    await harness.root(BACKGROUND_CONTEXT);
-    const conversation = await harness.conversation(
-      conversationId as ConversationId,
-      BACKGROUND_CONTEXT,
-    );
-    if (conversation === undefined) throw new Error(`Conversation ${conversationId} is missing`);
+    const id =
+      target === "root"
+        ? (await harness.root(BACKGROUND_CONTEXT)).id
+        : target === "main"
+          ? await harness.commit(async (tx) => (await tx.doc(Bots)).mainId, BACKGROUND_CONTEXT)
+          : target;
+    const conversation = await harness.conversation(id as ConversationId, BACKGROUND_CONTEXT);
+    if (conversation === undefined) throw new Error(`Conversation ${id} is missing`);
     await conversation.configure(
       { model: { provider: "offline", modelId: "offline" }, tools: [] },
       BACKGROUND_CONTEXT,
     );
+    return id!;
   });
 
 const seedUserEntry = (sessionId: string, content: string): Promise<number> => {
@@ -186,6 +203,42 @@ const seedUserEntry = (sessionId: string, content: string): Promise<number> => {
   });
 };
 
+/** A settled input in MiPi, as an earlier process would have left it: a fork needs a committed entry. */
+const seedMainEntry = (
+  sessionId: string,
+  content: string,
+): Promise<{ main: number; entry: number }> => {
+  const models = createModels();
+  const faux = fauxProvider();
+  faux.setResponses([fauxAssistantMessage([fauxText("Seeded")])]);
+  models.setProvider(faux.provider);
+  return seedSession(
+    sessionId,
+    createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+    async (harness) => {
+      const main = (await harness.commit(
+        async (tx) => (await tx.doc(Bots)).mainId,
+        BACKGROUND_CONTEXT,
+      ))!;
+      const conversation = (await harness.conversation(
+        main as ConversationId,
+        BACKGROUND_CONTEXT,
+      ))!;
+      await conversation.configure(
+        { model: { provider: "faux", modelId: "faux-1" } },
+        BACKGROUND_CONTEXT,
+      );
+      const settled = await (
+        await conversation.submit({ type: "input", content, requestId: "seed" }, BACKGROUND_CONTEXT)
+      ).wait(BACKGROUND_CONTEXT);
+      if (settled.type !== "input" || settled.entry === undefined) {
+        throw new Error("Seed submission did not create an input entry");
+      }
+      return { main, entry: settled.entry };
+    },
+  );
+};
+
 describe("chat application", () => {
   it("shares attributed prompts between clients in one session", async () => {
     const sessionId = "multiplayer-prompts";
@@ -203,22 +256,29 @@ describe("chat application", () => {
     const bobMessages = jsonMessages(bobSocket);
     aliceSocket.accept();
     bobSocket.accept();
-    await Promise.all([aliceMessages.skipConnectFrames(), bobMessages.skipConnectFrames()]);
-    aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: true }));
+    const [main] = await Promise.all([
+      aliceMessages.skipConnectFrames(),
+      bobMessages.skipConnectFrames(),
+    ]);
+    aliceSocket.send(
+      JSON.stringify({ type: "presence.typing", conversationId: main, typing: true }),
+    );
     const [alicePresence, bobPresence] = await Promise.all([
       aliceMessages.nextMatching<ProtocolMessage>(
-        (message) => message.type === "presence.typing" && message.conversationId === 1,
+        (message) => message.type === "presence.typing" && message.conversationId === main,
       ),
       bobMessages.nextMatching<ProtocolMessage>(
-        (message) => message.type === "presence.typing" && message.conversationId === 1,
+        (message) => message.type === "presence.typing" && message.conversationId === main,
       ),
     ]);
     expect(alicePresence.usernames).toEqual([]);
     expect(bobPresence.usernames).toEqual(["jerome"]);
 
-    aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: false }));
+    aliceSocket.send(
+      JSON.stringify({ type: "presence.typing", conversationId: main, typing: false }),
+    );
     const stoppedTyping = await bobMessages.nextMatching<ProtocolMessage>(
-      (message) => message.type === "presence.typing" && message.conversationId === 1,
+      (message) => message.type === "presence.typing" && message.conversationId === main,
     );
     expect(stoppedTyping.usernames).toEqual([]);
 
@@ -226,30 +286,30 @@ describe("chat application", () => {
       JSON.stringify({
         type: "prompt.submit",
         requestId: "alice-prompt",
-        conversationId: 1,
+        conversationId: main,
         content: "Start the plan",
       }),
     );
 
     const aliceText = "[jerome]\nStart the plan";
     await Promise.all([
-      aliceMessages.untilView(1, (view) => submittedTexts(view).includes(aliceText)),
-      bobMessages.untilView(1, (view) => submittedTexts(view).includes(aliceText)),
+      aliceMessages.untilView(main, (view) => submittedTexts(view).includes(aliceText)),
+      bobMessages.untilView(main, (view) => submittedTexts(view).includes(aliceText)),
     ]);
 
     bobSocket.send(
       JSON.stringify({
         type: "prompt.submit",
         requestId: "bob-prompt",
-        conversationId: 1,
+        conversationId: main,
         content: "Add the risks",
       }),
     );
 
     const bobText = "[jerome]\nAdd the risks";
     await Promise.all([
-      aliceMessages.untilView(1, (view) => submittedTexts(view).includes(bobText)),
-      bobMessages.untilView(1, (view) => submittedTexts(view).includes(bobText)),
+      aliceMessages.untilView(main, (view) => submittedTexts(view).includes(bobText)),
+      bobMessages.untilView(main, (view) => submittedTexts(view).includes(bobText)),
     ]);
 
     aliceSocket.close(1000, "test complete");
@@ -263,13 +323,13 @@ describe("chat application", () => {
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
-    await messages.skipConnectFrames();
+    const main = await messages.skipConnectFrames();
 
     socket.send(
       JSON.stringify({
         type: "prompt.submit",
         requestId: "heartbeat-prompt",
-        conversationId: 1,
+        conversationId: main,
         content: "Answer and go idle",
       }),
     );
@@ -297,12 +357,12 @@ describe("chat application", () => {
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
-    await messages.skipConnectFrames();
+    const main = await messages.skipConnectFrames();
 
     const command = JSON.stringify({
       type: "prompt.submit",
       requestId: "stable-request",
-      conversationId: 1,
+      conversationId: main,
       content: "Only once",
     });
     socket.send(command);
@@ -332,9 +392,9 @@ describe("chat application", () => {
     const reopenedSocket = reopened.webSocket!;
     const reopenedMessages = jsonMessages(reopenedSocket);
     reopenedSocket.accept();
-    await reopenedMessages.skipConnectFrames();
+    expect(await reopenedMessages.skipConnectFrames()).toBe(main);
     expect(
-      submittedTexts(reopenedMessages.views.get(1)).filter(
+      submittedTexts(reopenedMessages.views.get(main)).filter(
         (text) => text === "[jerome]\nOnly once",
       ),
     ).toHaveLength(1);
@@ -342,7 +402,8 @@ describe("chat application", () => {
   });
   it("titles a conversation from its first message and switches its profile", async () => {
     const sessionId = "titles-and-profiles";
-    await configureOfflineModel(sessionId);
+    // A chat from before bots (the root): MiPi's profile never changes (COD-197).
+    const chat = await configureOfflineModel(sessionId, "root");
     const response = await openSession(sessionSocketUrl(sessionId, "Alice", "titles-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
@@ -354,13 +415,14 @@ describe("chat application", () => {
       session?: { conversations: Array<{ id: number; title?: string; profile?: string }> };
     };
     type Result = { type: string; requestId?: string; ok?: boolean; error?: { message: string } };
-    const root = (snapshot: Snapshot) => snapshot.session?.conversations.find(({ id }) => id === 1);
+    const root = (snapshot: Snapshot) =>
+      snapshot.session?.conversations.find(({ id }) => id === chat);
 
     socket.send(
       JSON.stringify({
         type: "prompt.submit",
         requestId: "first",
-        conversationId: 1,
+        conversationId: chat,
         content: "Plan the week",
       }),
     );
@@ -373,7 +435,7 @@ describe("chat application", () => {
       JSON.stringify({
         type: "conversation.configure",
         requestId: "to-empty",
-        conversationId: 1,
+        conversationId: chat,
         profile: "empty",
       }),
     );
@@ -386,7 +448,7 @@ describe("chat application", () => {
       JSON.stringify({
         type: "conversation.configure",
         requestId: "bad",
-        conversationId: 1,
+        conversationId: chat,
         profile: "coding",
       }),
     );
@@ -400,17 +462,20 @@ describe("chat application", () => {
     socket.close(1000, "test complete");
   });
 
-  it("acknowledges and deduplicates retried conversation creation", async () => {
+  it("acknowledges and deduplicates retried bot creation", async () => {
     const sessionId = "retried-conversation-create";
     const command = JSON.stringify({
-      type: "conversation.create",
+      type: "bot.create",
       requestId: "stable-create-request",
+      name: "Groceries",
+      purpose: "Keep the shopping list.",
+      profile: "default",
     });
     const response = await openSession(sessionSocketUrl(sessionId, "Alice", "create-retry-client"));
     const socket = response.webSocket!;
     const messages = jsonMessages(socket);
     socket.accept();
-    await messages.skipConnectFrames();
+    const main = await messages.skipConnectFrames();
 
     socket.send(command);
     type CreateEvent = {
@@ -424,7 +489,7 @@ describe("chat application", () => {
         ({ type, requestId }) => type === "command.result" && requestId === "stable-create-request",
       ) ||
       !creationFrames.some(
-        ({ type, conversationId }) => type === "conversation.view" && conversationId !== 1,
+        ({ type, conversationId }) => type === "conversation.view" && conversationId !== main,
       )
     ) {
       creationFrames.push(await messages.next<CreateEvent>());
@@ -433,7 +498,7 @@ describe("chat application", () => {
       ({ type, requestId }) => type === "command.result" && requestId === "stable-create-request",
     );
     const watchIndex = creationFrames.findIndex(
-      ({ type, conversationId }) => type === "conversation.view" && conversationId !== 1,
+      ({ type, conversationId }) => type === "conversation.view" && conversationId !== main,
     );
     expect(watchIndex).toBeLessThan(acknowledgementIndex);
     const first = creationFrames[acknowledgementIndex]!;
@@ -460,7 +525,17 @@ describe("chat application", () => {
       type: string;
       session: { conversations: Array<{ id: number }> };
     }>();
-    expect(snapshot.session.conversations).toHaveLength(2);
+    // MiPi and the new bot, which survived the restart as a bot (COD-197).
+    expect(snapshot.session.conversations).toEqual([
+      expect.objectContaining({ kind: "main", name: "MiPi", profile: "main" }),
+      {
+        id: first.conversationId,
+        kind: "bot",
+        name: "Groceries",
+        purpose: "Keep the shopping list.",
+        profile: "default",
+      },
+    ]);
     for (let index = 0; index < 2; index++) await reopenedMessages.next();
 
     reopenedSocket.send(command);
@@ -473,6 +548,161 @@ describe("chat application", () => {
       conversationId: first.conversationId,
     });
     reopenedSocket.close(1000, "test complete");
+  });
+
+  it("names bots uniquely, keeps main and pidu off them, renames them, and tells the list of new entries", async () => {
+    const sessionId = "bots-over-websocket";
+    const main = await configureOfflineModel(sessionId);
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "bots-client"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Result = {
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      conversationId?: number;
+      error?: { message: string };
+    };
+    const run = async (command: Record<string, unknown>): Promise<Result> => {
+      const requestId = crypto.randomUUID();
+      socket.send(JSON.stringify({ ...command, requestId }));
+      return messages.nextMatching<Result>(
+        (message) => message.type === "command.result" && message.requestId === requestId,
+      );
+    };
+    const bot = (name: string, profile = "default") =>
+      run({ type: "bot.create", name, purpose: "Keep the shopping list.", profile });
+
+    const created = await bot("Groceries");
+    expect(created.ok).toBe(true);
+    // Names are unique ignoring case, MiPi's included; `main` and `pidu` are no bot's profile.
+    expect(await bot("  groceries ")).toMatchObject({
+      ok: false,
+      error: { message: "There is already a bot named groceries." },
+    });
+    expect(await bot("mipi")).toMatchObject({ ok: false });
+    for (const profile of ["main", "pidu"]) {
+      expect(await bot("Other", profile)).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining("can't be a bot's profile") },
+      });
+    }
+
+    // Renaming keeps the purpose and frees the old name, and an open tab hears of it at once.
+    type Snapshot = {
+      type: string;
+      session?: { conversations: Array<{ id: number; name?: string; kind?: string }> };
+    };
+    const other = await openSession(sessionSocketUrl(sessionId, "Bob", "bots-client-other"));
+    const otherSocket = other.webSocket!;
+    const otherMessages = jsonMessages(otherSocket);
+    otherSocket.accept();
+    await otherMessages.skipConnectFrames();
+    const renamed = otherMessages.nextMatching<Snapshot>(
+      (message) =>
+        message.type === "session.snapshot" &&
+        message.session?.conversations.some(({ name }) => name === "Shopping") === true,
+    );
+    expect(
+      await run({ type: "bot.rename", conversationId: created.conversationId, name: "Shopping" }),
+    ).toMatchObject({ ok: true });
+    await renamed;
+    otherSocket.close(1000, "test complete");
+    expect((await bot("Groceries")).ok).toBe(true);
+    // MiPi can be renamed too; a chat from before bots can't.
+    const older = await configureOfflineModel(sessionId, "root");
+    expect(
+      await run({ type: "bot.rename", conversationId: older, name: "Old chat" }),
+    ).toMatchObject({ ok: false, error: { message: "Only a bot can be renamed." } });
+
+    // A new entry tells every list its conversation's newest entry, with no snapshot.
+    socket.send(
+      JSON.stringify({
+        type: "prompt.submit",
+        requestId: "head-prompt",
+        conversationId: main,
+        content: "Hello",
+      }),
+    );
+    const head = await messages.nextMatching<{
+      type: string;
+      conversationId?: number;
+      latestEntryId?: number;
+    }>((message) => message.type === "conversation.head" && message.conversationId === main);
+    expect(head.latestEntryId).toEqual(expect.any(Number));
+
+    socket.close(1000, "test complete");
+
+    // A new session's snapshot carries each bot's newest entry, and the rename.
+    const again = await openSession(sessionSocketUrl(sessionId, "Alice", "bots-client-2"));
+    const againSocket = again.webSocket!;
+    const againMessages = jsonMessages(againSocket);
+    againSocket.accept();
+    const snapshot = await againMessages.nextMatching<{
+      type: string;
+      session?: {
+        conversations: Array<{ id: number; name?: string; latestEntryId?: number }>;
+      };
+    }>((message) => message.type === "session.snapshot");
+    const conversations = snapshot.session!.conversations;
+    expect(conversations.find(({ id }) => id === main)?.latestEntryId).toBeGreaterThanOrEqual(
+      head.latestEntryId!,
+    );
+    expect(conversations.find(({ id }) => id === created.conversationId)).toMatchObject({
+      name: "Shopping",
+      purpose: "Keep the shopping list.",
+    });
+    againSocket.close(1000, "test complete");
+  });
+
+  it("forks MiPi into a chat of its own on the default profile, never a second MiPi", async () => {
+    const sessionId = "fork-the-main-bot";
+    const { main, entry } = await seedMainEntry(sessionId, "Fork this");
+    const response = await openSession(sessionSocketUrl(sessionId, "Alice", "fork-main-client"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    expect(await messages.skipConnectFrames()).toBe(main);
+    type Snapshot = {
+      type: string;
+      session?: { conversations: Array<{ id: number; kind?: string; parent?: unknown }> };
+    };
+    socket.send(
+      JSON.stringify({
+        type: "conversation.fork",
+        requestId: "fork-main",
+        conversationId: main,
+        entryId: entry,
+      }),
+    );
+    const result = await messages.nextMatching<{
+      type: string;
+      requestId?: string;
+      ok?: boolean;
+      conversationId?: number;
+    }>((message) => message.type === "command.result" && message.requestId === "fork-main");
+    expect(result.ok).toBe(true);
+    socket.close(1000, "test complete");
+
+    const again = await openSession(sessionSocketUrl(sessionId, "Alice", "fork-main-client-2"));
+    const againSocket = again.webSocket!;
+    const againMessages = jsonMessages(againSocket);
+    againSocket.accept();
+    const snapshot = await againMessages.nextMatching<Snapshot>(
+      ({ type }) => type === "session.snapshot",
+    );
+    const conversations = snapshot.session!.conversations;
+    expect(conversations.filter(({ kind }) => kind === "main").map(({ id }) => id)).toEqual([main]);
+    // Off MiPi's `main` too, whose tools are MiPi's alone.
+    expect(conversations.find(({ id }) => id === result.conversationId)).toEqual({
+      id: result.conversationId,
+      parent: { conversationId: main, at: entry },
+      profile: "default",
+      latestEntryId: entry,
+    });
+    againSocket.close(1000, "test complete");
   });
 
   it("always returns the owner's one session", async () => {
@@ -501,7 +731,7 @@ describe("chat application", () => {
     await response.body?.cancel();
   });
 
-  it("opens a session WebSocket with the root conversation", async () => {
+  it("opens a session WebSocket with MiPi", async () => {
     const response = await exports.default.fetch(
       withSpikeToken("https://example.com/api/sessions/jerome", {
         headers: { Upgrade: "websocket" },
@@ -521,16 +751,21 @@ describe("chat application", () => {
         activity: { tasks: Record<string, unknown> };
       };
     }>();
+    // A new agent has only MiPi, which every door reaches (COD-197).
     expect(session).toEqual({
       type: "session.snapshot",
-      session: { conversations: [{ id: 1, profile: "default" }], activity: { tasks: {} } },
+      session: {
+        conversations: [{ id: expect.any(Number), kind: "main", name: "MiPi", profile: "main" }],
+        activity: { tasks: {} },
+      },
     });
+    const main = session.session.conversations[0]!.id;
 
     await expect(messages.next()).resolves.toMatchObject({
       type: "conversation.view",
-      conversationId: 1,
+      conversationId: main,
       view: {
-        conversation: { id: 1 },
+        conversation: { id: main },
         entries: [],
         docs: {
           "pi.agent": {
@@ -543,7 +778,7 @@ describe("chat application", () => {
     });
     await expect(messages.next()).resolves.toEqual({
       type: "presence.typing",
-      conversationId: 1,
+      conversationId: main,
       usernames: [],
     });
 
@@ -559,7 +794,13 @@ describe("chat application", () => {
     await messages.skipConnectFrames();
 
     socket.send(
-      JSON.stringify({ type: "conversation.create", requestId: "create-before-eviction" }),
+      JSON.stringify({
+        type: "bot.create",
+        requestId: "create-before-eviction",
+        name: "Before eviction",
+        purpose: "Survive a restart.",
+        profile: "default",
+      }),
     );
     const created = await messages.nextMatching<{
       type: string;
@@ -604,14 +845,19 @@ describe("chat application", () => {
     const bobMessages = jsonMessages(bobSocket);
     aliceSocket.accept();
     bobSocket.accept();
-    await Promise.all([aliceMessages.skipConnectFrames(), bobMessages.skipConnectFrames()]);
+    const [main] = await Promise.all([
+      aliceMessages.skipConnectFrames(),
+      bobMessages.skipConnectFrames(),
+    ]);
 
-    aliceSocket.send(JSON.stringify({ type: "presence.typing", conversationId: 1, typing: true }));
+    aliceSocket.send(
+      JSON.stringify({ type: "presence.typing", conversationId: main, typing: true }),
+    );
     await expect(
       bobMessages.nextMatching<ProtocolMessage>(
         (message) =>
           message.type === "presence.typing" &&
-          message.conversationId === 1 &&
+          message.conversationId === main &&
           message.usernames?.includes("jerome") === true,
       ),
     ).resolves.toMatchObject({ usernames: ["jerome"] });
@@ -621,7 +867,7 @@ describe("chat application", () => {
       JSON.stringify({
         type: "conversation.open",
         requestId: "wake-after-eviction",
-        conversationId: 1,
+        conversationId: main,
       }),
     );
 
@@ -629,7 +875,7 @@ describe("chat application", () => {
       bobMessages.nextMatching<ProtocolMessage>(
         (message) =>
           message.type === "presence.typing" &&
-          message.conversationId === 1 &&
+          message.conversationId === main &&
           message.usernames?.includes("jerome") === true,
       ),
     ).resolves.toMatchObject({ usernames: ["jerome"] });
@@ -766,6 +1012,8 @@ describe("chat application", () => {
     expect(forkSummary).toEqual({
       id: forkId,
       parent: { conversationId: 1, at: entryId },
+      // A fork sees its parent's entries up to where it forked.
+      latestEntryId: entryId,
       // A fork keeps its parent's profile.
       profile: "default",
     });
@@ -850,25 +1098,30 @@ describe("chat application", () => {
   it("lists subagent conversations with their owner", async () => {
     const sessionId = "owned-conversations-listed";
     // A task-owned conversation, as history search creates for its subagent.
-    const childId = await seedSession(sessionId, createHarnessOptions(), async (harness) => {
-      const root = await harness.root(BACKGROUND_CONTEXT);
-      return root.commit(async (tx) => {
-        const task = await tx.createTask(
-          DeliverScheduledInstruction,
-          {
-            id: "schedule:owner",
-            conversationId: root.id,
-            instruction: "Owner only",
-            runAt: Date.now() + 3_600_000,
-          },
-          { ownership: { kind: "conversation" }, background: true },
-        );
-        const child = await tx.createConversation({
-          ownership: { kind: "task", taskId: task },
-        });
-        return child.id;
-      }, BACKGROUND_CONTEXT);
-    });
+    const { childId, rootId } = await seedSession(
+      sessionId,
+      createHarnessOptions(),
+      async (harness) => {
+        const root = await harness.root(BACKGROUND_CONTEXT);
+        const childId = await root.commit(async (tx) => {
+          const task = await tx.createTask(
+            DeliverScheduledInstruction,
+            {
+              id: "schedule:owner",
+              conversationId: root.id,
+              instruction: "Owner only",
+              runAt: Date.now() + 3_600_000,
+            },
+            { ownership: { kind: "conversation" }, background: true },
+          );
+          const child = await tx.createConversation({
+            ownership: { kind: "task", taskId: task },
+          });
+          return child.id;
+        }, BACKGROUND_CONTEXT);
+        return { childId, rootId: root.id };
+      },
+    );
 
     const response = await openSession(`https://example.com/api/sessions/${sessionId}`);
     const socket = response.webSocket!;
@@ -885,13 +1138,16 @@ describe("chat application", () => {
     expect(snapshot).toMatchObject({
       type: "session.snapshot",
       session: {
-        conversations: [{ id: 1 }, { id: childId, owner: { conversationId: 1 } }],
+        conversations: expect.arrayContaining([
+          expect.objectContaining({ id: rootId }),
+          { id: childId, owner: { conversationId: rootId } },
+        ]),
       },
     });
     expect(Object.values(snapshot.session.activity.tasks)).toEqual([
       expect.objectContaining({
         kind: "app.deliver-scheduled-instruction",
-        conversationId: 1,
+        conversationId: rootId,
         background: true,
         conversations: [childId],
       }),

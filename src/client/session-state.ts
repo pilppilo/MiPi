@@ -15,7 +15,7 @@ import type {
 } from "../agent/pi/shared.ts";
 import { CompactionEntry, ResetEntry, ToolResultEntry } from "../agent/pi/shared.ts";
 import {
-  ROOT_CONVERSATION_ID,
+  mainConversationId,
   parseScheduledInstruction,
   queuedInputs,
   type ConnectionStatus,
@@ -168,7 +168,7 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
       const selectedStillExists = conversations.some(({ id }) => id === state.activeConversationId);
       const activeConversationId = selectedStillExists
         ? state.activeConversationId
-        : (conversations.find(({ id }) => id === ROOT_CONVERSATION_ID)?.id ?? conversations[0]?.id);
+        : mainConversationId(conversations);
       return {
         ...state,
         conversations,
@@ -182,6 +182,17 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
         event.conversation,
       ].sort((left, right) => left.id - right.id);
       return { ...state, conversations };
+    }
+    case "conversation.head": {
+      // Only a conversation the list already has: a new one arrives with its own summary.
+      let changed = false;
+      const conversations = state.conversations.map((conversation) => {
+        if (conversation.id !== event.conversationId) return conversation;
+        if ((conversation.latestEntryId ?? 0) >= event.latestEntryId) return conversation;
+        changed = true;
+        return { ...conversation, latestEntryId: event.latestEntryId };
+      });
+      return changed ? { ...state, conversations } : state;
     }
     case "session.activity":
       return { ...state, activity: event.activity };
@@ -203,7 +214,7 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
     case "command.result":
       if (!event.ok) return { ...state, error: event.error.message };
       return event.conversationId === undefined ||
-        (event.command !== "conversation.create" && event.command !== "conversation.fork")
+        (event.command !== "bot.create" && event.command !== "conversation.fork")
         ? state
         : { ...state, activeConversationId: event.conversationId, error: undefined };
     case "error":

@@ -14,7 +14,7 @@ import {
   MAX_ENTRY_PAGE,
   MAX_PROMPT_CHARACTERS,
   parseServerEventEnvelope,
-  ROOT_CONVERSATION_ID,
+  mainConversationId,
   type ClientCommand,
   type ConnectionStatus,
   type ConversationSummary,
@@ -63,7 +63,13 @@ export interface PiSession {
     change: { readonly model?: string; readonly profile?: string },
   ): void;
   openConversation(conversationId: number): void;
-  createConversation(): void;
+  /** Makes a purpose bot and opens it. Resolves with whether the agent accepted it (a name may be taken). */
+  createBot(bot: {
+    readonly name: string;
+    readonly purpose: string;
+    readonly profile: string;
+  }): Promise<boolean>;
+  renameBot(conversationId: number, name: string): void;
   forkConversation(conversationId: number, entryId: number): void;
   setTyping(conversationId: number, typing: boolean): void;
   submitPrompt(conversationId: number, content: string): Promise<boolean>;
@@ -81,7 +87,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
   const outboxRef = useRef<CommandOutbox | null>(null);
   outboxRef.current ??= new CommandOutbox();
   const outbox = outboxRef.current;
-  const selectedConversationRef = useRef(initialConversationId ?? ROOT_CONVERSATION_ID);
+  const selectedConversationRef = useRef<number | undefined>(initialConversationId);
   // A conversation's view as last received, to apply operations to, and the transcript the client holds, which keeps
   // entries that left the view's window and pages in older ones.
   const viewsRef = useRef(new Map<number, ConversationView>());
@@ -272,13 +278,12 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         const selectedStillExists = parsed.session.conversations.some(
           ({ id }) => id === desiredConversationId,
         );
-        const conversationId = selectedStillExists
-          ? desiredConversationId
-          : (parsed.session.conversations.find(({ id }) => id === ROOT_CONVERSATION_ID)?.id ??
-            parsed.session.conversations[0]?.id);
+        const main = mainConversationId(parsed.session.conversations);
+        const conversationId = selectedStillExists ? desiredConversationId : main;
         if (conversationId !== undefined) {
           selectedConversationRef.current = conversationId;
-          if (conversationId !== ROOT_CONVERSATION_ID) {
+          // The door opened MiPi already: any other choice is opened again.
+          if (conversationId !== main) {
             dispatch({ type: "select", conversationId });
             socket.send(
               JSON.stringify({
@@ -299,7 +304,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
           acknowledged !== undefined &&
           parsed.ok &&
           parsed.conversationId !== undefined &&
-          (acknowledged.type === "conversation.create" || acknowledged.type === "conversation.fork")
+          (acknowledged.type === "bot.create" || acknowledged.type === "conversation.fork")
         ) {
           selectedConversationRef.current = parsed.conversationId;
         }
@@ -382,9 +387,24 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     [send],
   );
 
-  const createConversation = useCallback(() => {
-    sendRetriable({ type: "conversation.create", requestId: crypto.randomUUID() });
-  }, [sendRetriable]);
+  const createBot = useCallback(
+    (bot: { readonly name: string; readonly purpose: string; readonly profile: string }) =>
+      new Promise<boolean>((resolve) => {
+        if (
+          !sendRetriable({ type: "bot.create", requestId: crypto.randomUUID(), ...bot }, resolve)
+        ) {
+          resolve(false);
+        }
+      }),
+    [sendRetriable],
+  );
+
+  const renameBot = useCallback(
+    (conversationId: number, name: string) => {
+      send({ type: "bot.rename", requestId: crypto.randomUUID(), conversationId, name });
+    },
+    [send],
+  );
 
   const forkConversation = useCallback(
     (conversationId: number, entryId: number) => {
@@ -469,7 +489,8 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     usage,
     configureConversation,
     openConversation,
-    createConversation,
+    createBot,
+    renameBot,
     forkConversation,
     setTyping,
     submitPrompt,

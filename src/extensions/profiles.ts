@@ -17,8 +17,14 @@ export const PROFILE_TABLE: ProfileTable = {
     tools: [],
   },
   pidu: {
-    // Relay input is authenticated owner input, so it starts with the default tools; separate so it can narrow.
-    description: "The PiDu relay: the default tools for now",
+    // The relay's chats from before bots (now archived) read this profile; the relay reaches MiPi since COD-197. Not
+    // offered by the pickers.
+    description: "The PiDu relay before bots: the default tools",
+    tools: EVERYDAY,
+  },
+  main: {
+    // MiPi, the main bot (COD-197). The bot tools (create_bot, message_bot, list_bots, stop_bot) join in COD-199.
+    description: "MiPi, the main bot: the everyday tools",
     tools: EVERYDAY,
   },
 };

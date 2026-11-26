@@ -6,7 +6,13 @@ import {
   sessionReducer,
   type SessionState,
 } from "../src/client/session-state.ts";
-import { parseServerEventEnvelope, formatScheduledInstruction } from "../src/protocol.ts";
+import {
+  formatScheduledInstruction,
+  MAX_BOT_NAME_CHARACTERS,
+  MAX_BOT_PURPOSE_CHARACTERS,
+  parseClientCommand,
+  parseServerEventEnvelope,
+} from "../src/protocol.ts";
 
 const usage = {
   input: 0,
@@ -433,7 +439,7 @@ describe("session state", () => {
       type: "event",
       event: event({
         type: "command.result",
-        command: "conversation.create",
+        command: "bot.create",
         requestId: "create-1",
         ok: true,
         conversationId: 4,
@@ -548,6 +554,97 @@ describe("session state", () => {
         session: { conversations: [{ id: 7, owner: { conversationId: "1" } }] },
       }),
     ).toThrow("conversation.owner.conversationId must be a positive integer");
+  });
+
+  it("opens MiPi first and keeps each bot's newest entry from head events (COD-197)", () => {
+    let state = sessionReducer(initialSessionState, {
+      type: "event",
+      event: event({
+        type: "session.snapshot",
+        session: {
+          conversations: [
+            { id: 1, archivedAt: 5, latestEntryId: 3 },
+            { id: 4, kind: "main", name: "MiPi", profile: "main", latestEntryId: 9 },
+            {
+              id: 6,
+              kind: "bot",
+              name: "Groceries",
+              purpose: "Keep the list.",
+              profile: "default",
+            },
+          ],
+        },
+      }),
+    });
+    // MiPi, not the root conversation, though both are listed.
+    expect(state.activeConversationId).toBe(4);
+    state = sessionReducer(state, {
+      type: "event",
+      event: event({ type: "conversation.head", conversationId: 6, latestEntryId: 12 }),
+    });
+    expect(state.conversations.find(({ id }) => id === 6)?.latestEntryId).toBe(12);
+    // An older head changes nothing; one for a conversation the list doesn't have adds nothing.
+    const before = state;
+    state = sessionReducer(state, {
+      type: "event",
+      event: event({ type: "conversation.head", conversationId: 4, latestEntryId: 2 }),
+    });
+    state = sessionReducer(state, {
+      type: "event",
+      event: event({ type: "conversation.head", conversationId: 99, latestEntryId: 50 }),
+    });
+    expect(state).toBe(before);
+    expect(() =>
+      event({ type: "session.snapshot", session: { conversations: [{ id: 2, kind: "robot" }] } }),
+    ).toThrow("Conversation kind is invalid");
+  });
+
+  it("checks bot commands at the door (COD-197)", () => {
+    const command = (value: unknown) => parseClientCommand(JSON.stringify(value));
+    expect(
+      command({
+        type: "bot.create",
+        requestId: "r1",
+        name: "  Groceries ",
+        purpose: " Keep the list. ",
+        profile: "default",
+      }),
+    ).toEqual({
+      type: "bot.create",
+      requestId: "r1",
+      name: "Groceries",
+      purpose: "Keep the list.",
+      profile: "default",
+    });
+    expect(() =>
+      command({ type: "bot.create", requestId: "r2", name: " ", purpose: "x", profile: "default" }),
+    ).toThrow("name must contain text");
+    expect(() =>
+      command({
+        type: "bot.create",
+        requestId: "r3",
+        name: "x".repeat(MAX_BOT_NAME_CHARACTERS + 1),
+        purpose: "x",
+        profile: "default",
+      }),
+    ).toThrow(`name cannot exceed ${MAX_BOT_NAME_CHARACTERS} characters`);
+    expect(() =>
+      command({
+        type: "bot.create",
+        requestId: "r4",
+        name: "Groceries",
+        purpose: "x".repeat(MAX_BOT_PURPOSE_CHARACTERS + 1),
+        profile: "default",
+      }),
+    ).toThrow(`purpose cannot exceed ${MAX_BOT_PURPOSE_CHARACTERS} characters`);
+    expect(() =>
+      command({ type: "bot.create", requestId: "r5", name: "Groceries", purpose: "x" }),
+    ).toThrow("profile is required");
+    expect(
+      command({ type: "bot.rename", requestId: "r6", conversationId: 6, name: "Shopping" }),
+    ).toEqual({ type: "bot.rename", requestId: "r6", conversationId: 6, name: "Shopping" });
+    // The command bots replaced is gone.
+    expect(() => command({ type: "conversation.create", requestId: "r7" })).toThrow();
   });
 
   it("adds a committed subagent conversation without replacing the session snapshot", () => {
