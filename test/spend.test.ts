@@ -421,11 +421,7 @@ describe("pause", () => {
           argument: "",
         });
         await agent.settle();
-        expect(sentTexts(agent)).toEqual([
-          PAUSED_REPLY,
-          PAUSED_REPLY,
-          "Started a new conversation.",
-        ]);
+        expect(sentTexts(agent)).toEqual([PAUSED_REPLY, PAUSED_REPLY, "Started a new cobot."]);
         const root = await agent.harness.root(ctx);
         expect(await userTexts(agent.harness, root.id)).toEqual([]);
       } finally {

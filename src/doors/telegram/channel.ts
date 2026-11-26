@@ -22,7 +22,13 @@ import {
   type Tx,
 } from "../../agent/pi/durable.ts";
 import { isArchived } from "../../agent/archive.ts";
-import { findLiveBot, type LiveBot, liveBots } from "../../agent/bots.ts";
+import {
+  cobotNameRefusal,
+  findLiveBot,
+  type LiveBot,
+  liveBots,
+  prepareCobot,
+} from "../../agent/bots.ts";
 import {
   bindChannel,
   boundConversation,
@@ -99,7 +105,7 @@ export const ARCHIVED_WINDOW_REPLY =
 export const HELP_TEXT =
   "Hi, I'm MiPi. Send me a message and I'll answer here.\n\n" +
   "/bot lists the bots; /bot <name> switches this chat to one\n" +
-  "/new starts a new conversation\n" +
+  "/new [name] starts a cobot under this chat’s bot\n" +
   "/profile shows or sets the tool profile\n" +
   "/model shows or sets the model\n" +
   "/usage shows today's spend and usage\n" +
@@ -112,15 +118,23 @@ const shortPurpose = (purpose: string): string => {
 };
 
 /** `/bot`'s answer: the live bots in the web list's order, this chat's marked, and how to switch. */
-export function botList(bots: readonly LiveBot[], current: number): string {
+export function botList(
+  bots: readonly LiveBot[],
+  current: number,
+  cobot?: { readonly name: string; readonly bot: number },
+): string {
   const lines = bots.map(
     (bot) =>
       `${bot.id === current ? "▸" : "•"} ${bot.name}` +
       (bot.purpose === undefined ? "" : ` — ${shortPurpose(bot.purpose)}`),
   );
-  const here = bots.some((bot) => bot.id === current)
-    ? []
-    : ["", "This chat is on a conversation of its own (from /new)."];
+  const parent = bots.find(({ id }) => id === cobot?.bot);
+  const here =
+    cobot !== undefined && parent !== undefined
+      ? ["", `This chat is on ${cobot.name}, a cobot under ${parent.name}.`]
+      : bots.some((bot) => bot.id === current)
+        ? []
+        : ["", "This chat is on a conversation of its own."];
   return ["Bots:", ...lines, ...here, "", "Switch with /bot <name>."].join("\n");
 }
 
@@ -640,6 +654,7 @@ export class TelegramChannelRuntime {
     const { argument, chatId, updateId } = update;
     switch (update.command) {
       case "start":
+      case "help":
         await this.#reply(updateId, chatId, () => HELP_TEXT);
         return;
       case "version":
@@ -658,27 +673,42 @@ export class TelegramChannelRuntime {
         return;
       }
       case "new":
-        await this.#switchChat(updateId, chatId, async () => ({
-          reply: "Started a new conversation.",
-          rebind: async (tx) => {
-            await boundConversation(
-              tx,
-              telegramBinding(chatId),
-              this.#options.profile,
-              this.#options.profiles,
-              { rebind: true },
-            );
-          },
-        }));
+        await this.#switchChat(updateId, chatId, async (tx) => {
+          const name = argument || "New cobot";
+          const refused = cobotNameRefusal(name);
+          if (refused !== undefined) return { reply: refused };
+          const meta = await tx.doc(ConversationMeta, conversationId);
+          const bots = await liveBots(tx);
+          const target = meta.kind === "cobot" ? meta.bot : conversationId;
+          // Old /new chats have no parent. A bot archived since admission also falls back to MiPi.
+          const parent =
+            bots.find(({ id }) => id === target) ?? bots.find(({ kind }) => kind === "main");
+          if (parent === undefined)
+            return { reply: "Switch to a live bot with /bot <name> first." };
+          const create = await prepareCobot(tx, parent.id, name, this.#options.profiles);
+          return {
+            reply: "Started a new cobot.",
+            rebind: async (tx) => {
+              const cobot = await create();
+              await bindChannel(tx, telegramBinding(chatId), cobot);
+            },
+          };
+        });
         return;
       case "bot":
         await this.#switchChat(updateId, chatId, async (tx) => {
           const bots = await liveBots(tx);
-          if (argument.length === 0) return { reply: botList(bots, conversationId) };
+          const meta = await tx.doc(ConversationMeta, conversationId);
+          const cobot =
+            meta.kind === "cobot" && meta.name !== undefined && meta.bot !== undefined
+              ? { name: meta.name, bot: meta.bot }
+              : undefined;
+          const list = botList(bots, conversationId, cobot);
+          if (argument.length === 0) return { reply: list };
           const bot = await findLiveBot(tx, argument);
           if (bot === undefined) {
             return {
-              reply: `There's no bot named ${argument}.\n\n${botList(bots, conversationId)}`,
+              reply: `There's no bot named ${argument}.\n\n${list}`,
             };
           }
           // Already here: nothing to send on or rebind.
@@ -755,7 +785,7 @@ export class TelegramChannelRuntime {
    * Moves this chat to another conversation (`/new`, `/bot <name>`), once `choose` says where; or only answers, when
    * it names nowhere to go. Messages waiting in the chat's window belong to the conversation they were written to: they
    * go there first, in the same commit, before the chat is rebound (the admit before any table write, the new
-   * conversation's included). `choose` only reads.
+   * conversation’s included). `choose` only reads.
    */
   async #switchChat(
     updateId: number,

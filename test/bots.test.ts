@@ -4,7 +4,15 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { type ConversationId, Harness, type Storage } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { describe, expect, it } from "vitest";
-import { botNameRefusal, createBot, ensureBots, MAIN_BOT_NAME } from "../src/agent/bots.ts";
+import {
+  botNameRefusal,
+  createBot,
+  createCobot,
+  ensureBots,
+  liveBots,
+  MAIN_BOT_NAME,
+  renameBot,
+} from "../src/agent/bots.ts";
 import {
   Bots,
   boundConversation,
@@ -12,6 +20,8 @@ import {
   ConversationMeta,
   profileRefusal,
 } from "../src/agent/conversations.ts";
+import { archiveBot, restoreBot } from "../src/agent/archive.ts";
+import { listVisible, OWNER_SCOPE } from "../src/agent/visibility.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import { PROFILE_TABLE } from "../src/extensions/profiles.ts";
 import { PROFILES } from "./mipi.ts";
@@ -170,6 +180,62 @@ describe("the main bot (COD-197)", () => {
       "pidu is kept for the relay's chats from before bots. Pick one of: default, empty.",
     );
     expect(profileRefusal({ kind: "bot" }, "pidu")).toBeDefined();
+  });
+
+  it("gives cobots independent names, fixed instructions and allowed profiles", async () => {
+    const harness = await open();
+    try {
+      const root = await harness.root(ctx);
+      await ensureBots(harness, PROFILES, NOW);
+      const { mainId, names } = (await harness.snapshot(Bots, ctx))!;
+      const parent = await harness.commit(
+        (tx) =>
+          createBot(
+            tx,
+            {
+              kind: "bot",
+              name: "Garden",
+              purpose: "Look after the garden.",
+              profile: "empty",
+              createdBy: "owner",
+            },
+            PROFILES,
+          ),
+        ctx,
+      );
+      const make = (bot: ConversationId, name: string) =>
+        harness.commit((tx) => createCobot(tx, bot, name, PROFILES), ctx);
+      const cobot = await make(parent, "MiPi");
+      expect(await meta(harness, cobot)).toMatchObject({
+        kind: "cobot",
+        name: "MiPi",
+        bot: parent,
+        profile: "empty",
+        purpose: "Look after the garden.",
+      });
+      const child = (await harness.conversation(cobot, ctx))!;
+      expect((await child.agent(ctx)).instructions).toBe("Look after the garden.");
+      expect((await child.agent(ctx)).tools).toEqual([]);
+      await harness.commit((tx) => renameBot(tx, cobot, "Garden"), ctx);
+      expect((await meta(harness, cobot))?.name).toBe("Garden");
+      expect((await harness.snapshot(Bots, ctx))?.names).toEqual({ ...names, garden: parent });
+      expect((await harness.commit(liveBots, ctx)).map(({ id }) => id)).toEqual([mainId, parent]);
+
+      const mainCobot = await make(mainId! as ConversationId, "MiPi");
+      expect(await meta(harness, mainCobot)).toMatchObject({ kind: "cobot", profile: "default" });
+      const visible = () =>
+        harness.commit(async (tx) => (await listVisible(tx, OWNER_SCOPE)).map(({ id }) => id), ctx);
+      expect(await visible()).toContain(cobot);
+      await expect(make(cobot, "Nested cobot")).rejects.toThrow("A cobot needs a live parent bot.");
+      await expect(make(root.id, "Old chat")).rejects.toThrow("A cobot needs a live parent bot.");
+      await harness.commit((tx) => archiveBot(tx, parent, NOW + 1), ctx);
+      expect(await visible()).not.toContain(cobot);
+      await expect(make(parent, "Archived")).rejects.toThrow("A cobot needs a live parent bot.");
+      await harness.commit((tx) => restoreBot(tx, parent), ctx);
+      expect(await visible()).toContain(cobot);
+    } finally {
+      await harness.close(ctx);
+    }
   });
 
   it("names bots uniquely, ignoring case, in 1 to 40 characters", () => {

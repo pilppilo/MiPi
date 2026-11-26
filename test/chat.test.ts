@@ -20,7 +20,11 @@ import { createHarnessOptions } from "../src/agent/composition.ts";
 import { HEARTBEAT_MS } from "../src/agent/alarm.ts";
 import { MEMORY_IDLE_MS } from "../src/extensions/builtin/memory/memory-pass.ts";
 import worker from "../src/worker/index.ts";
-import { MAX_CLIENT_FRAME_CHARACTERS, queuedInputs } from "../src/protocol.ts";
+import {
+  type ConversationSummary,
+  MAX_CLIENT_FRAME_CHARACTERS,
+  queuedInputs,
+} from "../src/protocol.ts";
 import { DeliverScheduledInstruction } from "../src/extensions/builtin/reminders/schedule-task.ts";
 
 /**
@@ -657,7 +661,7 @@ describe("chat application", () => {
     againSocket.close(1000, "test complete");
   });
 
-  it("archives and restores a bot over the WebSocket, never MiPi, and moves an open tab to MiPi (COD-198)", async () => {
+  it("archives and restores a bot and its cobot, and moves an open tab to MiPi", async () => {
     const sessionId = "archive-over-websocket";
     const main = await configureOfflineModel(sessionId);
     const response = await openSession(sessionSocketUrl(sessionId, "Alice", "archive-client"));
@@ -690,6 +694,33 @@ describe("chat application", () => {
       profile: "default",
     });
     const garden = created.conversationId!;
+    const command = { type: "cobot.create", bot: garden, name: "Seedlings" };
+    const createRequestId = "create-seedlings";
+    socket.send(JSON.stringify({ ...command, requestId: createRequestId }));
+    const createdCobot = await messages.nextMatching<Result>(
+      ({ requestId }) => requestId === createRequestId,
+    );
+    expect(createdCobot).toMatchObject({ ok: true });
+    const cobot = createdCobot.conversationId!;
+    socket.send(JSON.stringify({ ...command, requestId: createRequestId }));
+    expect(
+      await messages.nextMatching<Result>(({ requestId }) => requestId === createRequestId),
+    ).toMatchObject({ ok: true, conversationId: cobot });
+    expect(messages.views.has(cobot)).toBe(true);
+    expect(await run({ type: "cobot.create", bot: cobot, name: "Invalid" })).toMatchObject({
+      ok: false,
+      error: { message: "A cobot needs a live parent bot." },
+    });
+    expect(await run({ type: "bot.rename", conversationId: cobot, name: "Garden" })).toMatchObject({
+      ok: true,
+      conversationId: cobot,
+    });
+    expect(await run({ type: "conversation.open", conversationId: garden })).toMatchObject({
+      ok: true,
+    });
+    expect(await run({ type: "conversation.open", conversationId: cobot })).toMatchObject({
+      ok: true,
+    });
     expect(
       await run({ type: "bot.bind", conversationId: garden, channel: "relay:pidu" }),
     ).toMatchObject({
@@ -700,10 +731,10 @@ describe("chat application", () => {
       ok: false,
       error: { message: "No rebindable door named web." },
     });
-    // `bot.create` opened it in this tab: archiving moves the tab to MiPi, then tells every list, then answers.
+    // Archiving the parent moves the tab from its cobot to MiPi and updates both archive timestamps.
     type Snapshot = {
       type: string;
-      session?: { conversations: Array<{ id: number; archivedAt?: number }> };
+      session?: { conversations: ConversationSummary[] };
     };
     socket.send(
       JSON.stringify({ type: "bot.archive", requestId: "archive", conversationId: garden }),
@@ -711,19 +742,29 @@ describe("chat application", () => {
     await messages.nextMatching<{ type: string; conversationId?: number }>(
       (message) => message.type === "conversation.view" && message.conversationId === main,
     );
-    await messages.nextMatching<Snapshot>(
+    const archived = await messages.nextMatching<Snapshot>(
       (message) =>
         message.type === "session.snapshot" &&
         message.session?.conversations.find(({ id }) => id === garden)?.archivedAt !== undefined,
     );
+    const archivedAt = archived.session!.conversations.find(({ id }) => id === garden)!.archivedAt;
+    expect(archived.session!.conversations.find(({ id }) => id === cobot)).toMatchObject({
+      kind: "cobot",
+      bot: garden,
+      name: "Garden",
+      purpose: "Look after the garden.",
+      profile: "default",
+      archivedAt,
+    });
     expect(
       await messages.nextMatching<Result>(
         (message) => message.type === "command.result" && message.requestId === "archive",
       ),
     ).toMatchObject({ ok: true });
-    // An archived bot takes no message.
+    expect(await run({ ...command, name: "While archived" })).toMatchObject({ ok: false });
+    // An archived cobot takes no message.
     expect(
-      await run({ type: "prompt.submit", conversationId: garden, content: "Hello?" }),
+      await run({ type: "prompt.submit", conversationId: cobot, content: "Hello?" }),
     ).toMatchObject({
       ok: false,
       error: { message: "This bot is archived. Restore it to talk to it again." },
@@ -731,18 +772,24 @@ describe("chat application", () => {
     socket.send(
       JSON.stringify({ type: "bot.restore", requestId: "restore", conversationId: garden }),
     );
-    await messages.nextMatching<Snapshot>(
+    const restored = await messages.nextMatching<Snapshot>(
       (message) =>
         message.type === "session.snapshot" &&
         message.session?.conversations.some(
           ({ id, archivedAt }) => id === garden && archivedAt === undefined,
         ) === true,
     );
+    const restoredCobot = restored.session!.conversations.find(({ id }) => id === cobot);
+    expect(restoredCobot).toMatchObject({ kind: "cobot", bot: garden, name: "Garden" });
+    expect(restoredCobot?.archivedAt).toBeUndefined();
     expect(
       await messages.nextMatching<Result>(
         (message) => message.type === "command.result" && message.requestId === "restore",
       ),
     ).toMatchObject({ ok: true, conversationId: garden });
+    expect(await run({ type: "conversation.open", conversationId: cobot })).toMatchObject({
+      ok: true,
+    });
     expect(await run({ type: "bot.restore", conversationId: main })).toMatchObject({
       ok: false,
       error: { message: "MiPi can't be restored." },

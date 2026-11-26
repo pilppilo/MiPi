@@ -41,6 +41,7 @@ import { TelegramChannelRuntime } from "../src/doors/telegram/channel.ts";
 import { stampInput } from "../src/agent/stamp.ts";
 import type { ExportHeader, ExportPage, ExportRow } from "../src/agent/maintenance.ts";
 import worker from "../src/worker/index.ts";
+import { mainConversationId, parseServerEventEnvelope } from "../src/protocol.ts";
 import { MIPI_VERSION } from "../src/version.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -305,8 +306,53 @@ async function seed(): Promise<void> {
   await evictDurableObject(stub);
 }
 
+async function seedCobot(): Promise<void> {
+  // Use the real command so the capture also contains the durable cobot creation receipt.
+  const response = await env.AGENT.getByName(OWNER).fetch(
+    new Request(`https://mipi.example/api/sessions/${OWNER}`, {
+      headers: { Upgrade: "websocket" },
+    }),
+  );
+  expect(response.status).toBe(101);
+  const socket = response.webSocket!;
+  let sent = false;
+  const created = new Promise<boolean>((resolve, reject) => {
+    socket.addEventListener("message", ({ data }) => {
+      const event = parseServerEventEnvelope(String(data));
+      if (event.type === "session.snapshot" && !sent) {
+        sent = true;
+        const bot = mainConversationId(event.session.conversations);
+        if (bot === undefined) {
+          reject(new Error("The fixture is missing MiPi"));
+          return;
+        }
+        socket.send(
+          JSON.stringify({
+            type: "cobot.create",
+            requestId: "fixture-cobot",
+            bot,
+            name: "Fixture notes",
+          }),
+        );
+      }
+      if (event.type === "command.result" && event.command === "cobot.create") resolve(event.ok);
+    });
+    socket.addEventListener("close", () => reject(new Error("The fixture session closed")), {
+      once: true,
+    });
+  });
+  socket.accept();
+  try {
+    expect(await created).toBe(true);
+  } finally {
+    socket.close(1000, "fixture seeded");
+  }
+}
+
 describe.skipIf(!capturing)("fixture capture", () => {
   it(`writes ${MIPI_VERSION}.json`, async () => {
+    await seedCobot();
+    await evictDurableObject(env.AGENT.getByName(OWNER));
     await seed();
     const header = await call<ExportHeader>("POST", "/api/admin/export/begin");
     const rows: ExportRow[] = [];

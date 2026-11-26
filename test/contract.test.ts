@@ -14,8 +14,10 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import type { Message, SystemMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { createBot } from "../src/agent/bots.ts";
+import { createBot, createCobot } from "../src/agent/bots.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
+import { ConversationMeta } from "../src/agent/conversations.ts";
+import { parseServerEventEnvelope } from "../src/protocol.ts";
 import { CORE_PREAMBLE } from "../src/agent/harness.ts";
 import { PROFILES } from "./mipi.ts";
 import * as ai from "../src/agent/pi/ai.ts";
@@ -579,6 +581,100 @@ describe("Pi seam contract", () => {
       }
     });
     await evictDurableObject(stub);
+  });
+
+  it("stores and publishes a task-owned subagent's link back to its bot (COD-200)", async () => {
+    const stub = env.AGENT.getByName("contract-subagent-owner");
+    const { cobot, child, latestEntryId } = await runInDurableObject(
+      stub,
+      async (_instance, state) => {
+        await state.blockConcurrencyWhile(async () => {});
+        const faux = fauxProvider();
+        const started = Promise.withResolvers<void>();
+        const finish = Promise.withResolvers<void>();
+        faux.setResponses([
+          fauxAssistantMessage(
+            [fauxToolCall("search_history", { question: "What did we decide?" })],
+            {
+              stopReason: "toolUse",
+            },
+          ),
+          async () => {
+            started.resolve();
+            await finish.promise;
+            return fauxAssistantMessage([fauxText("We picked tea.")]);
+          },
+          fauxAssistantMessage([fauxText("The answer is tea.")]),
+        ]);
+        const models = createModels();
+        models.setProvider(faux.provider);
+        const harness = await durable.Harness.open(
+          await openDurableObjectSqliteStorage(state.storage),
+          createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+          ctx,
+        );
+        try {
+          const bot = await harness.commit(
+            (tx) =>
+              createBot(
+                tx,
+                { kind: "bot", name: "Kitchen", profile: "default", createdBy: "owner" },
+                PROFILES,
+              ),
+            ctx,
+          );
+          const cobot = await harness.commit((tx) => createCobot(tx, bot, "Tea", PROFILES), ctx);
+          const conversation = (await harness.conversation(cobot, ctx))!;
+          const submission = await conversation.submit(
+            { type: "input", content: "Look up our decision." },
+            ctx,
+          );
+          await Promise.race([started.promise, submission.wait(ctx)]);
+          const child = await harness.commit(async (tx) => {
+            const { items } = await tx.scanConversations({ ownerConversationId: cobot }, 10);
+            expect(items).toHaveLength(1);
+            const record = items[0]!;
+            expect(record.owner).toEqual({ conversationId: cobot, taskId: expect.any(Number) });
+            const byTask = await tx.scanConversations({ ownerTaskId: record.owner!.taskId }, 10);
+            expect(byTask.items.map(({ id }) => id)).toEqual([record.id]);
+            expect((await tx.doc(ConversationMeta, record.owner!.conversationId)).bot).toBe(bot);
+            return record.id;
+          }, ctx);
+          finish.resolve();
+          expect((await submission.wait(ctx)).status).toBe("done");
+          const latestEntryId = await harness.commit((tx) => tx.latestEntryId(child), ctx);
+          expect(latestEntryId).toEqual(expect.any(Number));
+          return { cobot, child, latestEntryId };
+        } finally {
+          finish.resolve();
+          await harness.close(ctx);
+        }
+      },
+    );
+    await evictDurableObject(stub);
+    const response = await stub.fetch(
+      new Request("https://example.com/api/sessions/contract-subagent-owner", {
+        headers: { Upgrade: "websocket" },
+      }),
+    );
+    expect(response.status).toBe(101);
+    const socket = response.webSocket!;
+    const message = new Promise<MessageEvent>((resolve) =>
+      socket.addEventListener("message", resolve, { once: true }),
+    );
+    socket.accept();
+    try {
+      const snapshot = parseServerEventEnvelope(String((await message).data));
+      expect(snapshot.type).toBe("session.snapshot");
+      if (snapshot.type !== "session.snapshot") throw new Error("Expected a session snapshot");
+      expect(snapshot.session.conversations.find(({ id }) => id === child)).toEqual({
+        id: child,
+        owner: { conversationId: cobot },
+        latestEntryId,
+      });
+    } finally {
+      socket.close(1000, "test complete");
+    }
   });
 
   it("aborts a conversation's run and withdraws its queued input (COD-198)", async () => {
