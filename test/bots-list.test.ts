@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   activityByBot,
   advanceLastRead,
+  archivedEntries,
   lastReadKey,
   listedBots,
   loadLastRead,
@@ -9,6 +10,7 @@ import {
   saveLastRead,
   unreadByBot,
   unreadIds,
+  restoreHintFor,
 } from "../src/client/bots-list.ts";
 import type { TaskGraph } from "../src/agent/pi/shared.ts";
 import type { ConversationSummary } from "../src/protocol.ts";
@@ -178,5 +180,53 @@ describe("the bots list (COD-197)", () => {
     expect(loadLastRead(throwing, "jerome")).toEqual(NOTHING_READ);
     expect(() => saveLastRead(throwing, "jerome", NOTHING_READ)).not.toThrow();
     expect(loadLastRead(undefined, "jerome")).toEqual(NOTHING_READ);
+  });
+});
+
+describe("Settings → Archived (COD-201)", () => {
+  const conversations: ConversationSummary[] = [
+    MIPI,
+    GROCERIES,
+    { id: 1, title: "First chat", archivedAt: 10 },
+    { id: 2, title: "Second chat", archivedAt: 10 },
+    { id: 3, owner: { conversationId: 1 }, archivedAt: 10 },
+    { id: 20, kind: "bot", name: "Garden", purpose: "Look after it.", archivedAt: 30 },
+    { id: 21, kind: "cobot", bot: 20, name: "Seedlings", title: "Tomatoes", archivedAt: 30 },
+    { id: 22, kind: "bot", name: "Travel", purpose: "Plan trips.", archivedAt: 50 },
+    { id: 23, kind: "cobot", bot: 9, name: "Dinner", archivedAt: 40 },
+    { id: 24, kind: "cobot", bot: 9, name: "Lunch" },
+  ];
+
+  it("lists archived bots with their cobots, newest first, then chats from before bots", () => {
+    const entries = archivedEntries(conversations);
+    expect(entries.map(({ summary, kind }) => [summary.id, kind])).toEqual([
+      [22, "bot"],
+      [20, "bot"],
+      [21, "cobot"],
+      [23, "cobot"],
+      [2, "earlier"],
+      [1, "earlier"],
+    ]);
+    expect(entries.find(({ summary }) => summary.id === 20)?.detail).toBe("Look after it.");
+    expect(entries.find(({ summary }) => summary.id === 1)?.detail).toBe("First chat");
+  });
+
+  it("offers Restore for a cobot only once its bot is live", () => {
+    const entries = archivedEntries(conversations);
+    expect(entries.find(({ summary }) => summary.id === 21)?.restoreHint).toBe(
+      "Restore Garden first.",
+    );
+    expect(entries.find(({ summary }) => summary.id === 23)?.restoreHint).toBeUndefined();
+    expect(entries.find(({ summary }) => summary.id === 20)?.restoreHint).toBeUndefined();
+    expect(
+      restoreHintFor(
+        conversations.find(({ id }) => id === 24),
+        conversations,
+      ),
+    ).toBe(undefined);
+    // A cobot whose bot isn't there: the agent would refuse it too.
+    expect(restoreHintFor({ id: 30, kind: "cobot", bot: 99, archivedAt: 1 }, conversations)).toBe(
+      "Its bot is missing.",
+    );
   });
 });

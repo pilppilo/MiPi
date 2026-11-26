@@ -362,6 +362,155 @@ body:has(.session-workspace) {
   }
 }
 
+/* Settings (COD-201): a wide panel over the conversation and activity columns, room for multi-column sections. */
+.session-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.settings-panel {
+  display: grid;
+  grid-column: 2 / -1;
+  grid-row: 1;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-inline-size: 0;
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+.session-workspace--settings-open .conversation-view,
+.session-workspace--settings-open .activity-panel {
+  display: none;
+}
+
+.settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border-block-end: 1px solid;
+}
+
+.settings-header h2 {
+  margin: 0;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: minmax(9rem, 12rem) minmax(0, 1fr);
+  min-block-size: 0;
+}
+
+.settings-sections {
+  padding: 1rem;
+  border-inline-end: 1px solid;
+}
+
+.settings-sections ul {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings-sections [aria-current="page"] {
+  font-weight: 700;
+}
+
+.settings-content {
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1rem;
+}
+
+.settings-content h3 {
+  margin-block-start: 0;
+}
+
+.settings-note,
+.archived-entry-kind,
+.archived-entry-time,
+.archived-entry-hint {
+  font-size: 0.875rem;
+  opacity: 0.75;
+}
+
+.archived-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.archived-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-block-end: 0.75rem;
+  border-block-end: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.archived-entry--cobot {
+  margin-inline-start: 1.25rem;
+}
+
+.archived-entry-text {
+  display: grid;
+  gap: 0.125rem;
+  min-inline-size: 0;
+}
+
+.archived-entry-text strong,
+.archived-entry-detail {
+  overflow-wrap: anywhere;
+}
+
+.archived-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.read-only-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-block: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid;
+}
+
+.read-only-banner p {
+  margin: 0;
+}
+
+@media (width < 44rem) {
+  .settings-panel {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .settings-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings-sections {
+    border-inline-end: 0;
+    border-block-end: 1px solid;
+  }
+}
+
 .runtime-information dl {
   display: flex;
   flex-direction: column;

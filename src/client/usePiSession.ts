@@ -71,6 +71,8 @@ export interface PiSession {
   }): Promise<boolean>;
   createCobot(bot: number, name: string): Promise<boolean>;
   renameBot(conversationId: number, name: string): void;
+  /** Restores an archived bot (with its cobots), a cobot under a live bot, or a chat from before bots (COD-201). */
+  restoreBot(conversationId: number): void;
   forkConversation(conversationId: number, entryId: number): void;
   setTyping(conversationId: number, typing: boolean): void;
   submitPrompt(conversationId: number, content: string): Promise<boolean>;
@@ -424,6 +426,14 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     [send],
   );
 
+  const restoreBot = useCallback(
+    (conversationId: number) => {
+      // Restoring is idempotent on the agent (a live one restores nothing), so a plain send is enough.
+      send({ type: "bot.restore", requestId: crypto.randomUUID(), conversationId });
+    },
+    [send],
+  );
+
   const forkConversation = useCallback(
     (conversationId: number, entryId: number) => {
       sendRetriable({
@@ -510,6 +520,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     createBot,
     createCobot,
     renameBot,
+    restoreBot,
     forkConversation,
     setTyping,
     submitPrompt,

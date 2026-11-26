@@ -27,11 +27,13 @@ import {
   type LastRead,
   listedBots,
   loadLastRead,
+  restoreHintFor,
   saveLastRead,
   unreadByBot,
   unreadIds,
 } from "./bots-list.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
+import { SettingsPanel } from "./SettingsPanel.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { MessageText, TranscriptList } from "./Transcript.tsx";
 import { usePiSession } from "./usePiSession.ts";
@@ -170,6 +172,9 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [newBotOpen, setNewBotOpen] = useState(false);
   const [newCobotUnder, setNewCobotUnder] = useState<number>();
   const [renamingCobot, setRenamingCobot] = useState<number>();
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsToggleRef = useRef<HTMLButtonElement | null>(null);
+  const settingsCloseRef = useRef<HTMLButtonElement | null>(null);
   const activityToggleRef = useRef<HTMLButtonElement | null>(null);
   const activityCloseRef = useRef<HTMLButtonElement | null>(null);
   const conversationHeadingRef = useRef<HTMLHeadingElement | null>(null);
@@ -193,8 +198,15 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const unread = unreadByBot(session.conversations, ownUnread);
   const activityCount = Object.keys(session.activity?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
+  // An archived conversation opens read-only (COD-201): the agent refuses its messages too.
+  const readOnly = activeSummary?.archivedAt !== undefined;
+  const restoreHint = restoreHintFor(activeSummary, session.conversations);
   const canSubmit =
-    isConnected && activeConversationId !== undefined && !submitting && draft.trim().length > 0;
+    isConnected &&
+    activeConversationId !== undefined &&
+    !readOnly &&
+    !submitting &&
+    draft.trim().length > 0;
 
   const stopTyping = (): void => {
     if (typingTimeoutRef.current !== undefined) clearTimeout(typingTimeoutRef.current);
@@ -294,6 +306,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     ) {
       session.openConversation(conversationId);
     }
+    // Back or forward lands on a conversation: Settings would hide it.
+    setSettingsOpen(false);
   });
 
   useEffect(() => {
@@ -305,7 +319,13 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const submit = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const content = draft.trim();
-    if (content.length === 0 || activeConversationId === undefined || !isConnected || submitting) {
+    if (
+      content.length === 0 ||
+      activeConversationId === undefined ||
+      !isConnected ||
+      readOnly ||
+      submitting
+    ) {
       return;
     }
     stopTyping();
@@ -350,6 +370,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
       return;
     }
     event.preventDefault();
+    // Settings covers the conversation: picking one from the sidebar shows it.
+    setSettingsOpen(false);
     if (conversationId !== session.activeConversationId) {
       window.history.pushState(null, "", event.currentTarget.href);
       session.openConversation(conversationId);
@@ -403,15 +425,49 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     requestAnimationFrame(() => activityToggleRef.current?.focus());
   };
 
+  const toggleSettings = (): void => {
+    const opening = !settingsOpen;
+    setSettingsOpen(opening);
+    requestAnimationFrame(() => (opening ? settingsCloseRef : settingsToggleRef).current?.focus());
+  };
+
+  const closeSettings = (): void => {
+    setSettingsOpen(false);
+    requestAnimationFrame(() => settingsToggleRef.current?.focus());
+  };
+
+  const openFromSettings = (conversationId: number): void => {
+    if (conversationId !== session.activeConversationId) {
+      window.history.pushState(null, "", `?conversation=${conversationId}`);
+      session.openConversation(conversationId);
+    }
+    setSettingsOpen(false);
+    requestAnimationFrame(() => conversationHeadingRef.current?.focus());
+  };
+
   return (
-    <div className={`session-workspace${activityOpen ? " session-workspace--activity-open" : ""}`}>
+    <div
+      className={`session-workspace${activityOpen ? " session-workspace--activity-open" : ""}${settingsOpen ? " session-workspace--settings-open" : ""}`}
+    >
       <aside className="session-sidebar">
         <header className="session-header">
-          <h1>
-            <a className="product-link" href="/">
-              MiPi
-            </a>
-          </h1>
+          <div className="session-title">
+            <h1>
+              <a className="product-link" href="/">
+                MiPi
+              </a>
+            </h1>
+            <button
+              ref={settingsToggleRef}
+              className="settings-toggle"
+              type="button"
+              aria-controls="settings-panel"
+              aria-expanded={settingsOpen}
+              onClick={toggleSettings}
+            >
+              <span aria-hidden="true">⚙</span> Settings
+            </button>
+          </div>
           <p className="connection-status" role="status">
             {statusLabel[session.status]}
           </p>
@@ -449,7 +505,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 disabled={!isConnected}
                 onCreate={async (bot) => {
                   const created = await session.createBot(bot);
-                  if (created) setNewBotOpen(false);
+                  if (created) {
+                    setNewBotOpen(false);
+                    setSettingsOpen(false);
+                  }
                   return created;
                 }}
                 onCancel={() => setNewBotOpen(false)}
@@ -491,6 +550,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                               setNewCobotUnder((current) =>
                                 current === bot.id ? undefined : current,
                               );
+                              setSettingsOpen(false);
                             }
                           }}
                           onCancel={() => setNewCobotUnder(undefined)}
@@ -522,6 +582,26 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               Activity <span aria-hidden="true">{activityCount}</span>
             </button>
           </div>
+          {!readOnly ? null : (
+            <div className="read-only-banner" role="status">
+              <p>
+                {restoreHint === undefined
+                  ? "Archived: read-only. Restore it to talk to it again."
+                  : "Archived: read-only."}
+              </p>
+              <button
+                type="button"
+                disabled={!isConnected || restoreHint !== undefined}
+                title={restoreHint}
+                onClick={() => session.restoreBot(activeSummary.id)}
+              >
+                Restore
+              </button>
+              {restoreHint === undefined ? null : (
+                <span className="archived-entry-hint">{restoreHint}</span>
+              )}
+            </div>
+          )}
           {activeSummary?.kind !== "cobot" ||
           activeSummary.archivedAt !== undefined ? null : renamingCobot === activeSummary.id ? (
             <CobotNameForm
@@ -551,7 +631,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               profile={activeSummary?.profile}
               fixedProfile={activeSummary?.kind === "main"}
               options={session.options}
-              disabled={!isConnected}
+              disabled={!isConnected || readOnly}
               onConfigure={(change) => session.configureConversation(activeConversation.id, change)}
             />
           )}
@@ -677,11 +757,11 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             rows={3}
             maxLength={MAX_PROMPT_CHARACTERS}
             value={draft}
-            placeholder="Send a message…"
+            placeholder={readOnly ? "Archived: restore it to send a message." : "Send a message…"}
             onChange={(event) => updateDraft(event.currentTarget.value)}
             onKeyDown={submitWithKeyboardShortcut}
             aria-keyshortcuts="Meta+Enter Control+Enter"
-            disabled={!isConnected || activeConversationId === undefined}
+            disabled={!isConnected || activeConversationId === undefined || readOnly}
           />
           <button type="submit" disabled={!canSubmit}>
             {submitting ? "Sending…" : "Send"}
@@ -708,6 +788,17 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           }
         }}
       />
+
+      {settingsOpen ? (
+        <SettingsPanel
+          conversations={session.conversations}
+          disabled={!isConnected}
+          onOpen={openFromSettings}
+          onRestore={(conversationId) => session.restoreBot(conversationId)}
+          onClose={closeSettings}
+          closeButtonRef={settingsCloseRef}
+        />
+      ) : null}
     </div>
   );
 }
@@ -951,6 +1042,11 @@ function ConversationDetails({
                 disabled={disabled || options === undefined}
                 onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
               >
+                {/* A profile no picker offers (the relay's old `pidu`) is shown as it is, never as another. */}
+                {options === undefined ||
+                options.profiles.some(({ id }) => id === (profile ?? "default")) ? null : (
+                  <option value={profile ?? "default"}>{profile ?? "default"}</option>
+                )}
                 {(options?.profiles ?? [{ id: profile ?? "default", name: "" }]).map((choice) => (
                   <option key={choice.id} value={choice.id} title={choice.name}>
                     {choice.id}

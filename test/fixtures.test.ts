@@ -12,10 +12,11 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { Harness } from "@earendil-works/pi-durable";
+import { type ConversationId, Harness } from "@earendil-works/pi-durable";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
 import { describe, expect, it } from "vitest";
 import { UNKNOWN_ORIGIN } from "../src/agent/origin.ts";
+import { restoreBot, routeSchedule } from "../src/agent/archive.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import type { AdminStatus, MipiAgent } from "../src/agent/agent-do.ts";
 import { Bots, ChannelBindings, ConversationMeta } from "../src/agent/conversations.ts";
@@ -24,6 +25,7 @@ import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
 import worker from "../src/worker/index.ts";
 import type { Fixture } from "./fixture-capture.test.ts";
+import { PROFILES } from "./mipi.ts";
 import { clock, openAgent, said, userTexts } from "./reminder-agent.ts";
 import { withSpikeToken } from "./spike.ts";
 
@@ -273,6 +275,66 @@ describe("fixture databases", () => {
           expect(
             (reminders[0]!.record.state as { checkpoint?: { sent?: number } }).checkpoint?.sent,
           ).toBe(record.state.checkpoint.sent + 1);
+        } finally {
+          await agent.close();
+        }
+      });
+      await evictDurableObject(stub);
+    }, 30_000);
+    it(`restores ${version}'s chats from before bots as cobots under MiPi (COD-201)`, async () => {
+      const owner = `fixture-restore-${version}`.replace(/[^\w-]/g, "-");
+      expect((await restoreInto(owner)).state).toEqual({ kind: "open" });
+      const stub = env.AGENT.getByName(owner);
+      await runInDurableObject(stub, (instance: MipiAgent) => instance.exportBegin());
+      await runInDurableObject(stub, async (_instance, state) => {
+        const [row] = state.storage.sql
+          .exec<{ record: string }>(`SELECT record FROM tasks WHERE kind = '"app.reminder"'`)
+          .toArray();
+        const record = JSON.parse(row!.record) as {
+          input: { conversationId: ConversationId };
+          state: { checkpoint: { at: number } };
+        };
+        // A minute before its next time: restored first, then due.
+        clock.now = record.state.checkpoint.at - 60_000;
+        const agent = await openAgent(
+          () => openDurableObjectSqliteStorage(state.storage),
+          said("Time to renew the passport."),
+        );
+        try {
+          const { harness } = agent;
+          const before = (await harness.snapshot(Bots, ctx))!;
+          const earlier = Object.keys(before.archived ?? {}).map(Number) as ConversationId[];
+          for (const id of earlier) {
+            const meta = await harness.snapshot(ConversationMeta, id, ctx);
+            if (meta?.kind !== undefined) continue;
+            await harness.commit((tx) => restoreBot(tx, id, PROFILES), ctx);
+            expect(
+              await harness.snapshot(ConversationMeta, id, ctx),
+              `conversation ${id}`,
+            ).toMatchObject({
+              kind: "cobot",
+              bot: before.mainId,
+              name: expect.any(String),
+            });
+            expect(
+              (await harness.snapshot(ConversationMeta, id, ctx))?.profile,
+              `conversation ${id}`,
+            ).not.toBe("pidu");
+          }
+          const after = (await harness.snapshot(Bots, ctx))!;
+          expect(after.names).toEqual(before.names);
+          // The reminder made before bots runs in its own chat again, not in MiPi.
+          const madeIn = record.input.conversationId;
+          if (madeIn !== before.mainId) {
+            expect(await harness.commit((tx) => routeSchedule(tx, madeIn), ctx)).toEqual({
+              kind: "run",
+              conversationId: madeIn,
+            });
+            await agent.advance(120_000);
+            expect((await userTexts(harness, madeIn)).at(-1)).toMatch(
+              /^Scheduled instruction due now \(.+\): /,
+            );
+          }
         } finally {
           await agent.close();
         }
