@@ -17,6 +17,7 @@ import type { Extension, Harness, ToolRegistration, Tx } from "./pi/durable.ts";
 import type { OriginRegistration, Origins } from "./origin.ts";
 import type { ProviderRegistration } from "./providers.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
+import type { DiagSink } from "./diag.ts";
 
 /** `builtin` ships on by default; `optional` is added at build time (an npm extension is one too, on Workers). */
 export type ExtensionTier = "builtin" | "optional";
@@ -36,6 +37,8 @@ export interface BackgroundContext {
   /** The source's wake changed: the alarm is set again. */
   readonly onWakeChange: () => void;
   readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
+  /** The agent's diagnostic log: the extension tags its events `source: "ext:<name>"`. */
+  readonly diag: DiagSink;
 }
 
 /**

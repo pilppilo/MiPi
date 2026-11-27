@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { openDurableObjectSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/cloudflare";
@@ -138,6 +139,7 @@ describe("provider limits", () => {
             },
           },
         ]);
+        const diag: DiagInput[] = [];
         try {
           bindLimitRecorder(
             composition.limitExtension,
@@ -145,6 +147,8 @@ describe("provider limits", () => {
             composition.providers,
             usage,
             () => now,
+            undefined,
+            { emit: (event) => diag.push(event) },
           );
           const root = await harness.root(ctx);
           const submission = await root.submit(
@@ -178,6 +182,17 @@ describe("provider limits", () => {
           );
           expect((await next.wait(ctx)).status).toBe("done");
           expect((await harness.snapshot(ProviderLimits, ctx))?.entries).toEqual({});
+          // The hold and its end are diagnostic events; the provider's error text is not in them.
+          expect(diag.map(({ kind, outcome }) => `${kind}:${outcome}`)).toEqual([
+            "provider.limit:held",
+            "provider.limit_cleared:ok",
+          ]);
+          expect(diag[0]).toMatchObject({
+            source: "provider",
+            level: "warn",
+            detail: { provider, resetAt, resetFrom: "usage" },
+          });
+          expect(JSON.stringify(diag)).not.toContain(GO_ERROR);
         } finally {
           release.resolve();
           await harness.close(ctx);

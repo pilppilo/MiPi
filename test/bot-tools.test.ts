@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 import { awaitWithContext, BACKGROUND_CONTEXT as ctx } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import {
@@ -69,7 +70,9 @@ async function open(
   faux.setResponses(Array.from({ length: 100 }, () => answer));
   const models = createModels();
   models.setProvider(faux.provider);
+  const diag: DiagInput[] = [];
   const composition = composeMipi({
+    diag: { emit: (event) => diag.push(event) },
     models,
     model: { provider: "faux", modelId: "faux-1" },
     ...(bare ? { extensions: extension === undefined ? [] : [extension] } : {}),
@@ -79,7 +82,7 @@ async function open(
   await ensureBots(harness, composition.profiles, Date.now());
   const mainId = (await harness.snapshot(Bots, ctx))!.mainId as ConversationId;
   const main = (await harness.conversation(mainId, ctx))!;
-  return { ...composition, options, storage, harness, main };
+  return { ...composition, options, storage, harness, main, diag };
 }
 
 async function send(conversation: Conversation, requestId: string, content: string): Promise<void> {
@@ -502,7 +505,7 @@ describe("main bot tools", () => {
 
   it("counts a bot-only run, honours NO_SEND, and refuses new work at the daily cap", async () => {
     let deliveries = 0;
-    const { harness, main, profiles, connectors } = await open(({ messages }) => {
+    const { harness, main, profiles, connectors, diag } = await open(({ messages }) => {
       const last = messages.at(-1)!;
       if (last.role === "toolResult") return say("Done.");
       if (JSON.stringify(last.content).includes("[bot:MiPi")) {
@@ -533,9 +536,20 @@ describe("main bot tools", () => {
       expect((await harness.snapshot(Proactive, ctx))?.cap?.count).toBe(1);
       expect((await harness.snapshot(Proactive, ctx))?.lastRun?.outcome).toBe("quiet");
       expect((await harness.snapshot(BotReplies, ctx))?.pending ?? []).toEqual([]);
+      expect(diag.some(({ kind }) => kind === "gate.held")).toBe(false);
       await send(main, "web:two", "delegate again");
       await harness.waitForIdle(ctx);
       expect(deliveries).toBe(1);
+      // The refusal is recorded once, after its commit, and nothing was admitted for it.
+      expect(diag.filter(({ kind }) => kind === "gate.held")).toEqual([
+        expect.objectContaining({
+          source: "gate",
+          outcome: "held",
+          convId: main.id,
+          detail: { gate: "run-cap", at: "message_bot" },
+        }),
+      ]);
+      expect((await harness.snapshot(BotReplies, ctx))?.pending ?? []).toEqual([]);
     } finally {
       answers.close();
       await harness.close(ctx);

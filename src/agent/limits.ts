@@ -15,6 +15,7 @@ import type { Delivery, DeliveryDestination } from "./delivery.ts";
 import { AgentSettings } from "./settings.ts";
 import { localTime } from "./stamp.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
+import { type DiagSink, NOOP_DIAG } from "./diag.ts";
 
 export const PROVIDER_LIMIT_DOC_KIND = "app.provider-limit";
 const UNKNOWN_RESET_HOLD_MS = 5 * 60_000;
@@ -222,6 +223,7 @@ export function bindLimitRecorder(
   usage: ProviderUsageCache,
   now: () => number = Date.now,
   report?: (error: unknown, provider: string) => void,
+  diag: DiagSink = NOOP_DIAG,
 ): void {
   const binding = extensionBindings.get(extension);
   if (binding === undefined) throw new Error("Missing provider limit extension binding");
@@ -236,6 +238,14 @@ export function bindLimitRecorder(
         await harness.commit(async (tx) => {
           delete (await tx.doc(ProviderLimits)).entries[provider];
         }, BACKGROUND_CONTEXT);
+        diag.emit({
+          level: "info",
+          source: "provider",
+          kind: "provider.limit_cleared",
+          outcome: "ok",
+          summary: `${state?.entries[provider]?.label ?? provider} answered again; its limit is cleared`,
+          detail: { provider },
+        });
         return;
       }
       const observedAt = now();
@@ -271,6 +281,21 @@ export function bindLimitRecorder(
         };
         state.entries = { ...state.entries, [provider]: entry };
       }, BACKGROUND_CONTEXT);
+      diag.emit({
+        level: "warn",
+        source: "provider",
+        kind: "provider.limit",
+        outcome: "held",
+        summary:
+          resetAt === undefined
+            ? `${observation.label}'s usage limit is reached; reset time unknown`
+            : `${observation.label}'s usage limit is reached; resets at ${new Date(resetAt).toISOString()}`,
+        detail: {
+          provider,
+          ...(resetAt === undefined ? {} : { resetAt }),
+          ...(resetFrom === undefined ? {} : { resetFrom }),
+        },
+      });
     };
     try {
       await pending.run(provider, record);

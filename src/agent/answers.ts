@@ -16,6 +16,7 @@ import type { CommitChanges, SourceWake, WakeSource } from "./wake-sources.ts";
 import { KeyedSerialQueue } from "../lib/serial.ts";
 import { BotReplies, deliverBotReplies } from "./bot-messages.ts";
 import { HEARTBEAT_MS } from "./alarm.ts";
+import type { DiagInput } from "./diag.ts";
 
 const context = BACKGROUND_CONTEXT;
 
@@ -113,9 +114,13 @@ export class AnswerSettlement implements WakeSource {
     return this.#queue.run("reconcile", async () => {
       if (this.#closed) return;
       const now = this.#now();
-      const queued = await this.#commit((tx) =>
-        reconcileAnswers(tx, now, this.#options.connectors, this.#options.providers),
-      );
+      let events: DiagInput[] = [];
+      const queued = await this.#commit((tx) => {
+        // Collected afresh on each try of the commit, and emitted only once it stands.
+        events = [];
+        return reconcileAnswers(tx, now, this.#options.connectors, this.#options.providers, events);
+      });
+      for (const event of events) this.#options.connectors.diag.emit(event);
       if (this.#closed) return;
       if (queued) this.#options.onQueued?.();
       if (queued || this.#replyDue === undefined || this.#replyDue <= now) {

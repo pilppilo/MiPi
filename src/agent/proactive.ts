@@ -32,7 +32,8 @@ import {
   type SubmissionId,
   type Tx,
 } from "./pi/durable.ts";
-import type { Connectors, PendingInput } from "./connectors.ts";
+import { type Connectors, diagOf, type PendingInput } from "./connectors.ts";
+import type { DiagInput } from "./diag.ts";
 import type { Delivery, DeliveryDestination, DeliveryMessage } from "./delivery.ts";
 import { isNoSend, visibleAnswer } from "../lib/proactive-text.ts";
 import { chicagoDay } from "../lib/cap-day.ts";
@@ -280,11 +281,17 @@ export const RoundBudget = defineTask<
           .trim();
         failed.push({ tool: message.toolName, reason: text.slice(0, 160) || "failed" });
       }
+      // What this round decided, for the diagnostic log after the commit (never the tools' output).
+      let stopped: { reason: StopReason; inputs: number } | undefined;
+      let recorded = 0;
       await runtime.commit(async (tx) => {
+        stopped = undefined;
+        recorded = 0;
         const run = (await tx.doc(LiveDoc, runtime.conversationId)).run;
         const inputs = run?.inputs ?? [];
         const state = await tx.doc(Proactive);
         if (failed.length > 0) {
+          recorded = inputs.length;
           state.toolErrors = bounded([
             ...state.toolErrors,
             ...inputs.flatMap((submissionId) =>
@@ -319,11 +326,16 @@ export const RoundBudget = defineTask<
           ...state.stopped,
           ...inputs.map((submissionId) => ({ submissionId, reason })),
         ]);
+        stopped = { reason, inputs: inputs.length };
         return {
           status: "terminal",
           outcome: { status: "completed", result: { terminate: true } },
         };
       }, taskContext);
+      const diag = diagOf(runtime.registry);
+      for (const event of roundEvents(failed, recorded, stopped, runtime.conversationId)) {
+        diag.emit(event);
+      }
     },
   },
   abort: async (_task, runtime, taskContext) => {
@@ -333,6 +345,61 @@ export const RoundBudget = defineTask<
     );
   },
 });
+
+/** What gate a stop reason is, for `gate.held`; `run-limit` is the run's own limit, not a gate. */
+const GATE_OF: Readonly<Record<StopReason, string | undefined>> = {
+  "daily-cap": "run-cap",
+  "spend-cap": "spend-cap",
+  paused: "paused",
+  "provider-limit": "provider-limit",
+  "run-limit": undefined,
+};
+
+/** A round's diagnostic events: failed tools by name only, and why the run was ended. */
+function roundEvents(
+  failed: readonly { readonly tool: string }[],
+  recorded: number,
+  stopped: { readonly reason: StopReason; readonly inputs: number } | undefined,
+  conversationId: number,
+): DiagInput[] {
+  const events: DiagInput[] = [];
+  if (failed.length > 0 && recorded > 0) {
+    const tools = [...new Set(failed.map(({ tool }) => tool))].join(", ");
+    events.push({
+      level: "warn",
+      source: "gate",
+      kind: "proactive.tool_error",
+      outcome: "fault",
+      summary: `A proactive run's tool failed: ${tools}`,
+      convId: conversationId,
+      detail: { tools, failed: failed.length, inputs: recorded },
+    });
+  }
+  if (stopped !== undefined) {
+    const gate = GATE_OF[stopped.reason];
+    if (gate !== undefined) {
+      events.push({
+        level: "info",
+        source: "gate",
+        kind: "gate.held",
+        outcome: "held",
+        summary: `A proactive run is held by the ${gate} gate`,
+        convId: conversationId,
+        detail: { gate, at: "round" },
+      });
+    }
+    events.push({
+      level: stopped.reason === "run-limit" ? "warn" : "info",
+      source: "gate",
+      kind: "proactive.terminated",
+      outcome: "held",
+      summary: `A proactive run was ended (${stopped.reason})`,
+      convId: conversationId,
+      detail: { reason: stopped.reason, inputs: stopped.inputs },
+    });
+  }
+  return events;
+}
 
 /** Match proactive work to the live run, including bot work grouped with a door input. */
 async function proactiveRunKind(api: HookApi): Promise<"only" | "mixed-bot" | "mixed" | "none"> {
@@ -452,6 +519,8 @@ export async function reconcileAnswers(
   now: number,
   connectors: Connectors,
   providers?: Providers,
+  /** Collects a `proactive.settled` event per settled reminder, for the caller to emit once the commit stands. */
+  events?: DiagInput[],
 ): Promise<boolean> {
   const { delivery, origins } = connectors;
   const sources: Array<{
@@ -497,7 +566,13 @@ export async function reconcileAnswers(
     proactive.toolErrors.filter((error) => error.submissionId === submissionId);
   // A batch settles at one time. Use admission order to break ties across answer and failure groups.
   let latestSubmission = -1;
-  const recordOutcome = (submissionId: number, outcome: ProactiveRun["outcome"]) => {
+  const recordOutcome = (
+    input: ProactiveState["pending"][number],
+    outcome: ProactiveRun["outcome"],
+    reason?: string,
+  ) => {
+    events?.push(settledEvent(input, outcome, isBot(input), reason));
+    const { submissionId } = input;
     if (submissionId <= latestSubmission) return;
     latestSubmission = submissionId;
     proactive.lastRun = { at: now, outcome };
@@ -594,7 +669,7 @@ export async function reconcileAnswers(
       const { input } = item;
       const stop = stopOf.get(input.submissionId);
       if (stop !== undefined) {
-        recordOutcome(input.submissionId, "stopped");
+        recordOutcome(input, "stopped", stop);
         // Only reminder-only runs are stopped; the run ended on a tool call, with no answer of its own (and no
         // `onYield`, so no run record). The notice is the whole message.
         await stopNotice(input, stop);
@@ -604,7 +679,7 @@ export async function reconcileAnswers(
       let outcome: ProactiveRun["outcome"] = "sent";
       if (errors.length > 0) outcome = "failed";
       else if (reminderOnly && isNoSend(text)) outcome = "quiet";
-      recordOutcome(input.submissionId, outcome);
+      recordOutcome(input, outcome, errors.length > 0 ? "tool-error" : undefined);
       const destination = pushable(input.destination);
       if (destination === undefined) continue;
       const identity = delivery.identity(destination);
@@ -687,12 +762,16 @@ export async function reconcileAnswers(
       isBot(item.input) &&
       (item.record.reason === "aborted" || item.record.reason === "withdrawn")
     ) {
-      recordOutcome(item.input.submissionId, "stopped");
+      recordOutcome(item.input, "stopped", item.record.reason);
       continue;
     }
     const stop = item.source === "proactive" ? stopOf.get(item.input.submissionId) : undefined;
     if (item.source === "proactive") {
-      recordOutcome(item.input.submissionId, stop === undefined ? "failed" : "stopped");
+      recordOutcome(
+        item.input,
+        stop === undefined ? "failed" : "stopped",
+        stop ?? item.record.reason,
+      );
     }
     if (item.source === "proactive" && stop !== undefined) {
       await stopNotice(item.input, stop);
@@ -791,6 +870,68 @@ export async function reconcileAnswers(
   proactive.stopped = proactive.stopped.filter(({ submissionId }) => !done.has(submissionId));
   proactive.toolErrors = proactive.toolErrors.filter(({ submissionId }) => !done.has(submissionId));
   return true;
+}
+
+/** One settled reminder's outcome, as a diagnostic: never its instruction or answer, only what became of it. */
+function settledEvent(
+  input: ProactiveState["pending"][number],
+  outcome: ProactiveRun["outcome"],
+  bot: boolean,
+  reason: string | undefined,
+): DiagInput {
+  const what = bot ? "A bot follow-up" : "A reminder";
+  const detail = {
+    outcome,
+    origin: bot ? "bot" : "reminder",
+    submission: input.submissionId,
+    ...(reason === undefined ? {} : { reason }),
+  };
+  switch (outcome) {
+    case "sent":
+      return {
+        level: "info",
+        source: "gate",
+        kind: "proactive.settled",
+        outcome: "ok",
+        summary: `${what} was answered`,
+        convId: input.conversationId,
+        detail,
+      };
+    case "quiet":
+      return {
+        level: "info",
+        source: "gate",
+        kind: "proactive.settled",
+        outcome: "quiet",
+        summary: `${what} ran and stayed quiet (NO_SEND)`,
+        convId: input.conversationId,
+        detail,
+      };
+    case "failed":
+      return {
+        level: "warn",
+        source: "gate",
+        kind: "proactive.settled",
+        outcome: "fault",
+        summary: `${what} failed${reason === undefined ? "" : ` (${reason})`}`,
+        convId: input.conversationId,
+        detail,
+      };
+    case "stopped":
+      return {
+        level: "info",
+        source: "gate",
+        kind: "proactive.settled",
+        outcome: "held",
+        summary: `${what} was stopped${reason === undefined ? "" : ` (${reason})`}`,
+        convId: input.conversationId,
+        detail,
+      };
+    default: {
+      const _: never = outcome;
+      throw new Error("Unknown proactive outcome");
+    }
+  }
 }
 
 /**

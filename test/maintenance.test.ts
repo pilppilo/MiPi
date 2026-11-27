@@ -25,6 +25,7 @@ import {
   type ExportRow,
 } from "../src/agent/maintenance.ts";
 import { SUPPORTED_SCHEMA_VERSION } from "../src/agent/pi/storage.ts";
+import { DIAG_TABLE } from "../src/agent/diag.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
 import worker from "../src/worker/index.ts";
 import { MIPI_VERSION, PI_DURABLE_VERSION } from "../src/version.ts";
@@ -351,6 +352,152 @@ describe("export and restore", () => {
   });
 });
 
+describe("diagnostic log in export and restore", () => {
+  const diagEvents = (owner: string) =>
+    runInDurableObject(env.AGENT.getByName(owner), (instance) => instance.diagEvents());
+  const diagObjects = (owner: string) =>
+    runInDurableObject(env.AGENT.getByName(owner), (_instance, state) =>
+      state.storage.sql
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE tbl_name = ? ORDER BY name",
+          DIAG_TABLE,
+        )
+        .toArray()
+        .map(({ name }) => name),
+    );
+
+  it("leaves the diagnostic table and its indexes out of exports, counts and restores", async () => {
+    const owner = "diag-export";
+    const { call } = forOwner(owner);
+    await seed(owner, "hello");
+    expect(await diagObjects(owner)).toEqual([
+      DIAG_TABLE,
+      `${DIAG_TABLE}_level`,
+      `${DIAG_TABLE}_source`,
+    ]);
+    const before = await call<AdminStatus>("GET", "/api/admin/status");
+    expect(before.rows).not.toHaveProperty(DIAG_TABLE);
+
+    const exported = await exportAll(call);
+    expect(exported.consistent).toBe(true);
+    expect(
+      exported.header.schema.filter(
+        ({ name, table }) => name.startsWith(DIAG_TABLE) || table === DIAG_TABLE,
+      ),
+    ).toEqual([]);
+    expect(exported.rows.some(({ table }) => table === DIAG_TABLE)).toBe(false);
+    // Both ends of the export are recorded, outside the fingerprint.
+    const kinds = (await diagEvents(owner)).map(({ kind }) => kind);
+    expect(kinds.indexOf("maintenance.export_begin")).toBeGreaterThanOrEqual(0);
+    expect(kinds.lastIndexOf("maintenance.export_end")).toBeGreaterThan(
+      kinds.lastIndexOf("maintenance.export_begin"),
+    );
+
+    await call("POST", "/api/admin/restore/begin", {
+      header: exported.header,
+      confirm: MIPI_VERSION,
+    });
+    await call("POST", "/api/admin/restore/rows", { rows: exported.rows });
+    const after = await call<AdminStatus>("POST", "/api/admin/restore/end", {
+      rows: countsOf(exported.rows),
+    });
+    expect(after.state).toEqual({ kind: "open" });
+    expect(after.rows).toEqual(before.rows);
+    // The restore starts the log afresh: the earlier events are gone, and the reopen is the first.
+    const restored = await diagEvents(owner);
+    expect(restored.map(({ kind }) => kind)).toEqual(["startup.open"]);
+    expect(await diagObjects(owner)).toHaveLength(3);
+  });
+
+  it("restores an older build's export that copied the diagnostic table", async () => {
+    const owner = "diag-older-export";
+    const { call } = forOwner(owner);
+    await seed(owner, "hello");
+    const exported = await exportAll(call);
+    // As a build before COD-234 would export it, after a rollback: the log's table, index and rows included.
+    const header: ExportHeader = {
+      ...exported.header,
+      schema: [
+        ...exported.header.schema,
+        {
+          type: "table",
+          name: DIAG_TABLE,
+          table: DIAG_TABLE,
+          sql: `CREATE TABLE ${DIAG_TABLE} (id INTEGER PRIMARY KEY AUTOINCREMENT, ts INTEGER NOT NULL, level TEXT NOT NULL, source TEXT NOT NULL, kind TEXT NOT NULL, outcome TEXT NOT NULL, summary TEXT NOT NULL, req_id TEXT, conv_id INTEGER, task_id TEXT, duration_ms INTEGER, detail TEXT)`,
+        },
+        {
+          type: "index",
+          name: `${DIAG_TABLE}_level`,
+          table: DIAG_TABLE,
+          sql: `CREATE INDEX ${DIAG_TABLE}_level ON ${DIAG_TABLE} (level, id)`,
+        },
+      ],
+    };
+    const rows: ExportRow[] = [
+      ...exported.rows,
+      {
+        table: DIAG_TABLE,
+        rowid: 1,
+        values: {
+          id: 1,
+          ts: 1,
+          level: "info",
+          source: "do",
+          kind: "old",
+          outcome: "ok",
+          summary: "old",
+        },
+      },
+    ];
+    await call("POST", "/api/admin/restore/begin", { header, confirm: MIPI_VERSION });
+    await call("POST", "/api/admin/restore/rows", { rows });
+    const after = await call<AdminStatus>("POST", "/api/admin/restore/end", {
+      rows: countsOf(rows),
+    });
+    expect(after.state).toEqual({ kind: "open" });
+    expect((await diagEvents(owner)).map(({ kind }) => kind)).toEqual(["startup.open"]);
+  });
+
+  it("reads and records nothing that breaks an export's consistency", async () => {
+    const owner = "diag-during-export";
+    const { call, stub } = forOwner(owner);
+    await seed(owner, "hello");
+    await call("POST", "/api/admin/export/begin");
+    const during = await diagEvents(owner);
+    // An alarm and the admin status during the export write nothing.
+    await runDurableObjectAlarm(stub);
+    await call<AdminStatus>("GET", "/api/admin/status");
+    expect(await diagEvents(owner)).toEqual(during);
+    const { consistent } = await call<{ consistent: boolean }>("POST", "/api/admin/export/end");
+    expect(consistent).toBe(true);
+    expect((await diagEvents(owner)).at(-1)).toMatchObject({
+      kind: "maintenance.export_end",
+      outcome: "ok",
+      detail: { consistent: true },
+    });
+  });
+
+  it("doesn't store an event while maintenance runs", async () => {
+    const owner = "diag-maintenance-start";
+    const { call, stub } = forOwner(owner);
+    await seed(owner, "hello");
+    await call("POST", "/api/admin/export/begin");
+    const during = await diagEvents(owner);
+    // Restarted mid-export: it starts in maintenance, and that start is logged to the console, not stored.
+    await evictDurableObject(stub);
+    expect((await call<AdminStatus>("GET", "/api/admin/status")).state.kind).toBe("maintenance");
+    expect(await diagEvents(owner)).toEqual(during);
+    // The restart lost the fingerprint, so the export can't be trusted, and the log says so.
+    const { consistent } = await call<{ consistent: boolean }>("POST", "/api/admin/export/end");
+    expect(consistent).toBe(false);
+    expect((await diagEvents(owner)).at(-1)).toMatchObject({
+      kind: "maintenance.export_end",
+      level: "warn",
+      outcome: "fault",
+    });
+  });
+});
+
 describe("abandoned maintenance", () => {
   const backdate = (owner: string, ms: number) =>
     runInDurableObject(env.AGENT.getByName(owner), async (_instance, state) => {
@@ -359,6 +506,11 @@ describe("abandoned maintenance", () => {
         String(Date.now() - ms),
       );
     });
+
+  const staleEvents = async (owner: string) =>
+    (
+      await runInDurableObject(env.AGENT.getByName(owner), (instance) => instance.diagEvents())
+    ).filter(({ kind }) => kind === "maintenance.stale_export" || kind === "startup.open");
 
   it("opens again after an export whose script died, once the flag is 10 minutes old", async () => {
     const owner = "export-abandoned";
@@ -379,6 +531,16 @@ describe("abandoned maintenance", () => {
     expect(status.state).toEqual({ kind: "open" });
     expect(status.meta.maintenance).toBeUndefined();
     expect(status.meta.maintenance_started_at).toBeUndefined();
+    // Recorded with when the export began (read before the flag is cleared), then the reopen.
+    const events = await staleEvents(owner);
+    expect(events.slice(-2).map(({ kind }) => kind)).toEqual([
+      "maintenance.stale_export",
+      "startup.open",
+    ]);
+    expect(events.at(-2)!.detail).toEqual({ startedAt: expect.any(Number) });
+    expect(Date.now() - (events.at(-2)!.detail!.startedAt as number)).toBeGreaterThanOrEqual(
+      STALE_EXPORT_MS,
+    );
   });
 
   it("opens again on the next request when the object stayed in memory", async () => {
@@ -395,6 +557,13 @@ describe("abandoned maintenance", () => {
     expect(socket.status).toBe(101);
     socket.webSocket!.accept();
     socket.webSocket!.close(1000, "done");
+    // Still in memory, so it was in maintenance when it noticed: both events are stored all the same.
+    const events = await staleEvents(owner);
+    expect(events.slice(-2).map(({ kind }) => kind)).toEqual([
+      "maintenance.stale_export",
+      "startup.open",
+    ]);
+    expect(events.at(-2)!.detail).toEqual({ startedAt: expect.any(Number) });
     // A new export starts normally afterwards.
     expect((await exportAll(call)).consistent).toBe(true);
   });

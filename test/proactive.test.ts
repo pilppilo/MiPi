@@ -202,6 +202,12 @@ describe("proactive runs", () => {
           }),
         ]);
         expect(state?.cap).toMatchObject({ count: 3 });
+        expect(
+          agent.diag
+            .filter(({ kind }) => kind === "proactive.settled")
+            .map(({ outcome }) => outcome),
+        ).toEqual(["quiet", "quiet", "ok"]);
+        expect(JSON.stringify(agent.diag)).not.toContain("The mail came.");
       } finally {
         await agent.close();
       }
@@ -256,6 +262,17 @@ describe("proactive runs", () => {
         // Both model rounds counted: one at admission, one after the tool round.
         expect((await proactive(agent.harness))?.cap).toMatchObject({ count: 2 });
         expect((await proactive(agent.harness))?.lastRun?.outcome).toBe("failed");
+        // The diagnostic log names the tool, never its output or the reminder's instruction.
+        expect(agent.diag.find(({ kind }) => kind === "proactive.tool_error")).toMatchObject({
+          source: "gate",
+          outcome: "fault",
+          detail: { tools: "no_such_tool" },
+        });
+        expect(agent.diag.find(({ kind }) => kind === "proactive.settled")).toMatchObject({
+          outcome: "fault",
+          detail: { outcome: "failed", origin: "reminder", reason: "tool-error" },
+        });
+        expect(JSON.stringify(agent.diag)).not.toContain("Check the feed");
       } finally {
         await agent.close();
       }
@@ -344,6 +361,16 @@ describe("proactive runs", () => {
         ]);
         expect((await proactive(agent.harness))?.cap).toMatchObject({ count: RUN_ROUND_LIMIT });
         expect((await proactive(agent.harness))?.lastRun?.outcome).toBe("stopped");
+        expect(
+          agent.diag
+            .filter(({ kind }) => kind.startsWith("proactive.") || kind === "gate.held")
+            .map(({ kind, outcome }) => `${kind}:${outcome}`)
+            .filter((entry) => entry !== "proactive.tool_error:fault"),
+        ).toEqual(["proactive.terminated:held", "proactive.settled:held"]);
+        expect(agent.diag.find(({ kind }) => kind === "proactive.terminated")).toMatchObject({
+          level: "warn",
+          detail: { reason: "run-limit" },
+        });
       } finally {
         await agent.close();
       }

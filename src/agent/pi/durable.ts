@@ -59,6 +59,7 @@ export type {
   HarnessOptions,
   HookApi,
   RegistrySnapshot,
+  ReportInfo,
   SubmissionId,
   SubmissionRecord,
   TaskGraph,
