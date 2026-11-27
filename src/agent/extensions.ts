@@ -104,7 +104,7 @@ export interface ResolvedExtensions {
   readonly replacements: readonly Replacement[];
   /** Every Pi Durable extension to install: core's, every extension's (replaced ones too) and their helpers. */
   readonly installed: readonly Extension[];
-  /** The default selection: core's own first, then the active extensions by slot and name. */
+  /** The default selection: core's own first, then the active extensions by slot and name, then core's gates. */
   readonly selection: readonly Extension[];
   /** Names a conversation may switch off: the active extensions with a Pi Durable part, never core's own. */
   readonly switchable: readonly string[];
@@ -129,14 +129,26 @@ const piOf = (extension: MipiExtension): Extension[] =>
  * Applies the contract to `core` (core's own Pi Durable extensions, never replaced or switched off) and `extensions`:
  * replacement by Pi's rule, then the default order. A name used twice, or a tool two non-replaceable extensions both
  * register, is a wiring mistake and throws, so the agent refuses to open rather than run half of it.
+ *
+ * `coreLast` are core's own extensions that go after every other in the selection, so their hooks run last: the
+ * approval gate, which must see the arguments a call will run with, after any extension's `beforeTool` rewrote them.
+ * They register no tools and no sections, so their place never moves the prompt prefix.
  */
 export function resolveExtensions(
   core: readonly Extension[],
   extensions: readonly MipiExtension[],
+  coreLast: readonly Extension[] = [],
 ): ResolvedExtensions {
+  for (const extension of coreLast) {
+    if ((extension.tools ?? []).length > 0 || (extension.sections ?? []).length > 0) {
+      throw new Error(
+        `Core extension "${extension.name}" goes last, so it can't add tools or sections`,
+      );
+    }
+  }
   const names = new Set<string>();
   for (const name of [
-    ...core.map(({ name }) => name),
+    ...[...core, ...coreLast].map(({ name }) => name),
     ...extensions.flatMap(({ name, helpers }) => [name, ...(helpers ?? []).map((h) => h.name)]),
   ]) {
     if (names.has(name)) throw new Error(`Extension name "${name}" is used twice`);
@@ -199,9 +211,10 @@ export function resolveExtensions(
   const installed = [
     ...core,
     ...extensions.flatMap((extension) => [...piOf(extension), ...(extension.helpers ?? [])]),
+    ...coreLast,
   ];
   const tools = new Map<string, ToolRegistration>();
-  const selection = [...core, ...active.flatMap(piOf)];
+  const selection = [...core, ...active.flatMap(piOf), ...coreLast];
   for (const extension of selection) {
     for (const tool of extension.tools ?? []) if (!tools.has(tool.name)) tools.set(tool.name, tool);
   }

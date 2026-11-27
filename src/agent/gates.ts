@@ -3,6 +3,8 @@
  * pause (`spend.ts`); doors and extensions ask here, read-only, and never read those documents themselves. The one
  * write is charging a round, which happens when a proactive input is admitted (`expectProactive`). No extension can
  * replace a gate.
+ *
+ * The approval gate (COD-173), which holds one tool call for the owner's yes, is its own module: `approvals.ts`.
  */
 import { BACKGROUND_CONTEXT } from "./pi/context.ts";
 import type { Harness, Tx } from "./pi/durable.ts";

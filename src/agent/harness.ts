@@ -40,6 +40,7 @@ import {
 import { createProviders, type Providers } from "./providers.ts";
 import { providerLimitsExtension } from "./limits.ts";
 import { botTools } from "./bot-tools.ts";
+import { approvalsExtension } from "./approvals.ts";
 import type { DiagSink } from "./diag.ts";
 
 export interface HarnessConfig {
@@ -125,7 +126,9 @@ export const CACHE_RETENTION = "long" as const;
 /** MiPi's agent composition: platform-independent, so tests can open it beside the Durable Object. */
 export function composeAgent(config: HarnessConfig): AgentComposition {
   const core = coreExtensions(() => profiles);
-  const extensions = resolveExtensions(core, config.extensions);
+  // The approval gate (COD-173) runs after every other `beforeTool` hook, on the arguments the call will run with.
+  const gates = [approvalsExtension(() => extensions.tools)];
+  const extensions = resolveExtensions(core, config.extensions, gates);
   bindUntrustedTools(core[0]!, extensions.untrustedTools);
   const connectors = createConnectors(
     config.doors,

@@ -54,7 +54,12 @@ export function profileOrDefault(value: string | undefined): ProfileName {
   return isProfileName(value) && value !== MAIN_PROFILE ? value : DEFAULT_PROFILE;
 }
 
-/** The profile table against the tools the installed extensions register. */
+/**
+ * The profile table against the tools the installed extensions register. A tool that writes outside MiPi
+ * (`writesOutside`) may be offered outside `main` only if it asks the owner first (`approval`, COD-173): a purpose bot
+ * or a plain chat can then use it, but never make an outside change nobody approved. A table that breaks this refuses
+ * to compose, so the agent doesn't open with it.
+ */
 export class Profiles {
   readonly #table: ProfileTable;
   readonly #tools: ReadonlyMap<string, ToolRegistration>;
@@ -62,6 +67,16 @@ export class Profiles {
   constructor(table: ProfileTable, tools: ReadonlyMap<string, ToolRegistration>) {
     this.#table = table;
     this.#tools = tools;
+    for (const name of PROFILE_NAMES) {
+      if (name === MAIN_PROFILE) continue;
+      for (const tool of [...this.toolsFor(name), ...this.toolsFor(name, "bot")]) {
+        if (tool.writesOutside === true && tool.approval === undefined) {
+          throw new Error(
+            `Profile "${name}" offers "${tool.name}", which writes outside MiPi without asking the owner first`,
+          );
+        }
+      }
+    }
   }
 
   description(profile: ProfileName): string {

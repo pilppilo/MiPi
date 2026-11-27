@@ -70,6 +70,7 @@ describe("Pi seam contract", () => {
       "InboxDoc",
       "LiveDoc",
       "ProviderDoc",
+      "ToolTask",
       "UsageDoc",
       "UserEntry",
       "abortConversation",
@@ -78,6 +79,7 @@ describe("Pi seam contract", () => {
       "defineDoc",
       "defineDocFamily",
       "defineExtension",
+      "defineSignal",
       "defineTask",
       "hook",
       "hookTask",
@@ -731,6 +733,135 @@ describe("Pi seam contract", () => {
         expect(first?.status).toBe("unanswered");
         expect(second?.status).toBe("unanswered");
         expect(faux.state.callCount).toBe(1);
+      } finally {
+        await harness.close(ctx);
+      }
+    });
+    await evictDurableObject(stub);
+  });
+
+  it("parks a call at a beforeTool gate and in execute(), and wakes each with a signal (COD-173)", async () => {
+    const stub = env.AGENT.getByName("contract-approvals");
+    await runInDurableObject(stub, async (_instance, state) => {
+      await state.blockConcurrencyWhile(async () => {});
+      const faux = fauxProvider();
+      faux.setResponses([
+        fauxAssistantMessage([fauxToolCall("gated", {})], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxText("Gate passed.")]),
+        fauxAssistantMessage([fauxToolCall("parks", {})], { stopReason: "toolUse" }),
+        fauxAssistantMessage([fauxText("Woken.")]),
+      ]);
+      const models = createModels();
+      models.setProvider(faux.provider);
+      const Answer = durable.defineSignal({
+        name: "contract.answer",
+        version: 1,
+        schema: schema.obj({ ok: schema.oneOf([true, false]) }),
+      });
+      const ran: string[] = [];
+      const wakes: (durable.WakeReason | undefined)[] = [];
+      const gated: durable.ToolRegistration = {
+        name: "gated",
+        description: "Runs once the gate lets it",
+        parameters: schema.obj({}),
+        replay: "safe",
+        execute: async () => {
+          ran.push("gated");
+          return { output: [{ type: "text" as const, text: "ran" }] };
+        },
+      };
+      const parks: durable.ToolRegistration = {
+        name: "parks",
+        description: "Parks itself until signalled",
+        parameters: schema.obj({}),
+        replay: "safe",
+        execute: async (_args, api, context) => {
+          wakes.push(api.wake);
+          if (api.wake === undefined) {
+            const park: durable.ToolPark = {
+              kind: "sleep",
+              signals: [Answer.key(String(api.taskId))],
+              until: Date.now() + 60_000,
+            };
+            return park;
+          }
+          const answer = await api.readSignal(Answer, String(api.taskId), context);
+          ran.push(answer?.kind === "value" && answer.value.ok ? "parks:ok" : "parks:no");
+          return { output: [{ type: "text" as const, text: "woken" }] };
+        },
+      };
+      const extension = durable.defineExtension({
+        name: "contract-gate",
+        tools: [gated, parks],
+        hooks: [
+          durable.hook(durable.ToolTask, {
+            beforeTool: async (call, api, context) => {
+              if (call.name !== "gated") return undefined;
+              const key = String(api.taskId);
+              const answer = await api.readSignal(Answer, key, context);
+              if (answer === undefined) return { sleep: { signals: [Answer.key(key)] } };
+              return answer.kind === "value" && answer.value.ok ? undefined : { block: "No" };
+            },
+          }),
+        ],
+      });
+      const registry = durable.createRegistry();
+      registry.install(extension);
+      const storage = await openDurableObjectSqliteStorage(state.storage);
+      const harness = await durable.Harness.open(
+        storage,
+        {
+          models,
+          registry,
+          settings: { extensions: [extension] },
+          conversationCreated: (tx, conversation) =>
+            durable.configure(tx, conversation.id, {
+              model: { provider: "faux", modelId: "faux-1" },
+              thinkingLevel: "off",
+              tools: [gated, parks],
+            }),
+        },
+        ctx,
+      );
+      /** The tool task asleep on `Answer`, as the task graph shows it. */
+      const sleeper = async (): Promise<durable.TaskGraphNode> => {
+        for (let attempt = 0; attempt < 400; attempt++) {
+          const observation = await harness.observeTaskGraph({ advance() {}, end() {} }, ctx);
+          observation.detach();
+          const node = Object.values(observation.value.tasks).find(
+            (task) =>
+              task.kind === durable.ToolTask.definition.name &&
+              task.state.status === "sleeping" &&
+              (task.state.signals ?? []).some(({ signal }) => signal === Answer.key("x").signal),
+          );
+          if (node !== undefined) return node;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        throw new Error("No tool task fell asleep");
+      };
+      try {
+        const root = await harness.root(ctx);
+        for (const content of ["gate", "park"]) {
+          const submission = await root.submit({ type: "input", content }, ctx);
+          const node = await sleeper();
+          const signalled: durable.SignalResult = await harness.signal(
+            node.id,
+            Answer,
+            String(node.id),
+            { ok: true },
+            ctx,
+          );
+          expect(signalled).toBe("delivered");
+          expect(
+            await harness.signal(node.id, Answer, String(node.id), { ok: false }, ctx),
+          ).toMatch(/^(duplicate|closed)$/);
+          expect((await submission.wait(ctx)).status).toBe("done");
+          // The task's input names the call it runs (pi-ledger L14).
+          const record = await harness.getTask(node.id, ctx);
+          expect((record?.input as durable.ToolTaskInput | undefined)?.kind).toBe("model");
+        }
+        expect(ran).toEqual(["gated", "parks:ok"]);
+        expect(wakes).toEqual([undefined, expect.objectContaining({ reason: "signal" })]);
       } finally {
         await harness.close(ctx);
       }

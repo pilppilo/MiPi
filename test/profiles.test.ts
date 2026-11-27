@@ -17,7 +17,13 @@ import { composeMipi, createHarnessOptions } from "../src/agent/composition.ts";
 import { createBot, createCobot } from "../src/agent/bots.ts";
 import { PROFILES } from "./mipi.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
-import { PROFILE_NAMES, profileOrDefault, type ProfileName } from "../src/agent/profiles.ts";
+import {
+  PROFILE_NAMES,
+  profileOrDefault,
+  type ProfileName,
+  Profiles,
+} from "../src/agent/profiles.ts";
+import type { ToolRegistration } from "../src/agent/pi/durable.ts";
 import { PROFILE_TABLE } from "../src/extensions/profiles.ts";
 
 const ctx = BACKGROUND_CONTEXT;
@@ -71,11 +77,47 @@ describe("tool profiles", () => {
       await harness.close(ctx);
     }
   });
-  it("keeps tools marked writesOutside out of purpose-bot profiles until approvals exist", () => {
+  it("offers a tool that writes outside MiPi outside main only if it asks the owner first", () => {
     const { profiles } = composeMipi();
     for (const name of PROFILE_NAMES.filter((name) => name !== "main")) {
-      expect(profiles.toolsFor(name).filter((tool) => tool.writesOutside === true)).toEqual([]);
+      for (const tool of [...profiles.toolsFor(name), ...profiles.toolsFor(name, "bot")]) {
+        if (tool.writesOutside === true) expect(tool.approval, tool.name).toBeDefined();
+      }
     }
+
+    const outside = (approval?: ToolRegistration["approval"]): ToolRegistration => ({
+      name: "post",
+      description: "Post somewhere",
+      parameters: { type: "object", properties: {} },
+      replay: "unsafe",
+      writesOutside: true,
+      ...(approval === undefined ? {} : { approval }),
+      execute: async () => ({ output: [] }),
+    });
+    const table = (tools: readonly string[], botTools: readonly string[] = []) => ({
+      ...PROFILE_TABLE,
+      default: { ...PROFILE_TABLE.default, tools, botTools },
+    });
+    // Ungated: refused in default, as a bot tool too; allowed in main, which only MiPi runs on.
+    expect(() => new Profiles(table(["post"]), new Map([["post", outside()]]))).toThrow(
+      /Profile "default" offers "post", which writes outside MiPi without asking/,
+    );
+    expect(() => new Profiles(table([], ["post"]), new Map([["post", outside()]]))).toThrow(
+      /writes outside MiPi/,
+    );
+    expect(
+      () =>
+        new Profiles(
+          { ...PROFILE_TABLE, main: { ...PROFILE_TABLE.main, tools: ["post"] } },
+          new Map([["post", outside()]]),
+        ),
+    ).not.toThrow();
+    // Gated: allowed anywhere.
+    const gated = outside({
+      kind: "gate",
+      describe: () => ({ summary: "Post", reason: "It is public" }),
+    });
+    expect(() => new Profiles(table(["post"]), new Map([["post", gated]]))).not.toThrow();
   });
 
   it.each(PROFILE_NAMES)("offers a %s conversation exactly its profile's tools", async (name) => {

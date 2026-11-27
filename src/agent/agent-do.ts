@@ -111,6 +111,7 @@ import {
 } from "./alarm.ts";
 import { type HeartbeatStatus, readHeartbeat } from "./heartbeat.ts";
 import { WakeSources } from "./wake-sources.ts";
+import { ApprovalWatch } from "./approvals.ts";
 import { DIAG_TABLE, type DiagInput, DiagLog, type DiagQuery, errorText } from "./diag.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../doors/telegram/channel.ts";
 import { botApiSender } from "../doors/telegram/bot-api.ts";
@@ -1027,11 +1028,22 @@ export class MipiAgent extends DurableObject<Env> {
         const settings = await tx.doc(AgentSettings);
         if (settings.timeZone !== timeZone) settings.timeZone = timeZone;
       }, BACKGROUND_CONTEXT);
+      // Pending approvals (COD-173), read off the task graph: their diagnostics, and a notice while nobody watches.
+      const approvals = new ApprovalWatch({
+        harness,
+        delivery: composition.connectors.delivery,
+        tools: composition.extensions.tools,
+        diag: this.#diag,
+        watched: () => this.#connections().length > 0,
+        now: Date.now,
+        report: (error) => reportError("Telling the owner about an approval failed", error),
+      });
       activity = await harness.watchTaskGraph(BACKGROUND_CONTEXT);
       this.#activity = activity;
       activity.start(async (call) => {
-        if (call.kind === "value")
-          this.#broadcast({ type: "session.activity", activity: call.value });
+        if (call.kind !== "value") return;
+        this.#broadcast({ type: "session.activity", activity: call.value });
+        this.ctx.waitUntil(approvals.observe(call.value, BACKGROUND_CONTEXT));
       });
       // Subagents are created by background tool tasks, not client commands.
       // Notify connected clients when their conversation records are committed.
