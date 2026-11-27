@@ -3,8 +3,10 @@
  * "current time" system-prompt section: a section that changes every minute appends a new system entry each turn
  * and keeps the prompt prefix from staying identical, which is what provider prompt caches key on. The system
  * prompt is now static; time travels with the messages. Every door (web, Telegram, relay, scheduled deliveries)
- * stamps input through here, so caching never depends on which door a message came through.
+ * stamps input through here, so caching never depends on which door a message came through. The format itself is in
+ * the wire contract (`formatStamp`), so the web door reads what is written here (COD-248).
  */
+import { formatStamp } from "../protocol.ts";
 
 export const DEFAULT_TIME_ZONE = "America/Chicago";
 
@@ -48,7 +50,7 @@ export function stampInput(
   timeZone: string | undefined,
   at: number = Date.now(),
 ): string {
-  return `[${speaker} · ${localTime(at, timeZone)}]\n${content}`;
+  return `${formatStamp(speaker, localTime(at, timeZone))}${content}`;
 }
 
 /** The system-prompt line that tells the model how to read stamps. Static, so the prompt prefix never changes. */

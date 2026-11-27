@@ -57,7 +57,7 @@ import {
 } from "./marks.tsx";
 import { webPlatform } from "./platform/web.ts";
 import { Markdown } from "./Markdown.tsx";
-import { MessageText, TranscriptList } from "./Transcript.tsx";
+import { MessageStamp, MessageText, TranscriptList } from "./Transcript.tsx";
 import { usePiSession } from "./usePiSession.ts";
 
 interface ChatSessionProps {
@@ -936,6 +936,9 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                           <span>Queued</span>
                         </div>
                       </header>
+                      {showSystem && input.stamp !== undefined ? (
+                        <MessageStamp stamp={input.stamp} />
+                      ) : null}
                       <MessageText text={input.text} />
                     </article>
                   </li>

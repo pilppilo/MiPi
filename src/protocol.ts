@@ -66,6 +66,36 @@ const RECURRENCE_NOTE_PREFIX = "\n\nThis instruction recurs.";
 /** Starts a reminder's notes for the model (M6); the client shows only the instruction before them. */
 const REMINDER_NOTES_PREFIX = "\n\n[Notes for this run]";
 
+/**
+ * The stamp every message starts with as the model sees it: `[speaker · local time]` on its own first line
+ * (`stampInput` in `src/agent/stamp.ts`, which builds it with this). Here, in the wire contract, so the agent and the
+ * web door read one format (COD-248).
+ */
+// pi-ledger L3: the time travels with each message, not in the system prompt.
+export const formatStamp = (speaker: string, time: string): string => `[${speaker} · ${time}]\n`;
+
+/**
+ * A stamp at the very start of a message. The speaker holds no `]` (doors strip brackets from names) and the time must
+ * look exactly like `localTime()`'s (`Sun, Nov 22, 2026, 12:40 CST`), so ordinary text that only starts with a bracket,
+ * or a bracketed note before a stamp, is never taken for one.
+ */
+const STAMP =
+  /^\[([^\]\n]+?) · ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{2}:\d{2} [^\]\n]+)\]\n/;
+
+export interface Stamp {
+  /** Who sent it: the owner's name, `bot:<name>`, the relay's speaker. */
+  readonly speaker: string;
+  /** When it arrived, in the owner's local time, as the model read it. */
+  readonly time: string;
+}
+
+/** A message's text without its stamp, and the stamp; a message without one comes back as it is. */
+export function parseStamp(content: string): { readonly text: string; readonly stamp?: Stamp } {
+  const match = STAMP.exec(content);
+  if (match === null) return { text: content };
+  return { text: content.slice(match[0].length), stamp: { speaker: match[1]!, time: match[2]! } };
+}
+
 /** Input submitted when a scheduled instruction is due. Self-contained; no system-prompt support needed. */
 export function formatScheduledInstruction(
   scheduled: {
@@ -160,7 +190,9 @@ function userInputText(content: unknown): string {
 export interface QueuedInput {
   readonly submissionId: number;
   readonly mode: "steer" | "followUp";
+  /** Without its stamp (COD-248). */
   readonly text: string;
+  readonly stamp?: Stamp;
 }
 
 /** Queued user inputs of a conversation's `pi.inbox` document; passive writes are not user messages. */
@@ -168,7 +200,13 @@ export function queuedInputs(inbox: Readonly<InboxState> | undefined): QueuedInp
   const items: QueuedInput[] = [];
   for (const item of inbox?.items ?? []) {
     if (item.mode === "write") continue;
-    items.push({ submissionId: item.id, mode: item.mode, text: userInputText(item.content) });
+    const { text, stamp } = parseStamp(userInputText(item.content));
+    items.push({
+      submissionId: item.id,
+      mode: item.mode,
+      text,
+      ...(stamp === undefined ? {} : { stamp }),
+    });
   }
   return items;
 }
