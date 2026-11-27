@@ -38,6 +38,8 @@ describe("bare core", () => {
       "chat",
       "proactive",
       "provider-limits",
+      // The approval gate (COD-173): core's, last, so it sees the arguments a call runs with.
+      "approvals",
     ]);
     expect(composition.profiles.toolsFor("default")).toEqual([]);
     expect(composition.tasks.map(({ definition }) => definition.name).sort()).toEqual([

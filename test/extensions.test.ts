@@ -76,6 +76,24 @@ describe("resolveExtensions", () => {
     expect(resolved.replacements).toEqual([]);
   });
 
+  it("puts core's gates after every other extension, and refuses a gate with tools or sections", () => {
+    const gate = defineExtension({ name: "gate" });
+    const resolved = resolveExtensions(coreExtensions(), BUILT_IN_EXTENSIONS, [gate]);
+    expect(resolved.selection.at(-1)).toBe(gate);
+    expect(resolved.installed).toContain(gate);
+    expect(resolved.switchable).not.toContain("gate");
+    expect(() =>
+      resolveExtensions(
+        coreExtensions(),
+        [],
+        [defineExtension({ name: "gate", tools: [tool("x")] })],
+      ),
+    ).toThrow(/goes last, so it can't add tools or sections/);
+    expect(() => resolveExtensions(coreExtensions(), [extension("gate", [])], [gate])).toThrow(
+      /used twice/,
+    );
+  });
+
   it("drops a replaceable built-in whole when another extension registers its tool, whatever the order", () => {
     const fetcher = extension("my-fetch", ["web_fetch"]);
     for (const list of [
