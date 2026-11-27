@@ -10,6 +10,7 @@ import {
   type Fetch as AccessFetch,
   verifyAccessJwt,
 } from "./access.ts";
+import { logRefusedRequest } from "../agent/diag.ts";
 
 export const SPIKE_COOKIE = "mipi_spike";
 const COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
@@ -88,6 +89,8 @@ export async function handleUnlock(
     expected.trim().length === 0 ||
     !(await constantTimeEqual(token, expected))
   ) {
+    // A guess at the unlock token, logged like any refused credential (the GET check above stays quiet).
+    logRefusedRequest("auth.refused", request, 401, "wrong unlock token");
     return json({ error: "Wrong token" }, 401);
   }
   return new Response(null, {

@@ -7,6 +7,7 @@
  * deliberately drops); 503 makes Telegram retry later.
  */
 import { constantTimeEqual } from "./auth.ts";
+import { logRefusedRequest } from "../agent/diag.ts";
 import { readBounded } from "./body.ts";
 import {
   parseAllowedUserIds,
@@ -59,6 +60,12 @@ export async function handleTelegramWebhook(
     presented === null ||
     !(await constantTimeEqual(presented, expected))
   ) {
+    logRefusedRequest(
+      "telegram.webhook_refused",
+      request,
+      401,
+      expected === undefined ? "no webhook secret is set" : "wrong webhook secret",
+    );
     return json({ error: "Unauthorized" }, 401);
   }
 

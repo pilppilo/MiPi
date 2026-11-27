@@ -12,6 +12,7 @@
  */
 import type { ProviderUsage } from "../protocol.ts";
 import type { ReadEnv } from "./pi/models.ts";
+import { type DiagSink, NOOP_DIAG } from "./diag.ts";
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -127,13 +128,19 @@ export const USAGE_CACHE_MS = 5 * 60_000;
 export class ProviderUsageCache {
   readonly #sources: readonly UsageSource[];
   readonly #fetcher: FetchLike;
+  readonly #diag: DiagSink;
   readonly #cached = new Map<string, { readonly at: number; readonly usage: ProviderUsage }>();
   /** Reads in flight, by provider: callers at the same moment share one. */
   readonly #reading = new Map<string, Promise<ProviderUsage>>();
 
-  constructor(sources: readonly UsageSource[], fetcher: FetchLike = fetch) {
+  constructor(
+    sources: readonly UsageSource[],
+    fetcher: FetchLike = fetch,
+    diag: DiagSink = NOOP_DIAG,
+  ) {
     this.#sources = sources;
     this.#fetcher = fetcher;
+    this.#diag = diag;
   }
 
   /** What was read last, at most five minutes ago, without reading again: for callers that mustn't wait on a provider. */
@@ -185,6 +192,30 @@ export class ProviderUsageCache {
         clearTimeout(timer);
       }
       this.#cached.set(source.provider, { at: now, usage });
+      // One event per read (at most every five minutes a provider): the reason, never the key or the response.
+      this.#diag.emit(
+        usage.status === "ok"
+          ? {
+              level: "debug",
+              source: "provider",
+              kind: "provider.usage_ok",
+              outcome: "ok",
+              summary: `Read ${source.label}'s usage`,
+              detail: {
+                provider: source.provider,
+                windows: usage.windows.length,
+                limited: usage.windows.some(({ limited }) => limited),
+              },
+            }
+          : {
+              level: "warn",
+              source: "provider",
+              kind: "provider.usage_failed",
+              outcome: "fault",
+              summary: `${source.label}'s usage is unavailable: ${usage.reason}`,
+              detail: { provider: source.provider },
+            },
+      );
       return usage;
     })().finally(() => this.#reading.delete(source.provider));
     this.#reading.set(source.provider, read);

@@ -79,3 +79,64 @@ export function boundaryProblems(files: readonly SourceFile[]): BoundaryProblem[
   }
   return problems;
 }
+
+/**
+ * The module specifiers a file loads when it runs: every static import and re-export but those that are types as a
+ * whole statement (`import type …`, `export type …`), which Node's type stripping removes. An inline `{ type X }`
+ * still loads its module, so it counts.
+ */
+export function runtimeSpecifiers(text: string): string[] {
+  const found: string[] = [];
+  const pattern =
+    /(?:^|[\s;])(?:import|export)\s+(type\s+)?(?:[^"'`;]*?\sfrom\s+)?["']([^"']+)["']/g;
+  for (const match of withoutComments(text).matchAll(pattern)) {
+    if (match[1] === undefined) found.push(match[2]!);
+  }
+  return found;
+}
+
+/**
+ * Scripts that a workflow runs with Node alone, without `pnpm install` (`heartbeat.yml`), must load only Node's own
+ * modules and other files under `scripts/`: one value import from `src/` reaches `@earendil-works/*`, and the script
+ * dies before its first line. Walks the runtime imports from `entries`; `read` gives a file's text, or undefined.
+ */
+export function standaloneProblems(
+  entries: readonly string[],
+  read: (path: string) => string | undefined,
+): BoundaryProblem[] {
+  const problems: BoundaryProblem[] = [];
+  const seen = new Set<string>();
+  const queue = [...entries];
+  while (queue.length > 0) {
+    const file = queue.shift()!;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const text = read(file);
+    if (text === undefined) {
+      problems.push({ file, specifier: file, reason: "the file can't be read" });
+      continue;
+    }
+    for (const specifier of runtimeSpecifiers(text)) {
+      if (specifier.startsWith("node:")) continue;
+      if (!specifier.startsWith(".")) {
+        problems.push({
+          file,
+          specifier,
+          reason: "a script run without pnpm install can load no package (use node: modules)",
+        });
+        continue;
+      }
+      const target = toPosix(normalize(join(dirname(file), specifier)));
+      if (!target.startsWith("scripts/")) {
+        problems.push({
+          file,
+          specifier,
+          reason: `a script run without pnpm install can load nothing outside scripts/ (${target}); import types only`,
+        });
+        continue;
+      }
+      queue.push(target);
+    }
+  }
+  return problems;
+}

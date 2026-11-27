@@ -7,6 +7,7 @@
  * Core code: it names no provider.
  */
 import type { FetchLike, ModelListSource } from "./providers.ts";
+import { type DiagSink, errorText, NOOP_DIAG } from "./diag.ts";
 
 export interface ModelChoice {
   readonly id: string;
@@ -31,21 +32,38 @@ export class ModelList {
   #cached: { readonly at: number; readonly listed: readonly Listed[] } | undefined;
   readonly #sources: readonly ModelListSource[];
   readonly #fetcher: FetchLike;
+  readonly #diag: DiagSink;
 
-  constructor(sources: readonly ModelListSource[], fetcher: FetchLike = fetch) {
+  constructor(
+    sources: readonly ModelListSource[],
+    fetcher: FetchLike = fetch,
+    diag: DiagSink = NOOP_DIAG,
+  ) {
     this.#sources = sources;
     this.#fetcher = fetcher;
+    this.#diag = diag;
   }
 
   async #listed(now: number): Promise<readonly Listed[]> {
     if (this.#cached !== undefined && now - this.#cached.at < CACHE_MS) return this.#cached.listed;
     const perSource = await Promise.all(
-      this.#sources.map(async (source) =>
-        pickableModels(source, await source.liveIds(this.#fetcher)).map((model) => ({
-          provider: source.provider,
-          model,
-        })),
-      ),
+      this.#sources.map(async (source) => {
+        let live: string[];
+        try {
+          live = await source.liveIds(this.#fetcher);
+        } catch (error) {
+          this.#diag.emit({
+            level: "warn",
+            source: "provider",
+            kind: "provider.models_failed",
+            outcome: "fault",
+            summary: `${source.label}'s model list can't be read: ${errorText(error)}`,
+            detail: { provider: source.provider },
+          });
+          throw error;
+        }
+        return pickableModels(source, live).map((model) => ({ provider: source.provider, model }));
+      }),
     );
     const listed = perSource.flat();
     this.#cached = { at: now, listed };

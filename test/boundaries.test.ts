@@ -1,6 +1,12 @@
 /** The extension boundary (`scripts/boundaries.ts`): no extension imports another, or the lists above them. */
 import { describe, expect, it } from "vitest";
-import { boundaryProblems, extensionOf, importSpecifiers } from "../scripts/boundaries.ts";
+import {
+  boundaryProblems,
+  extensionOf,
+  importSpecifiers,
+  runtimeSpecifiers,
+  standaloneProblems,
+} from "../scripts/boundaries.ts";
 
 describe("extension boundaries", () => {
   it("knows which extension a file belongs to", () => {
@@ -57,6 +63,46 @@ describe("extension boundaries", () => {
       ["src/extensions/builtin/web-fetch/index.ts", "../../builtins.ts"],
       ["src/extensions/optional/opencode-go/index.ts", "../../builtin/memory/index.ts"],
       ["src/extensions/builtin/reminders/index.ts", "../memory"],
+    ]);
+  });
+});
+
+describe("standalone scripts", () => {
+  it("count every import but whole-statement type imports as loaded", () => {
+    expect(
+      runtimeSpecifiers(
+        [
+          'import type { A } from "../src/protocol.ts";',
+          'export type { B } from "../src/b.ts";',
+          'import { type C } from "../src/c.ts";',
+          'import { d } from "./d.ts";',
+          'import "./e.ts";',
+          '// import { f } from "../src/f.ts";',
+          'import { appendFile } from "node:fs/promises";',
+        ].join("\n"),
+      ),
+    ).toEqual(["../src/c.ts", "./d.ts", "./e.ts", "node:fs/promises"]);
+  });
+
+  it("let a script run without pnpm install load only node: modules and scripts/", () => {
+    const files: Record<string, string> = {
+      "scripts/heartbeat.ts":
+        'import { a } from "./a.ts";\nimport { readFile } from "node:fs/promises";',
+      "scripts/a.ts":
+        'import type { DiagEvent } from "../src/protocol.ts";\nimport { b } from "./b.ts";',
+      "scripts/b.ts": "export const b = 1;",
+    };
+    expect(standaloneProblems(["scripts/heartbeat.ts"], (path) => files[path])).toEqual([]);
+
+    // The bug this guards (PR #51 review): one value import from `src/` reaches `@earendil-works/*`.
+    files["scripts/b.ts"] =
+      'import { parseDiagSnapshot } from "../src/protocol.ts";\nimport x from "pkg";';
+    expect(standaloneProblems(["scripts/heartbeat.ts"], (path) => files[path])).toEqual([
+      expect.objectContaining({ file: "scripts/b.ts", specifier: "../src/protocol.ts" }),
+      expect.objectContaining({ file: "scripts/b.ts", specifier: "pkg" }),
+    ]);
+    expect(standaloneProblems(["scripts/missing.ts"], (path) => files[path])).toEqual([
+      expect.objectContaining({ file: "scripts/missing.ts", reason: "the file can't be read" }),
     ]);
   });
 });

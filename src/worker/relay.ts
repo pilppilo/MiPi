@@ -9,6 +9,7 @@
  * never mistaken for an outage.
  */
 import { constantTimeEqual } from "./auth.ts";
+import { logRefusedRequest } from "../agent/diag.ts";
 import { readBounded } from "./body.ts";
 import { RELAY_MAX_TEXT_BYTES, type RelayResult } from "../doors/relay/relay.ts";
 import { isRelayKey } from "../doors/relay/requests.ts";
@@ -123,7 +124,10 @@ export async function handleRelay(
   agent: () => RelayAgent,
 ): Promise<Response> {
   // Authentication first: without a token nothing about the relay is told, not even which methods exist.
-  if (!(await isAuthorized(request, env))) return json({ error: "Unauthorized" }, 401);
+  if (!(await isAuthorized(request, env))) {
+    logRefusedRequest("relay.auth_refused", request, 401, "wrong or missing relay token");
+    return json({ error: "Unauthorized" }, 401);
+  }
 
   if (pathname === "/api/relay" || pathname === "/api/relay/") {
     if (request.method !== "POST") {

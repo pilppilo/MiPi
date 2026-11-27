@@ -38,6 +38,7 @@ import {
   setProfile,
 } from "../../agent/conversations.ts";
 import type { Delivery } from "../../agent/delivery.ts";
+import { type DiagInput, type DiagSink, NOOP_DIAG } from "../../agent/diag.ts";
 import { isPaused, isPausedNow, PAUSED_REPLY, warnOwnerOverCap } from "../../agent/gates.ts";
 import type { ModelList } from "../../agent/model-list.ts";
 import {
@@ -61,7 +62,7 @@ import {
   settleStale,
   TelegramOutbox,
 } from "./outbox.ts";
-import type { TelegramSend } from "./bot-api.ts";
+import type { SendResult, TelegramSend } from "./bot-api.ts";
 import { telegramBatchRequest, telegramRequest } from "./requests.ts";
 import { TELEGRAM_DOC_KIND, TelegramChannel, type TelegramChannelState } from "./state.ts";
 import type { TelegramInbound } from "./update.ts";
@@ -205,7 +206,62 @@ export interface TelegramChannelOptions {
   /** A text message was submitted: the door-independent follow-ups (titles, snapshots). */
   readonly onSubmitted?: (conversationId: ConversationId, text: string) => Promise<void>;
   readonly report: (message: string, error: unknown, details?: Record<string, unknown>) => void;
+  /** The agent's diagnostic log (`source: "door:telegram"`). Never given chat text. */
+  readonly diag?: DiagSink;
   readonly now?: () => number;
+}
+
+const SOURCE = "door:telegram";
+
+/** A send's outcome as a diagnostic: its reply and chunk ids and Telegram's reason, never the text. */
+function sendEvent(send: PickedSend, result: SendResult, durationMs: number): DiagInput {
+  const base = { source: SOURCE, reqId: send.replyId, durationMs } as const;
+  const detail = { chunk: send.key, result: result.kind };
+  switch (result.kind) {
+    case "sent":
+      return {
+        ...base,
+        level: "info",
+        kind: "telegram.send_ok",
+        outcome: "ok",
+        summary: "A Telegram message went out",
+        detail,
+      };
+    case "retry":
+    case "markup":
+    case "too-long":
+      // `markup` resends as plain text, `too-long` splits: both go again, like a retry.
+      return {
+        ...base,
+        level: "warn",
+        kind: "telegram.send_retry",
+        outcome: "retry",
+        summary: `A Telegram send will be tried again: ${result.reason}`,
+        detail,
+      };
+    case "failed":
+      return {
+        ...base,
+        level: "error",
+        kind: "telegram.send_failed",
+        outcome: "fault",
+        summary: `A Telegram send failed: ${result.reason}`,
+        detail,
+      };
+    case "unknown":
+      return {
+        ...base,
+        level: "error",
+        kind: "telegram.send_unknown",
+        outcome: "fault",
+        summary: `A Telegram send may or may not have gone out: ${result.reason}`,
+        detail,
+      };
+    default: {
+      const _: never = result;
+      throw new Error("Unknown Telegram send result");
+    }
+  }
 }
 
 /** What the channel needs from the alarm: a time to send at, and whether work can run (the heartbeat). */
@@ -218,6 +274,8 @@ export class TelegramChannelRuntime {
   /** Sends whose request is running now: a `sending` chunk outside this set was cut off. */
   readonly #inFlight = new Set<string>();
   #wake: TelegramWake = { active: false };
+  /** The outbox's replies as of the last commit, so a new one is reported once; unset before the first look. */
+  #knownReplies: Set<string> | undefined;
   #closed = false;
   #refreshing = false;
   #refreshAgain = false;
@@ -225,6 +283,10 @@ export class TelegramChannelRuntime {
   constructor(options: TelegramChannelOptions) {
     this.#options = options;
     this.#now = options.now ?? Date.now;
+  }
+
+  get #diag(): DiagSink {
+    return this.#options.diag ?? NOOP_DIAG;
   }
 
   /** What the channel has waiting, as of its last commit. */
@@ -309,10 +371,24 @@ export class TelegramChannelRuntime {
         this.#options.profiles,
       );
     });
+    // A text turned away by a pause is `held`, as the relay records it; anything else came in.
+    const paused = update.kind === "text" && (await isPausedNow(this.#options.harness));
+    this.#diag.emit({
+      level: "info",
+      source: SOURCE,
+      kind: "telegram.admit",
+      outcome: paused ? "held" : "ok",
+      summary: paused
+        ? "A Telegram message was turned away: MiPi is paused"
+        : `A Telegram ${update.kind === "command" ? "command" : update.kind === "text" ? "message" : "non-text update"} came in`,
+      reqId: `tg:${update.updateId}`,
+      convId: conversationId,
+      detail: { update: update.kind, ...(paused ? { paused: true } : {}) },
+    });
     switch (update.kind) {
       case "text":
         // Paused (`MIPI_PAUSED`, M9): refused before any window opens, so nothing waits to run later.
-        if (await isPausedNow(this.#options.harness)) {
+        if (paused) {
           await this.#reply(update.updateId, update.chatId, () => PAUSED_REPLY);
           return;
         }
@@ -929,8 +1005,9 @@ export class TelegramChannelRuntime {
   async #send(send: PickedSend): Promise<void> {
     const { key } = send;
     this.#inFlight.add(key);
+    const started = this.#now();
     try {
-      let result;
+      let result: SendResult;
       try {
         result = await this.#options.send(send.chatId, {
           text: send.text,
@@ -953,6 +1030,7 @@ export class TelegramChannelRuntime {
         recordSend(await tx.doc(TelegramOutbox), send, result, this.#now());
         if (result.kind === "sent") await recordDelivered(tx, send.replyId, this.#now());
       });
+      this.#diag.emit(sendEvent(send, result, this.#now() - started));
     } finally {
       this.#inFlight.delete(key);
     }
@@ -961,10 +1039,12 @@ export class TelegramChannelRuntime {
   /** A commit that also refreshes the channel's wake from the documents it leaves. */
   async #commit<T>(change: (tx: Tx) => T | Promise<T>): Promise<T> {
     let wake: TelegramWake | undefined;
+    let replies: { readonly id: string; readonly chunks: number }[] = [];
     const result = await this.#options.harness.commit(async (tx) => {
       const value = await change(tx);
       const state = await tx.doc(TelegramChannel);
       const outbox = await tx.doc(TelegramOutbox);
+      replies = outbox.replies.map(({ id, chunks }) => ({ id, chunks: chunks.length }));
       const staged = state.staged ?? [];
       const times = [
         nextOutboxWake(outbox, this.#now()),
@@ -982,7 +1062,30 @@ export class TelegramChannelRuntime {
       this.#wake = wake;
       this.#options.onWakeChange();
     }
+    this.#noteQueued(replies);
     return result;
+  }
+
+  /**
+   * Reports each reply new in the outbox since the last commit, whoever queued it (this door, core's settlement, a
+   * reminder). The first look after a start only learns what is there, so a restart reports nothing twice.
+   */
+  #noteQueued(replies: readonly { readonly id: string; readonly chunks: number }[]): void {
+    const known = this.#knownReplies;
+    this.#knownReplies = new Set(replies.map(({ id }) => id));
+    if (known === undefined) return;
+    for (const { id, chunks } of replies) {
+      if (known.has(id)) continue;
+      this.#diag.emit({
+        level: "debug",
+        source: SOURCE,
+        kind: "telegram.outbox_enqueued",
+        outcome: "ok",
+        summary: `A Telegram reply was queued (${chunks} ${chunks === 1 ? "part" : "parts"})`,
+        reqId: id,
+        detail: { chunks },
+      });
+    }
   }
 }
 

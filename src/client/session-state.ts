@@ -219,6 +219,9 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
     case "conversation.view":
     case "conversation.ops":
       return state;
+    // The Diagnostics page (slice 3) keeps its own events; the session state doesn't.
+    case "diag.event":
+      return state;
     case "presence.typing": {
       const before =
         state.snapshots[event.conversationId] ?? emptyConversation(event.conversationId);

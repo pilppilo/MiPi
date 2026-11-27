@@ -75,6 +75,32 @@ describe("diagnostic log storage", () => {
     });
   });
 
+  it("trims debug rows on their own, so they never push out faults", async () => {
+    await freshSql("diag-tiers", (sql) => {
+      const log = new DiagLog(sql, { maxRows: 3, maxDebugRows: 2 });
+      log.emit(event({ level: "error", outcome: "fault", summary: "the fault" }));
+      log.emit(event({ level: "warn", summary: "a warning" }));
+      for (let index = 0; index < 50; index += 1) {
+        log.emit(event({ level: "debug", kind: "alarm.fired", summary: `tick ${index}` }));
+      }
+      expect(log.read().map(({ summary }) => summary)).toEqual([
+        "the fault",
+        "a warning",
+        "tick 48",
+        "tick 49",
+      ]);
+      // The other tier trims to its own cap, leaving the debug rows alone.
+      for (let index = 0; index < 4; index += 1) log.emit(event({ summary: `info ${index}` }));
+      expect(log.read().map(({ summary }) => summary)).toEqual([
+        "tick 48",
+        "tick 49",
+        "info 1",
+        "info 2",
+        "info 3",
+      ]);
+    });
+  });
+
   it("filters by cursor, source and level, and bounds the limit", async () => {
     await freshSql("diag-read", (sql) => {
       const log = new DiagLog(sql);

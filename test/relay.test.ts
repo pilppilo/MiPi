@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 /**
  * The PiDu relay inside the agent (M7 slice 1): the fence, keys, admission, duplicates, conflicts, the hourly cap, and
  * results, on a real harness with a faux model over memory storage.
@@ -64,6 +65,8 @@ interface Relay {
   /** What each model request was sent, in order. */
   readonly requests: Message[][];
   readonly clock: { now: number };
+  /** The door's diagnostic events, in order. */
+  readonly diag: DiagInput[];
   close(): Promise<void>;
 }
 
@@ -114,7 +117,9 @@ async function openRelay(
       () => clock.now,
     );
   }
+  const diag: DiagInput[] = [];
   const relay = new RelayRuntime({
+    diag: { emit: (event) => diag.push(event) },
     harness,
     providers: composition.providers,
     timeZone: "America/Chicago",
@@ -132,6 +137,7 @@ async function openRelay(
     relay,
     requests,
     clock,
+    diag,
     close: async () => {
       relay.close();
       await harness.close(ctx);
@@ -341,6 +347,17 @@ describe("relay admission", () => {
       });
       expect(agent.requests).toHaveLength(1);
       expect((await relayState(agent.harness)).receipts.map(({ key }) => key)).toEqual(["early"]);
+      // Admitted, answered; held while paused; and the early key's second send is a duplicate.
+      expect(agent.diag.map(({ kind, outcome, reqId }) => `${kind}:${outcome}:${reqId}`)).toEqual([
+        "relay.admitted:ok:relay:early",
+        "relay.settled:ok:relay:early",
+        "relay.refused:held:relay:late",
+        "relay.admitted:ok:relay:early",
+        "relay.settled:ok:relay:early",
+      ]);
+      expect(agent.diag[3]!.detail).toEqual({ duplicate: true });
+      expect(agent.diag.every(({ source }) => source === "door:relay")).toBe(true);
+      expect(JSON.stringify(agent.diag)).not.toMatch(/ping|Before the pause/);
     } finally {
       await agent.close();
     }
@@ -351,6 +368,12 @@ describe("relay admission", () => {
     try {
       await agent.relay.admit("k", "first");
       expect(await agent.relay.admit("k", "second")).toEqual({ kind: "conflict" });
+      expect(agent.diag.at(-1)).toMatchObject({
+        kind: "relay.refused",
+        outcome: "refused",
+        level: "warn",
+        detail: { result: "conflict" },
+      });
       expect((await relayState(agent.harness)).admitted).toHaveLength(1);
       expect(await userTexts(agent.harness)).toHaveLength(1);
     } finally {
@@ -535,6 +558,14 @@ describe("relay admission", () => {
       expect(await agent.relay.result("never")).toEqual({ kind: "not-found" });
       expect(agent.requests).toHaveLength(0);
       expect((await relayState(agent.harness)).admitted).toEqual([]);
+      // Three refusals; the bad key has no request id to give.
+      const refused = agent.diag.filter(({ kind }) => kind === "relay.refused");
+      expect(refused.map(({ detail }) => detail?.result)).toEqual([
+        "invalid",
+        "invalid",
+        "too-large",
+      ]);
+      expect(refused[0]).not.toHaveProperty("reqId");
     } finally {
       await agent.close();
     }

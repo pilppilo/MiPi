@@ -92,6 +92,9 @@ import {
   type ClientCommand,
   type ConversationSummary,
   type DiagEvent,
+  type DiagHealth,
+  type DiagSnapshot,
+  DEFAULT_DIAG_TAIL,
   type Options,
   type ServerEvent,
   type UsageReadout,
@@ -235,6 +238,8 @@ type SessionConnectionState = {
    * move to MiPi. Cleared when it is restored. Kept in the attachment, so it survives hibernation.
    */
   readonly readOnly?: true;
+  /** The socket takes the diagnostic live tail (`diag.subscribe`, COD-235). Kept across hibernation. */
+  readonly diag?: true;
 };
 
 type LegacyPartyServerAttachment = {
@@ -253,7 +258,8 @@ const isSessionConnectionState = (value: unknown): value is SessionConnectionSta
         Number.isSafeInteger(state.conversationId) &&
         state.conversationId > 0)) &&
     (state.typing === undefined || state.typing === true) &&
-    (state.readOnly === undefined || state.readOnly === true)
+    (state.readOnly === undefined || state.readOnly === true) &&
+    (state.diag === undefined || state.diag === true)
   );
 };
 
@@ -370,6 +376,8 @@ export class MipiAgent extends DurableObject<Env> {
    */
   readonly #diag = new DiagLog(this.ctx.storage.sql, {
     canWrite: () => this.#state.kind !== "maintenance",
+    // The live tail: only sockets that asked get a frame, so plain chat sends none.
+    onEmit: (event) => this.#broadcastDiag(event),
   });
   /**
    * The parts that need the alarm besides Pi Durable (`wake-sources.ts`): registered while the harness opens
@@ -618,6 +626,59 @@ export class MipiAgent extends DurableObject<Env> {
    */
   diagEvents(query: DiagQuery = {}): readonly DiagEvent[] {
     return this.#diag.read(query);
+  }
+
+  /**
+   * The admin events route (`GET /api/admin/events`, COD-235): the stored events and the agent's health, in every
+   * state. Writes nothing: no pending alarm loss is flushed, and the log is only read.
+   */
+  adminEvents(query: DiagQuery = {}): Promise<DiagSnapshot> {
+    return this.#diagSnapshot(query);
+  }
+
+  async #diagSnapshot(query: DiagQuery): Promise<DiagSnapshot> {
+    return { events: this.#diag.read(query), health: await this.#diagHealth() };
+  }
+
+  async #diagHealth(): Promise<DiagHealth> {
+    const state = this.#state;
+    const meta = readMeta(this.ctx.storage.sql);
+    let alarmAt: number | null = null;
+    try {
+      alarmAt = await this.ctx.storage.getAlarm();
+    } catch (error) {
+      reportError("Reading the alarm for diagnostics failed", error);
+    }
+    const lostAt = Number(meta.alarm_lost_at);
+    const health: DiagHealth = {
+      state: state.kind,
+      ...(state.kind === "refused" ? { reason: state.reason } : {}),
+      ...(state.kind === "maintenance" ? { reason: state.mode } : {}),
+      ...(alarmAt === null ? {} : { alarmAt }),
+      ...(Number.isFinite(lostAt) && lostAt > 0 ? { alarmLostAt: lostAt } : {}),
+      overdueSchedules: 0,
+    };
+    if (state.kind !== "open") return health;
+    try {
+      const heartbeat = await readHeartbeat(
+        this.#harness,
+        this.ctx.storage.sql,
+        this.#composition!.extensions.active.flatMap(({ schedules }) => schedules ?? []),
+        Date.now(),
+      );
+      return {
+        ...health,
+        ...(heartbeat.held === undefined ? {} : { held: heartbeat.held }),
+        ...(heartbeat.heldUntil === undefined ? {} : { heldUntil: heartbeat.heldUntil }),
+        overdueSchedules: heartbeat.overdue.length,
+        ...(heartbeat.lastProactiveRun === undefined
+          ? {}
+          : { lastProactiveRun: heartbeat.lastProactiveRun }),
+      };
+    } catch (error) {
+      reportError("Reading the heartbeat for diagnostics failed", error);
+      return health;
+    }
   }
 
   /** Core, the built-in extensions and the profile table, configured from the bindings. Throws on a conflict. */
@@ -910,8 +971,12 @@ export class MipiAgent extends DurableObject<Env> {
     const { options, profiles } = composition;
     this.#models = options.models as MutableModels;
     const read = (name: string) => this.#setting(name);
-    this.#modelList = new ModelList(composition.providers.modelSources(read));
-    this.#providerUsage = new ProviderUsageCache(composition.providers.usageSources(read));
+    this.#modelList = new ModelList(composition.providers.modelSources(read), fetch, this.#diag);
+    this.#providerUsage = new ProviderUsageCache(
+      composition.providers.usageSources(read),
+      fetch,
+      this.#diag,
+    );
     const harness = await Harness.open(
       storage,
       {
@@ -1057,6 +1122,7 @@ export class MipiAgent extends DurableObject<Env> {
         onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
         usage: async () => usageText(await this.#readUsage(), this.env.MIPI_TIMEZONE),
         report: reportError,
+        diag: this.#diag,
       });
       this.#telegram = telegram;
       // Core's answer settlement: every door's inputs and every reminder, judged once and delivered through the doors.
@@ -1114,6 +1180,7 @@ export class MipiAgent extends DurableObject<Env> {
         armAlarm: () => this.#alarm.schedule({ ...harness.wake(), active: true }),
         onSubmitted: (conversationId, text) => this.#nameConversation(conversationId, text),
         report: reportError,
+        diag: this.#diag,
       });
       // Each source's first look, before the alarm is set: its wake is in the first write, and nothing of it is in
       // flight once opening is over (the memory pass).
@@ -1169,13 +1236,32 @@ export class MipiAgent extends DurableObject<Env> {
     this.#flushPendingAlarmLost();
     await this.#reopenIfStaleExport();
     const telegram = this.#telegram;
-    if (this.#state.kind !== "open" || telegram === undefined) return { kind: "unavailable" };
+    if (this.#state.kind !== "open" || telegram === undefined) {
+      this.#diag.emit({
+        level: "warn",
+        source: "door:telegram",
+        kind: "telegram.admit",
+        outcome: "refused",
+        summary: `A Telegram update waits: the agent is ${this.#state.kind}`,
+        reqId: `tg:${update.updateId}`,
+        detail: { state: this.#state.kind },
+      });
+      return { kind: "unavailable" };
+    }
     await this.#noteHost(host);
     try {
       await telegram.admit(update);
       return { kind: "stored" };
     } catch (error) {
       reportError("Admitting a Telegram update failed", error, { updateId: update.updateId });
+      this.#diag.emit({
+        level: "error",
+        source: "door:telegram",
+        kind: "telegram.admit",
+        outcome: "fault",
+        summary: `Admitting a Telegram update failed: ${errorText(error)}`,
+        reqId: `tg:${update.updateId}`,
+      });
       return { kind: "unavailable" };
     }
   }
@@ -1185,19 +1271,20 @@ export class MipiAgent extends DurableObject<Env> {
    * `pending` means the client polls `relayResult`. Nothing here holds a queue while it waits.
    */
   async relayAdmit(key: string, text: string, host?: string): Promise<RelayResult> {
-    return this.#relayCall("Admitting a relay message failed", key, host, (relay) =>
+    return this.#relayCall("relay.admit", "Admitting a relay message failed", key, host, (relay) =>
       relay.admit(key, text),
     );
   }
 
   /** Where a relay key stands (M7). */
   async relayResult(key: string, host?: string): Promise<RelayResult> {
-    return this.#relayCall("Reading a relay result failed", key, host, (relay) =>
+    return this.#relayCall("relay.poll", "Reading a relay result failed", key, host, (relay) =>
       relay.result(key),
     );
   }
 
   async #relayCall(
+    kind: "relay.admit" | "relay.poll",
     failure: string,
     key: string,
     host: string | undefined,
@@ -1206,12 +1293,31 @@ export class MipiAgent extends DurableObject<Env> {
     this.#flushPendingAlarmLost();
     await this.#reopenIfStaleExport();
     const relay = this.#relay;
-    if (this.#state.kind !== "open" || relay === undefined) return { kind: "unavailable" };
+    if (this.#state.kind !== "open" || relay === undefined) {
+      this.#diag.emit({
+        level: "warn",
+        source: "door:relay",
+        kind,
+        outcome: "refused",
+        summary: `A relay call was refused: the agent is ${this.#state.kind}`,
+        reqId: `relay:${key}`,
+        detail: { state: this.#state.kind },
+      });
+      return { kind: "unavailable" };
+    }
     await this.#noteHost(host);
     try {
       return await call(relay);
     } catch (error) {
       reportError(failure, error, { key });
+      this.#diag.emit({
+        level: "error",
+        source: "door:relay",
+        kind,
+        outcome: "fault",
+        summary: `${failure}: ${errorText(error)}`,
+        reqId: `relay:${key}`,
+      });
       return { kind: "unavailable" };
     }
   }
@@ -1252,8 +1358,23 @@ export class MipiAgent extends DurableObject<Env> {
     setConnectionState(server, { username: ownerName(this.env.MIPI_OWNER) });
     try {
       await this.#connect(server);
+      this.#diag.emit({
+        level: "debug",
+        source: "door:web",
+        kind: "ws.connect",
+        outcome: "ok",
+        summary: "A web socket connected",
+        detail: { sockets: this.#connections().length },
+      });
     } catch (error) {
       reportError("Session WebSocket connection failed", error);
+      this.#diag.emit({
+        level: "error",
+        source: "door:web",
+        kind: "ws.connect",
+        outcome: "fault",
+        summary: `A web socket failed to set up: ${errorText(error)}`,
+      });
       try {
         server.close(1011, "Session setup failed");
       } catch {
@@ -1365,6 +1486,16 @@ export class MipiAgent extends DurableObject<Env> {
       await this.#handleCommand(socket, command);
     } catch (error) {
       reportError("Session command failed", error, { command: command.type });
+      this.#diag.emit({
+        // The owner sees it in the command's reply: most are refusals (an archived bot, a model not served).
+        level: "warn",
+        source: "door:web",
+        kind: "ws.command_failed",
+        outcome: "fault",
+        summary: `${command.type} failed: ${errorText(error)}`,
+        ...(command.type === "presence.typing" ? {} : { reqId: command.requestId }),
+        detail: { command: command.type },
+      });
       if (command.type === "presence.typing") return;
       this.#send(socket, {
         type: "command.result",
@@ -1790,6 +1921,35 @@ export class MipiAgent extends DurableObject<Env> {
         });
         return;
       }
+      case "diag.subscribe": {
+        const state = connectionState(socket);
+        if (state !== null) setConnectionState(socket, { ...state, diag: true });
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          diag: await this.#diagSnapshot({
+            ...(command.after === undefined ? {} : { after: command.after }),
+            limit: command.limit ?? DEFAULT_DIAG_TAIL,
+          }),
+        });
+        return;
+      }
+      case "diag.unsubscribe": {
+        const state = connectionState(socket);
+        if (state?.diag === true) {
+          const { diag: _, ...rest } = state;
+          setConnectionState(socket, rest);
+        }
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+        });
+        return;
+      }
       default: {
         const _: never = command;
         throw new Error("Unknown client command");
@@ -1884,8 +2044,10 @@ export class MipiAgent extends DurableObject<Env> {
   ): Promise<void> {
     this.#setTyping(socket, false);
     await this.#stopView(socket);
-    const username = connectionState(socket)?.username ?? "Guest";
-    setConnectionState(socket, { username });
+    const previous = connectionState(socket);
+    const username = previous?.username ?? "Guest";
+    const diag = previous?.diag === true ? { diag: true as const } : {};
+    setConnectionState(socket, { username, ...diag });
     const conversation = await this.#requireConversation(conversationId);
     // Opened while archived: read-only, and it stays here through archive changes until it is restored (COD-201).
     const readOnly = archivedIn(
@@ -1901,6 +2063,7 @@ export class MipiAgent extends DurableObject<Env> {
       conversationId,
       ...(restoreTyping ? { typing: true } : {}),
       ...(readOnly ? { readOnly: true } : {}),
+      ...diag,
     });
     if (restoreTyping) this.#typingConnections.add(socket);
     this.#send(socket, { type: "conversation.view", conversationId, view: view.value });
@@ -2017,6 +2180,16 @@ export class MipiAgent extends DurableObject<Env> {
       .filter((socket) => socket.readyState === WebSocket.READY_STATE_OPEN);
   }
 
+  /** One new diagnostic event to the sockets that subscribed. */
+  #broadcastDiag(event: DiagEvent): void {
+    const subscribed = this.#connections().filter(
+      (socket) => connectionState(socket)?.diag === true,
+    );
+    if (subscribed.length === 0) return;
+    const message = JSON.stringify({ type: "diag.event", event } satisfies ServerEvent);
+    for (const socket of subscribed) this.#sendMessage(socket, message);
+  }
+
   #broadcast(event: ServerEvent): void {
     const message = JSON.stringify(event);
     for (const socket of this.#connections()) this.#sendMessage(socket, message);
@@ -2053,6 +2226,7 @@ export class MipiAgent extends DurableObject<Env> {
         conversationId,
         ...(typing ? { typing: true } : {}),
         ...(state.readOnly === true ? { readOnly: true } : {}),
+        ...(state.diag === true ? { diag: true } : {}),
       });
     }
     if (changed) this.#broadcastTyping(conversationId as ConversationId);

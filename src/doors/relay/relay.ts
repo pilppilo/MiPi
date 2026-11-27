@@ -20,6 +20,7 @@ import { isArchived } from "../../agent/archive.ts";
 import { isPaused } from "../../agent/gates.ts";
 import { settledLimit } from "../../agent/limits.ts";
 import type { Providers } from "../../agent/providers.ts";
+import { type DiagInput, type DiagSink, NOOP_DIAG } from "../../agent/diag.ts";
 import { answerText } from "../../agent/proactive.ts";
 import type { ProfileName, Profiles } from "../../agent/profiles.ts";
 import { stampInput } from "../../agent/stamp.ts";
@@ -191,6 +192,46 @@ export interface RelayRuntimeOptions {
   readonly now?: () => number;
   /** How long `admit` waits for the answer; tests shorten it. */
   readonly waitMs?: number;
+  /** The agent's diagnostic log (`source: "door:relay"`). Never given the message text. */
+  readonly diag?: DiagSink;
+}
+
+const SOURCE = "door:relay";
+
+/** A refusal as a diagnostic: `held` when trying later works (paused, over the cap), `refused` otherwise. */
+function refusedEvent(key: string, result: RelayResult): DiagInput | undefined {
+  const event = (outcome: "held" | "refused", why: string): DiagInput => ({
+    level: outcome === "held" ? "info" : "warn",
+    source: SOURCE,
+    kind: "relay.refused",
+    outcome,
+    summary: `A relay message was refused: ${why}`,
+    // An invalid key makes no request id.
+    ...(isRelayKey(key) ? { reqId: relayRequest(key) } : {}),
+    detail: { result: result.kind },
+  });
+  switch (result.kind) {
+    case "paused":
+      return event("held", "MiPi is paused");
+    case "limited":
+      return event("held", `over ${RELAY_PER_HOUR} an hour`);
+    case "conflict":
+      return event("refused", "the key was used with another text");
+    case "invalid":
+      return event("refused", result.reason);
+    case "too-large":
+      return event("refused", `over ${result.limitBytes} bytes`);
+    case "pending":
+    case "done":
+    case "unanswered":
+    case "not-found":
+    case "unavailable":
+      return undefined;
+    default: {
+      const _: never = result;
+      return undefined;
+    }
+  }
 }
 
 type Admission =
@@ -212,6 +253,16 @@ export class RelayRuntime {
     return this.#options.now?.() ?? Date.now();
   }
 
+  get #diag(): DiagSink {
+    return this.#options.diag ?? NOOP_DIAG;
+  }
+
+  #refused(key: string, result: RelayResult): RelayResult {
+    const event = refusedEvent(key, result);
+    if (event !== undefined) this.#diag.emit(event);
+    return result;
+  }
+
   close(): void {
     this.#closed = true;
   }
@@ -221,10 +272,13 @@ export class RelayRuntime {
    * (or returns) the first one's answer. The wait runs after the admission's commit and outside any queue.
    */
   async admit(key: string, text: string): Promise<RelayResult> {
-    if (!isRelayKey(key)) return { kind: "invalid", reason: "Idempotency-Key is not valid" };
-    if (text.trim().length === 0) return { kind: "invalid", reason: "text is empty" };
+    if (!isRelayKey(key)) {
+      return this.#refused(key, { kind: "invalid", reason: "Idempotency-Key is not valid" });
+    }
+    if (text.trim().length === 0)
+      return this.#refused(key, { kind: "invalid", reason: "text is empty" });
     if (new TextEncoder().encode(text).byteLength > RELAY_MAX_TEXT_BYTES) {
-      return { kind: "too-large", limitBytes: RELAY_MAX_TEXT_BYTES };
+      return this.#refused(key, { kind: "too-large", limitBytes: RELAY_MAX_TEXT_BYTES });
     }
     return this.#admitValid(key, text, false);
   }
@@ -286,9 +340,24 @@ export class RelayRuntime {
       );
       return { kind: "submitted", submissionId };
     }, context);
+    if (admission.kind === "submitted" || admission.kind === "existing") {
+      this.#diag.emit({
+        level: "info",
+        source: SOURCE,
+        kind: "relay.admitted",
+        outcome: "ok",
+        summary:
+          admission.kind === "submitted"
+            ? "A relay message was admitted"
+            : "A relay message was sent again; its first admission answers it",
+        reqId: requestId,
+        convId: conversation.id,
+        detail: { duplicate: admission.kind === "existing" },
+      });
+    }
     switch (admission.kind) {
       case "refused":
-        return admission.result;
+        return this.#refused(key, admission.result);
       case "submitted":
         void this.#options
           .onSubmitted?.(conversation.id, text)
@@ -333,7 +402,23 @@ export class RelayRuntime {
       }
     }
     if (this.#closed) return { kind: "unavailable" };
-    return this.result(key);
+    const result = await this.result(key);
+    // What the admission's wait ended with; a later poll reads it again without a second event.
+    if (result.kind === "done" || result.kind === "unanswered") {
+      this.#diag.emit({
+        level: result.kind === "done" ? "info" : "warn",
+        source: SOURCE,
+        kind: "relay.settled",
+        outcome: result.kind === "done" ? "ok" : "fault",
+        summary:
+          result.kind === "done"
+            ? "A relay message was answered"
+            : `A relay message went unanswered: ${result.reason}`,
+        reqId: relayRequest(key),
+        detail: { result: result.kind },
+      });
+    }
+    return result;
   }
 
   /** Where a key stands. A key never admitted (or pruned and unknown to the relay conversation) is `not-found`. */
