@@ -190,8 +190,9 @@ describe("Settings → Diagnostics", () => {
     expect(html).toContain(`Next alarm: ${new Date(health.alarmAt!).toLocaleString()}`);
     expect(html).toMatch(/class="diag-hold"[^>]*>spend-cap until /);
     expect(html).toContain(">Live<");
-    const summary = html.match(/<div class="diag-summary"[^>]*>(.*?)<\/div>/)?.[1];
-    expect(summary).toMatch(
+    // The actions sit beside the summary, in the same health card (COD-244).
+    const actions = html.match(/<div class="diag-actions"[^>]*>(.*?)<\/div>/)?.[1];
+    expect(actions).toMatch(
       />Refresh<\/button><button[^>]*title="[^"]*without sending\."[^>]*>Ask MiPi<\/button>/,
     );
     expect(html.match(/>Ask MiPi<\/button>/g)).toHaveLength(1);

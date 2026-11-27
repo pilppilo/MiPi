@@ -14,7 +14,7 @@ export function App() {
   }
 
   return (
-    <main>
+    <main className="page">
       <h1>Page not found</h1>
       <p>
         <a href="/">Return to MiPi</a>
@@ -46,7 +46,7 @@ function LandingPage() {
   }, []);
 
   return (
-    <main>
+    <main className="page">
       <header>
         <h1>MiPi</h1>
         <p>Your always-on personal agent.</p>

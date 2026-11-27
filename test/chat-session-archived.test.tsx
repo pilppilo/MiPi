@@ -56,7 +56,7 @@ it("opens an archived cobot read-only, with Restore off until its bot is back (C
   vi.stubGlobal("window", { location: { search: "" } });
   try {
     const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
-    expect(html).toMatch(/<button[^>]*aria-controls="settings-panel"[^>]*>.*Settings<\/button>/);
+    expect(html).toMatch(/<button[^>]*aria-label="Settings"[^>]*aria-controls="settings-panel"/);
     expect(html).toContain("<p>Archived: read-only.</p>");
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*title="Restore Garden first.">Restore</);
     expect(html).toMatch(
@@ -101,7 +101,7 @@ it("shows an archived chat's own profile, even one no picker offers (COD-201)", 
     const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
     expect(html).toContain("Archived: read-only. Restore it to talk to it again.");
     expect(html).toMatch(
-      /<select id="profile-picker"[^>]*disabled=""[^>]*>.*<option value="pidu" selected="">pidu<\/option>/,
+      /<select id="profile-picker"[^>]*disabled=""[^>]*>.*<option value="pidu" selected="">PiDu relay \(earlier\)<\/option>/,
     );
   } finally {
     open.id = 21;

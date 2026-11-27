@@ -3,6 +3,7 @@ import type { ConversationSummary } from "../protocol.ts";
 import { type ArchivedEntry, archivedEntries } from "./session/bots-list.ts";
 import type { DiagState } from "./session/diag-buffer.ts";
 import { DiagnosticsSection } from "./DiagnosticsSection.tsx";
+import { CloseIcon } from "./marks.tsx";
 
 /**
  * Settings (COD-201): a wide panel over the conversation and activity columns, with a section list: Archived, and
@@ -52,8 +53,14 @@ export function SettingsPanel({
     <section id="settings-panel" className="settings-panel" aria-labelledby="settings-heading">
       <header className="settings-header">
         <h2 id="settings-heading">Settings</h2>
-        <button ref={closeButtonRef} type="button" onClick={onClose}>
-          Close
+        <button
+          ref={closeButtonRef}
+          className="round-button"
+          type="button"
+          aria-label="Close settings"
+          onClick={onClose}
+        >
+          <CloseIcon />
         </button>
       </header>
       <div className="settings-body">
@@ -123,16 +130,18 @@ function ArchivedSection({
   readonly onRestore: (conversationId: number) => void;
 }) {
   return (
-    <section aria-labelledby="archived-heading">
-      <h3 id="archived-heading">Archived</h3>
-      <p className="settings-note">
-        Archived bots and chats keep everything but don't run. Open one to read it, or restore it. A
-        chat from before bots comes back as a cobot under MiPi. Deleting isn't possible yet.
-      </p>
+    <section aria-labelledby="archived-heading" className="settings-section">
+      <header className="settings-section-head">
+        <h3 id="archived-heading">Archived</h3>
+        <p className="settings-note">
+          Archived bots and chats keep everything but don't run. Open one to read it, or restore it.
+          A chat from before bots comes back as a cobot under MiPi. Deleting isn't possible yet.
+        </p>
+      </header>
       {entries.length === 0 ? (
-        <p className="settings-empty">Nothing is archived.</p>
+        <p className="settings-card settings-empty">Nothing is archived.</p>
       ) : (
-        <ul className="archived-list">
+        <ul className="settings-card archived-list">
           {entries.map((entry) => {
             const name = entryName(entry);
             return (

@@ -72,9 +72,15 @@ it("lists the main bot by its own name first, then purpose bots with their dots,
     // MiPi renamed to Mia: its stored name, pinned first.
     expect(html.indexOf(">Mia<")).toBeGreaterThan(-1);
     expect(html.indexOf(">Mia<")).toBeLessThan(html.indexOf(">Groceries<"));
-    expect(html).toContain('<span class="bot-purpose">Keep the shopping list.</span>');
+    // Each bot says what it's doing (COD-244): working from the activity graph, asleep otherwise.
+    expect(html).toMatch(/Groceries.*<span class="bot-status">Working<\/span>/);
+    expect(html).toMatch(/>Mia<.*<span class="bot-status">Asleep<\/span>/);
+    // A purpose shows in the open bot's details, not in the list.
+    expect(html).not.toContain("Keep the shopping list.");
     expect(html.match(/aria-label="Working"/g)).toHaveLength(3);
-    expect(html.match(/>New cobot<\/button>/g)).toHaveLength(2);
+    // New cobot is in the open bot's details, not under every bot in the list (COD-244).
+    expect(html.match(/>New cobot<\/button>/g)).toHaveLength(1);
+    expect(html).toMatch(/class="bot-profile-panel">.*>New cobot<\/button>/);
     expect(html).toMatch(
       /Groceries.*<details[^>]*>.*<ul class="bot-children">.*Dinner.*<ul class="bot-children">.*Subagent \(id: 8, owner: 7\)/,
     );
@@ -84,7 +90,8 @@ it("lists the main bot by its own name first, then purpose bots with their dots,
     // MiPi can't be archived, so it offers no Archive (COD-233).
     expect(html).not.toContain(">Archive bot</button>");
     // MiPi's profile is shown as text: no picker that would fall back to another profile.
-    expect(html).toMatch(/<output id="profile-picker"[^>]*>main<\/output>/);
+    // By its plain name (COD-244), not its id.
+    expect(html).toMatch(/<output id="profile-picker"[^>]*>MiPi&#x27;s toolkit<\/output>/);
   } finally {
     vi.unstubAllGlobals();
   }
@@ -99,6 +106,12 @@ it.each([
   try {
     const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
     expect(html).toMatch(new RegExp(`<button class="text-button" type="button">${label}</button>`));
+    // A purpose bot's details say what it's for (COD-244).
+    if (id === 6) {
+      expect(html).toMatch(
+        /class="bot-profile-panel"><p class="bot-purpose">Keep the shopping list.<\/p>/,
+      );
+    }
   } finally {
     open.id = 4;
     vi.unstubAllGlobals();

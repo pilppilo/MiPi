@@ -70,7 +70,7 @@ const render = (capabilities: readonly string[]): string => {
 /** What the page shows of each optional panel. */
 const panels = (html: string) => ({
   usage: html.includes("Today ~$0.50"),
-  activity: html.includes('class="activity-toggle"') && html.includes('id="activity-panel"'),
+  activity: /class="[^"]*\bactivity-toggle\b/.test(html) && html.includes('id="activity-panel"'),
   diagnostics: html.includes('data-diagnostics="on"'),
 });
 
