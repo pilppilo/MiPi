@@ -322,7 +322,7 @@ describe("archive and restore (COD-198)", () => {
         const chat = await harness.createConversation({ ownership: { kind: "ownerless" } }, ctx);
         await expect(
           harness.commit((tx) => archiveBot(tx, chat.id, clock.now), ctx),
-        ).rejects.toThrow("Only a bot can be archived.");
+        ).rejects.toThrow("Only a bot or a cobot can be archived.");
         // A live chat isn't archived, so there's nothing to restore.
         await expect(
           harness.commit((tx) => restoreBot(tx, chat.id, PROFILES), ctx),

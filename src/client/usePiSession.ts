@@ -71,6 +71,8 @@ export interface PiSession {
   }): Promise<boolean>;
   createCobot(bot: number, name: string): Promise<boolean>;
   renameBot(conversationId: number, name: string): void;
+  /** Archives a purpose bot with its cobots, or one cobot alone (COD-233). Never MiPi. */
+  archiveBot(conversationId: number): void;
   /** Restores an archived bot (with its cobots), a cobot under a live bot, or a chat from before bots (COD-201). */
   restoreBot(conversationId: number): void;
   forkConversation(conversationId: number, entryId: number): void;
@@ -426,6 +428,14 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     [send],
   );
 
+  const archiveBot = useCallback(
+    (conversationId: number) => {
+      // Archiving is idempotent on the agent (an archived one archives nothing), so a plain send is enough.
+      send({ type: "bot.archive", requestId: crypto.randomUUID(), conversationId });
+    },
+    [send],
+  );
+
   const restoreBot = useCallback(
     (conversationId: number) => {
       // Restoring is idempotent on the agent (a live one restores nothing), so a plain send is enough.
@@ -520,6 +530,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     createBot,
     createCobot,
     renameBot,
+    archiveBot,
     restoreBot,
     forkConversation,
     setTyping,

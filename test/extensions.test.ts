@@ -286,7 +286,13 @@ describe("switching an extension off for one conversation", () => {
       await harness.commit((tx) => composition.switchOff(tx, off.id, ["memory"]), ctx);
       await (await off.submit({ type: "input", content: "hi" }, ctx)).wait(ctx);
       const offPrompt = offered(requests.at(-1)!);
-      expect(offPrompt.tools).toEqual(["schedule", "search_history", "web_fetch"]);
+      expect(offPrompt.tools).toEqual([
+        "archive_cobot",
+        "list_cobots",
+        "schedule",
+        "search_history",
+        "web_fetch",
+      ]);
       expect(offPrompt.prompt).not.toContain("The owner drinks tea.");
 
       const other = await create();
@@ -295,7 +301,9 @@ describe("switching an extension off for one conversation", () => {
       expect(otherPrompt).toEqual(prefixBefore);
       expect(otherPrompt.prompt).toContain("The owner drinks tea.");
       expect(otherPrompt.tools).toEqual([
+        "archive_cobot",
         "forget",
+        "list_cobots",
         "remember",
         "schedule",
         "search_history",
@@ -337,14 +345,26 @@ describe("switching an extension off for one conversation", () => {
       await harness.commit((tx) => composition.switchOff(tx, conversation.id, ["memory"]), ctx);
       await harness.commit((tx) => setProfile(tx, conversation.id, "empty", profiles), ctx);
       await harness.commit((tx) => setProfile(tx, conversation.id, "default", profiles), ctx);
-      expect(await toolsOf(conversation.id)).toEqual(["schedule", "search_history", "web_fetch"]);
+      expect(await toolsOf(conversation.id)).toEqual([
+        "archive_cobot",
+        "list_cobots",
+        "schedule",
+        "search_history",
+        "web_fetch",
+      ]);
 
       // A boot after a profile change runs the sync over every conversation: it finds nothing to give back.
       await harness.commit(async (tx) => {
         delete (await tx.doc(AgentSettings)).profileTools;
       }, ctx);
       expect(await syncProfileTools(harness, profiles)).toEqual([]);
-      expect(await toolsOf(conversation.id)).toEqual(["schedule", "search_history", "web_fetch"]);
+      expect(await toolsOf(conversation.id)).toEqual([
+        "archive_cobot",
+        "list_cobots",
+        "schedule",
+        "search_history",
+        "web_fetch",
+      ]);
     } finally {
       await harness.close(ctx);
     }
@@ -470,6 +490,8 @@ describe("the startup profile sync with an extension switched off", () => {
       expect(await syncProfileTools(harness, profiles)).toEqual([conversation.id]);
       const agent = await (await harness.conversation(conversation.id, ctx))!.agent(ctx);
       expect(agent.tools.map(({ name }) => name).sort()).toEqual([
+        "archive_cobot",
+        "list_cobots",
         "schedule",
         "search_history",
         "web_fetch",

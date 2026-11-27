@@ -17,7 +17,7 @@ import { WakeSources } from "../src/agent/wake-sources.ts";
 const ctx = BACKGROUND_CONTEXT;
 
 describe("bare core", () => {
-  it("opens with no extensions, answers a turn with no tools and no memory section, and runs its alarm", async () => {
+  it("opens with no extensions, answers a turn with only core's tools and no memory section, and runs its alarm", async () => {
     const requests: Message[][] = [];
     const faux = fauxProvider();
     faux.setResponses([
@@ -28,7 +28,8 @@ describe("bare core", () => {
     ]);
     const models = createModels();
     models.setProvider(faux.provider);
-    // The default profile still names five tools; none is installed, so none is offered.
+    // The default profile still names five extension tools; none is installed, so only core's own (the bot tools a
+    // purpose bot manages its cobots with, COD-233) are offered.
     const composition = composeMipi({
       extensions: [],
       models,
@@ -39,7 +40,8 @@ describe("bare core", () => {
       "proactive",
       "provider-limits",
     ]);
-    expect(composition.profiles.toolsFor("default")).toEqual([]);
+    const coreTools = ["list_cobots", "archive_cobot"];
+    expect(composition.profiles.toolsFor("default").map(({ name }) => name)).toEqual(coreTools);
     expect(composition.tasks.map(({ definition }) => definition.name).sort()).toEqual([
       "app.proactive-record-run",
       "app.proactive-round-budget",
@@ -57,13 +59,15 @@ describe("bare core", () => {
         await conversation.submit({ type: "input", content: "hi", requestId: "web:1" }, ctx)
       ).wait(ctx);
       expect(result.status).toBe("done");
-      expect((await conversation.agent(ctx)).tools).toEqual([]);
+      expect((await conversation.agent(ctx)).tools.map(({ name }) => name)).toEqual(coreTools);
 
       const system = requests[0]!.filter((message) => message.role === "system");
       const sections = Object.assign({}, ...system.map((message) => message.sections ?? {}));
       expect(Object.keys(sections)).toContain("preamble");
       expect(Object.keys(sections)).not.toContain("memory");
-      expect(system.flatMap((message) => message.toolsAdded ?? [])).toEqual([]);
+      expect(system.flatMap((message) => message.toolsAdded ?? []).map(({ name }) => name)).toEqual(
+        coreTools,
+      );
 
       // The alarm with no wake source: set from Pi Durable's own wake alone.
       const writes: Array<number | "deleted"> = [];

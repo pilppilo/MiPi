@@ -126,7 +126,9 @@ describe("tool profiles", () => {
       const root = await harness.root(ctx);
       await (await root.submit({ type: "input", content: "one" }, ctx)).wait(ctx);
       expect(offered(requests[0]!).tools).toEqual([
+        "archive_cobot",
         "forget",
+        "list_cobots",
         "remember",
         "schedule",
         "search_history",
@@ -199,7 +201,9 @@ describe("profile tools at startup", () => {
       expect(await syncProfileTools(harness, PROFILES)).toEqual([old]);
       const agent = await (await harness.conversation(old, ctx))!.agent(ctx);
       expect(agent.tools.map(({ name }) => name).sort()).toEqual([
+        "archive_cobot",
         "forget",
+        "list_cobots",
         "remember",
         "schedule",
         "search_history",

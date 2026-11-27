@@ -729,7 +729,7 @@ describe("chat application", () => {
     });
     expect(await run({ type: "bot.bind", conversationId: garden, channel: "web" })).toMatchObject({
       ok: false,
-      error: { message: "No rebindable door named web." },
+      error: { message: "No rebindable door named web. The doors are: relay:pidu." },
     });
     // Archiving the parent moves the tab from its cobot to MiPi and updates both archive timestamps.
     type Snapshot = {

@@ -1409,7 +1409,7 @@ export class MipiAgent extends DurableObject<Env> {
         const conversation = await this.#requireConversation(
           command.conversationId as ConversationId,
         );
-        // One commit: the bot and its cobots archived and indexed, so from here no door reaches them, nothing lists
+        // One commit: the bot and its cobots (or a cobot alone) archived and indexed, so from here no door reaches them, nothing lists
         // them and their schedules hold. Then what they were doing is stopped (`Conversation.abort()`).
         const archived = await this.#harness.commit(
           (tx) => archiveBot(tx, conversation.id, Date.now()),

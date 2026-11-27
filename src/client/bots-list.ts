@@ -244,7 +244,7 @@ export function archivedEntries(
       listed.add(cobot.id);
     }
   }
-  // A cobot archived on its own under a live bot (none is yet, but restore allows it).
+  // A cobot archived on its own (COD-233), under a live bot or one archived after it.
   for (const cobot of archived
     .filter(({ kind, id }) => kind === "cobot" && !listed.has(id))
     .sort(newest)) {
@@ -269,4 +269,38 @@ export function restoreHintFor(
   // The agent refuses a cobot with no bot to come back under, too.
   if (parent === undefined) return "Its bot is missing.";
   return parent.archivedAt === undefined ? undefined : `Restore ${parent.name ?? "its bot"} first.`;
+}
+
+/**
+ * What the web asks before archiving a live bot or cobot (COD-233), or undefined for one it can't archive: MiPi, an
+ * archived one, a chat from before bots, a subagent. A bot's live cobots go with it; a cobot goes alone.
+ */
+export function archivePrompt(
+  summary: ConversationSummary | undefined,
+  conversations: readonly ConversationSummary[],
+): string | undefined {
+  if (summary === undefined || summary.archivedAt !== undefined || summary.owner !== undefined) {
+    return undefined;
+  }
+  const name = summary.name ?? "this bot";
+  switch (summary.kind) {
+    case "bot": {
+      const cobots = conversations.filter(
+        ({ kind, bot, archivedAt }) =>
+          kind === "cobot" && bot === summary.id && archivedAt === undefined,
+      ).length;
+      const withCobots =
+        cobots === 0 ? "" : ` and its ${cobots === 1 ? "cobot" : `${cobots} cobots`}`;
+      return `Archive ${name}${withCobots}? It stops working and keeps everything; restore it from Settings → Archived.`;
+    }
+    case "cobot":
+      return `Archive the cobot ${name}? Its bot keeps working; restore it from Settings → Archived.`;
+    case "main":
+    case undefined:
+      return undefined;
+    default: {
+      const _: never = summary.kind;
+      return undefined;
+    }
+  }
 }

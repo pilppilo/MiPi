@@ -1,6 +1,6 @@
 # PiDu relay
 
-`POST /api/relay` lets PiDu (or any script with the token) talk to MiPi. The relay stays off for a lane until its GitHub Environment has `RELAY_TOKEN`. The `relay:pidu` binding starts on MiPi. Ask MiPi through the web or Telegram to bind it to a purpose bot, for example “Bind relay:pidu to the PiDu bot.” Recent relay requests can still be polled after a rebind. If that bot is archived, the relay falls back to MiPi until the bot is restored or the owner rebinds it.
+`POST /api/relay` lets PiDu (or any script with the token) talk to MiPi. The relay stays off for a lane until its GitHub Environment has `RELAY_TOKEN`. The `relay:pidu` binding starts on MiPi. Ask MiPi through the web or Telegram to bind it to a purpose bot, for example “Bind relay:pidu to the PiDu bot.” Recent relay requests can still be polled after a rebind. If that bot is archived, the relay falls back to MiPi until the bot is restored or the owner rebinds it. To move it back to MiPi yourself, ask MiPi to “Bind relay:pidu to MiPi.” Restoring the old bot then leaves the relay on MiPi.
 
 **1. GitHub: store the token.** Make 32 or more random letters and digits (a password manager's generator with symbols off). Settings → Environments → `staging` (or `production`) → Environment secrets → Add environment secret: name `RELAY_TOKEN`, value the token. Give the same token to PiDu.
 

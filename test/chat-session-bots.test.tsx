@@ -4,6 +4,9 @@ import { expect, it, vi } from "vitest";
 import { ChatSession } from "../src/client/ChatSession.tsx";
 import type { PiSession } from "../src/client/usePiSession.ts";
 
+/** Which conversation the mocked session has open. */
+const open = vi.hoisted(() => ({ id: 4 }));
+
 vi.mock("../src/client/usePiSession.ts", () => ({
   usePiSession: (): Pick<
     PiSession,
@@ -24,9 +27,9 @@ vi.mock("../src/client/usePiSession.ts", () => ({
       { id: 8, owner: { conversationId: 7 } },
       { id: 10, owner: { conversationId: 1 } },
     ],
-    activeConversationId: 4,
+    activeConversationId: open.id,
     activeConversation: {
-      id: 4,
+      id: open.id,
       entries: [],
       earlier: false,
       gaps: [],
@@ -72,9 +75,26 @@ it("lists the main bot by its own name first, then purpose bots with their dots,
     expect(html).not.toContain("Subagent (id: 10");
     // The archived chat from before bots isn't listed.
     expect(html).not.toContain("Old chat");
+    // MiPi can't be archived, so it offers no Archive (COD-233).
+    expect(html).not.toContain(">Archive bot</button>");
     // MiPi's profile is shown as text: no picker that would fall back to another profile.
     expect(html).toMatch(/<output id="profile-picker"[^>]*>main<\/output>/);
   } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it.each([
+  [6, "Archive bot"],
+  [7, "Archive cobot"],
+])("offers Archive on an open purpose bot or cobot (COD-233)", (id, label) => {
+  vi.stubGlobal("window", { location: { search: "" } });
+  open.id = id;
+  try {
+    const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
+    expect(html).toMatch(new RegExp(`<button class="text-button" type="button">${label}</button>`));
+  } finally {
+    open.id = 4;
     vi.unstubAllGlobals();
   }
 });

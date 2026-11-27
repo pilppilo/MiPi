@@ -9,8 +9,9 @@ const EVERYDAY = ["schedule", "search_history", "remember", "forget", "web_fetch
 
 export const PROFILE_TABLE: ProfileTable = {
   default: {
+    // A purpose bot on default manages its own cobots (COD-233); anywhere else the two tools refuse.
     description: "Everyday tools: scheduling, history search, memory and web pages",
-    tools: EVERYDAY,
+    tools: [...EVERYDAY, "list_cobots", "archive_cobot"],
   },
   empty: {
     description: "Plain chat, no tools",

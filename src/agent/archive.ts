@@ -147,27 +147,31 @@ async function cobotsOf(
   return found;
 }
 
-/** Why a conversation can't be archived, or undefined. Only a purpose bot is: its cobots go with it. */
+/**
+ * Why a conversation can't be archived, or undefined. A purpose bot is, with its cobots; a cobot is, on its own
+ * (COD-233), and its bot stays live.
+ */
 function archiveRefusal(kind: BotKind | undefined): string | undefined {
   switch (kind) {
     case "main":
       return "MiPi can't be archived.";
     case "bot":
-      return undefined;
     case "cobot":
+      return undefined;
     case undefined:
-      return "Only a bot can be archived.";
+      return "Only a bot or a cobot can be archived.";
     default: {
       const _: never = kind;
-      return "Only a bot can be archived.";
+      return "Only a bot or a cobot can be archived.";
     }
   }
 }
 
 /**
- * Archives a bot and its cobots in the caller's commit: each gets `archivedAt` and joins the index, so from this
- * commit on nothing lists it, no door reaches it and its schedules hold. Returns the conversations archived now (none
- * when it already was), whose in-flight work the caller then aborts (`abortArchived`).
+ * Archives a bot and its live cobots, or one cobot alone, in the caller's commit: each gets `archivedAt` and joins the
+ * index, so from this commit on nothing lists it, no door reaches it and its schedules hold. Returns the conversations
+ * archived now (none when it already was), whose in-flight work the caller then aborts (`abortArchived`). A cobot
+ * archived alone keeps its own `archivedAt`, so its bot's later archive and restore leave it archived.
  */
 export async function archiveBot(
   tx: Tx,
@@ -178,7 +182,10 @@ export async function archiveBot(
   const refused = archiveRefusal(meta.kind);
   if (refused !== undefined) throw new Error(refused);
   if (meta.archivedAt !== undefined) return [];
-  const ids = [id, ...(await cobotsOf(tx, id, (archivedAt) => archivedAt === undefined))];
+  const ids =
+    meta.kind === "cobot"
+      ? [id]
+      : [id, ...(await cobotsOf(tx, id, (archivedAt) => archivedAt === undefined))];
   const bots = await tx.doc(Bots);
   const archived = { ...bots.archived };
   for (const conversationId of ids) {
