@@ -2154,3 +2154,244 @@ ul.diagnostics {
   font-size: 0.75rem;
   opacity: 0.7;
 }
+
+/* ── Spaces (COD-249) ────────────────────────────────────────────────────────────────────────────────────── */
+
+.space-navigation {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.space-navigation ul {
+  display: grid;
+  gap: 0.125rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.space-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  inline-size: 100%;
+  min-block-size: var(--touch);
+  padding: 0 0.625rem;
+  border-radius: 0.875rem;
+  background: transparent;
+  font-size: 0.9375rem;
+  text-align: start;
+}
+
+.space-link[aria-current="page"] {
+  background: var(--soft-strong);
+  font-weight: 600;
+}
+
+/* The composer, then the tabs under it: one more row in the main screen. */
+.conversation-view {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+}
+
+.space-tabs {
+  display: flex;
+  justify-content: space-around;
+  gap: 0.5rem;
+  padding: 0.125rem calc(1rem + var(--safe-right)) calc(0.375rem + var(--safe-bottom))
+    calc(1rem + var(--safe-left));
+}
+
+.space-tabs button {
+  display: grid;
+  justify-items: center;
+  gap: 0.125rem;
+  min-inline-size: 5rem;
+  min-block-size: var(--touch);
+  padding: 0.25rem 0.75rem;
+  border-radius: 1rem;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.space-tabs button[aria-current="page"] {
+  background: var(--soft);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.conversation-view:has(.space-tabs) .prompt-bar {
+  margin-block-end: 0.5rem;
+}
+
+@media (width >= 44rem) {
+  .space-tabs {
+    display: none;
+  }
+
+  .conversation-view:has(.space-tabs) .prompt-bar {
+    margin-block-end: calc(0.75rem + var(--safe-bottom));
+  }
+}
+
+/* ── Workbench (COD-249) ─────────────────────────────────────────────────────────────────────────────────── */
+
+.workbench-scroll {
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.5rem calc(1.25rem + var(--safe-right)) 1rem calc(1.25rem + var(--safe-left));
+}
+
+.workbench-scroll:focus {
+  outline: none;
+}
+
+.workbench {
+  display: grid;
+  gap: 1.25rem;
+  max-inline-size: 46rem;
+  margin-inline: auto;
+}
+
+.workbench-group {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.workbench-group .section-label {
+  padding: 0;
+}
+
+.workbench-empty {
+  margin: 0;
+  padding: 0.875rem 1rem;
+  border-radius: 1.125rem;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+.workbench-cards {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workbench-card {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0.75rem 0.875rem;
+  border-radius: 1.125rem;
+  background: var(--card);
+  box-shadow: var(--shadow-float);
+}
+
+.workbench-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-weight: 600;
+}
+
+.workbench-card-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 400;
+}
+
+.workbench-pulse {
+  inline-size: 0.625rem;
+  block-size: 0.625rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: bot-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.workbench-steps {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.workbench-step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.workbench-step-mark {
+  flex: none;
+  inline-size: 0.875rem;
+  block-size: 0.875rem;
+  border: 2px solid currentColor;
+  border-radius: 50%;
+}
+
+.workbench-step--done .workbench-step-mark {
+  border-color: #1f9d55;
+  background: #1f9d55;
+  box-shadow: inset 0 0 0 2px var(--card);
+}
+
+.workbench-step--running .workbench-step-mark,
+.workbench-step--waiting .workbench-step-mark,
+.workbench-step--sleeping .workbench-step-mark {
+  border-color: var(--accent);
+  animation: bot-dot-pulse 1.2s ease-in-out infinite;
+}
+
+.workbench-bots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.workbench-bot {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+  min-block-size: 3.5rem;
+  padding: 0.625rem 0.75rem;
+  border-radius: 1.125rem;
+  background: var(--card);
+  box-shadow: var(--shadow-float);
+  color: inherit;
+  text-decoration: none;
+}
+
+.workbench-bot-text {
+  display: grid;
+  min-inline-size: 0;
+}
+
+.workbench-bot-text strong {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workbench-bot-text span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workbench-pulse,
+  .workbench-step-mark {
+    animation: none;
+  }
+}

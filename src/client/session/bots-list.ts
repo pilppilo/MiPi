@@ -61,6 +61,26 @@ export function unreadByBot(
   return result;
 }
 
+/**
+ * The conversation a task works for: its own, or (for one whose conversation the list hasn't got, a subagent's) its
+ * owner's, up the owner chain. Guarded, so a malformed graph can't loop.
+ */
+function listedConversationOf(
+  summaries: ReadonlyMap<number, ConversationSummary>,
+  tasks: Readonly<Record<string, TaskGraphNode>>,
+  task: TaskGraphNode,
+): number {
+  const seen = new Set<string>();
+  let current: TaskGraphNode | undefined = task;
+  while (current !== undefined && !summaries.has(current.conversationId)) {
+    seen.add(String(current.id));
+    const owner: string | undefined =
+      current.owner === undefined ? undefined : String(current.owner);
+    current = owner === undefined || seen.has(owner) ? undefined : tasks[owner];
+  }
+  return (current ?? task).conversationId;
+}
+
 /** What a bot is doing: working (a task pending, running or finishing), or waiting on others. */
 export type BotActivity = "running" | "waiting";
 
@@ -75,18 +95,8 @@ export function activityByBot(
 ): ReadonlyMap<number, BotActivity> {
   const summaries = new Map(conversations.map((summary) => [summary.id, summary]));
   const tasks = activity?.tasks ?? {};
-  /** The conversation a task works for: its own, or (for one whose conversation the list hasn't got) its owner's. */
-  const conversationOf = (task: TaskGraphNode): number => {
-    const seen = new Set<string>();
-    let current: TaskGraphNode | undefined = task;
-    while (current !== undefined && !summaries.has(current.conversationId)) {
-      seen.add(String(current.id));
-      const owner: string | undefined =
-        current.owner === undefined ? undefined : String(current.owner);
-      current = owner === undefined || seen.has(owner) ? undefined : tasks[owner];
-    }
-    return (current ?? task).conversationId;
-  };
+  const conversationOf = (task: TaskGraphNode): number =>
+    listedConversationOf(summaries, tasks, task);
   const result = new Map<number, BotActivity>();
   for (const task of Object.values(tasks)) {
     const state = taskActivity(task);
@@ -96,6 +106,24 @@ export function activityByBot(
     }
   }
   return result;
+}
+
+/**
+ * The tasks working for one bot (Workbench, COD-249): its own, its cobots' and its subagents', followed up owner chains
+ * the same way `activityByBot` rolls them up. Oldest first.
+ */
+export function tasksOfBot(
+  conversations: readonly ConversationSummary[],
+  activity: TaskGraph | undefined,
+  bot: number,
+): readonly TaskGraphNode[] {
+  const summaries = new Map(conversations.map((summary) => [summary.id, summary]));
+  const tasks = activity?.tasks ?? {};
+  const conversationOf = (task: TaskGraphNode): number =>
+    listedConversationOf(summaries, tasks, task);
+  return Object.values(tasks)
+    .filter((task) => branchOf(summaries, conversationOf(task)).has(bot))
+    .sort((left, right) => left.id - right.id);
 }
 
 function taskActivity(task: TaskGraphNode): BotActivity | undefined {

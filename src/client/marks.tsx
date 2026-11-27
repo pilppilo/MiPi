@@ -74,3 +74,32 @@ export const CloseIcon = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </svg>
 );
+
+export const ChatIcon = () => (
+  <svg {...icon}>
+    <path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v7a2.5 2.5 0 0 1-2.5 2.5H11l-4 3.5V16h0a2.5 2.5 0 0 1-2-2.45z" />
+  </svg>
+);
+
+export const WorkbenchIcon = () => (
+  <svg {...icon}>
+    <rect x="4" y="4" width="7" height="7" rx="2" />
+    <rect x="13" y="4" width="7" height="7" rx="2" />
+    <rect x="4" y="13" width="7" height="7" rx="2" />
+    <path d="M13 16.5h7M16.5 13v7" />
+  </svg>
+);
+
+/** A space's icon by id (`spaces.ts`). */
+export function SpaceIcon({ id }: { readonly id: "chat" | "workbench" }) {
+  switch (id) {
+    case "chat":
+      return <ChatIcon />;
+    case "workbench":
+      return <WorkbenchIcon />;
+    default: {
+      const _: never = id;
+      return null;
+    }
+  }
+}
