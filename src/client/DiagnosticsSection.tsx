@@ -135,6 +135,14 @@ export function DiagnosticsView({
         <button type="button" disabled={disabled} onClick={onRefresh}>
           Refresh
         </button>
+        <button
+          type="button"
+          disabled={disabled}
+          title="Pre-fills MiPi's message box without sending."
+          onClick={() => onAskMiPi(askMiPiPrompt(health, rows))}
+        >
+          Ask MiPi
+        </button>
       </div>
       {diag.error === undefined ? null : <p className="diag-error">{diag.error}</p>}
 
@@ -147,16 +155,6 @@ export function DiagnosticsView({
               </li>
             ))}
           </ul>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onAskMiPi(askMiPiPrompt(health, rows))}
-          >
-            Ask MiPi
-          </button>
-          <span className="settings-note">
-            Puts these events in MiPi's message box for you to read and send.
-          </span>
         </div>
       )}
 

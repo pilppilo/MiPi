@@ -176,14 +176,18 @@ describe("Settings → Diagnostics", () => {
     expect(html).toContain(`Next alarm: ${new Date(health.alarmAt!).toLocaleString()}`);
     expect(html).toMatch(/class="diag-hold"[^>]*>spend-cap until /);
     expect(html).toContain(">Live<");
+    const summary = html.match(/<div class="diag-summary"[^>]*>(.*?)<\/div>/)?.[1];
+    expect(summary).toMatch(
+      />Refresh<\/button><button[^>]*title="[^"]*without sending\."[^>]*>Ask MiPi<\/button>/,
+    );
+    expect(html.match(/>Ask MiPi<\/button>/g)).toHaveLength(1);
 
-    // The banner: the lost alarm, the hold, the late schedule and the error, and Ask MiPi.
+    // The banner: the lost alarm, the hold, the late schedule and the error.
     expect(html).toMatch(/role="status"/);
     expect(html).toContain("The alarm was lost at");
     expect(html).toContain("Today&#x27;s spend cap is reached until");
     expect(html).toContain("1 schedule is more than two hours late.");
     expect(html).toContain("1 error in the last hour.");
-    expect(html).toMatch(/<button type="button">Ask MiPi<\/button>/);
 
     // The table: five columns, a row per event, severity on the row for its accent.
     expect(html).toMatch(/<th scope="col">Time<\/th><th scope="col">Severity<\/th>/);
@@ -292,18 +296,21 @@ describe("Settings → Diagnostics", () => {
         NOW,
       ),
     ).toEqual([]);
-    expect(
-      render({
-        diag: { ...live, health: { state: "open", overdueSchedules: 0 }, events: [events[0]!] },
-      }),
-    ).not.toContain("Ask MiPi");
+    const healthy = render({
+      diag: { ...live, health: { state: "open", overdueSchedules: 0 }, events: [events[0]!] },
+    });
+    expect(healthy).not.toContain('role="status"');
+    expect(healthy).toContain(">Ask MiPi</button>");
+    expect(render({ disabled: true })).toMatch(/<button[^>]*disabled=""[^>]*>Ask MiPi<\/button>/);
   });
 });
 
 describe("Ask MiPi", () => {
   it("drafts the health and the shown events, at most fifteen, as plain text", () => {
     const prompt = askMiPiPrompt(health, events);
-    expect(prompt).toContain("Here is what Settings → Diagnostics shows.");
+    expect(prompt.split("\n")[0]).toBe(
+      "Here is what Settings → Diagnostics shows. What do you make of it, and is anything worth checking?",
+    );
     expect(prompt).toContain("Health: state open; next alarm 2026-11-26T15:05:00.000Z");
     expect(prompt).toContain("held: spend-cap until");
     expect(prompt).toContain("overdue schedules 1");
@@ -332,7 +339,7 @@ describe("Ask MiPi", () => {
     expect(askMiPiPrompt(undefined, [])).toContain("No recent events.");
   });
 
-  it("drafts what the filters show, from the banner's button", () => {
+  it("drafts what the filters show, from the summary button", () => {
     const asked: string[] = [];
     const view = DiagnosticsView(
       viewProps({

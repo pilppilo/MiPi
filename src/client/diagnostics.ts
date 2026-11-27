@@ -191,7 +191,7 @@ export function eventPromptLine(event: DiagEvent): string {
 export function askMiPiPrompt(health: DiagHealth | undefined, shown: readonly DiagEvent[]): string {
   const recent = shown.slice(-ASK_MIPI_EVENTS);
   return [
-    "Something may be wrong with you. Here is what Settings → Diagnostics shows. What do you make of it, and what should I check?",
+    "Here is what Settings → Diagnostics shows. What do you make of it, and is anything worth checking?",
     "",
     healthLine(health),
     "",
