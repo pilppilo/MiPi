@@ -16,13 +16,14 @@ COD-235: diagnostics slice 2. The doors and providers write to the diagnostic lo
   - `diag.unsubscribe` stops it.
   - The subscription is kept in the socket's attachment, so it survives hibernation and switching conversations. A socket that hasn't subscribed gets no extra frames.
 - Door events, with ids and outcomes only, never message text:
-  - Telegram: `telegram.admit`, `telegram.outbox_enqueued`, `telegram.send_ok`, `telegram.send_retry`, `telegram.send_failed`, `telegram.send_unknown`.
+  - Telegram: `telegram.admit` (`held` for a message turned away while paused), `telegram.outbox_enqueued`, `telegram.send_ok`, `telegram.send_retry`, `telegram.send_failed`, `telegram.send_unknown`.
   - Relay: `relay.admitted`, `relay.refused`, `relay.settled`.
   - Web: `ws.connect` and `ws.command_failed`.
   - Door calls the agent turns away or fails (`telegram.admit`, `relay.admit`, `relay.poll`).
 - Provider events: `provider.usage_ok` and `provider.usage_failed` for each real usage read (never a cached one), and `provider.models_failed`. They come from core's usage cache and model list, so every provider gets them without code of its own.
-- Worker-only refusals go to Cloudflare's logs as `"source":"worker"` events and never reach the agent: `auth.refused`, `telegram.webhook_refused`, `relay.auth_refused`, `ws.cross_origin`. They carry the route, status and reason, never the token.
-- A failed heartbeat lists the agent's last 10 warnings and errors in its output and step summary. If those can't be read, it says so in one line.
+- Worker-only refusals go to Cloudflare's logs as `"source":"worker"` events and never reach the agent: `auth.refused` (a wrong `POST /api/unlock` token too), `telegram.webhook_refused`, `relay.auth_refused`, `ws.cross_origin`. They carry the route, status and reason, never the token.
+- A failed heartbeat lists the agent's last 10 warnings and errors in its output and step summary. If those can't be read, it says so in one line. The heartbeat still runs with Node alone, as `heartbeat.yml` runs it without `pnpm install`.
+- `pnpm check` fails if a script run without `pnpm install` (`scripts/heartbeat.ts`) loads anything but Node's own modules and other files under `scripts/`. A value import from `src/` reaches `@earendil-works/*`, and the script would die before its first line.
 
 **Changed**
 

@@ -371,20 +371,24 @@ export class TelegramChannelRuntime {
         this.#options.profiles,
       );
     });
+    // A text turned away by a pause is `held`, as the relay records it; anything else came in.
+    const paused = update.kind === "text" && (await isPausedNow(this.#options.harness));
     this.#diag.emit({
       level: "info",
       source: SOURCE,
       kind: "telegram.admit",
-      outcome: "ok",
-      summary: `A Telegram ${update.kind === "command" ? "command" : update.kind === "text" ? "message" : "non-text update"} came in`,
+      outcome: paused ? "held" : "ok",
+      summary: paused
+        ? "A Telegram message was turned away: MiPi is paused"
+        : `A Telegram ${update.kind === "command" ? "command" : update.kind === "text" ? "message" : "non-text update"} came in`,
       reqId: `tg:${update.updateId}`,
       convId: conversationId,
-      detail: { update: update.kind },
+      detail: { update: update.kind, ...(paused ? { paused: true } : {}) },
     });
     switch (update.kind) {
       case "text":
         // Paused (`MIPI_PAUSED`, M9): refused before any window opens, so nothing waits to run later.
-        if (await isPausedNow(this.#options.harness)) {
+        if (paused) {
           await this.#reply(update.updateId, update.chatId, () => PAUSED_REPLY);
           return;
         }

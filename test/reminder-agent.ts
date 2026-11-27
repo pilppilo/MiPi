@@ -64,7 +64,7 @@ export interface Agent {
   readonly harness: Harness;
   readonly channel: TestDoor;
   readonly sent: Array<{ chatId: number; text: string }>;
-  /** The diagnostic events core emitted (COD-216), in order. */
+  /** The diagnostic events core and the Telegram door emitted (COD-216), in order. */
   readonly diag: DiagInput[];
   /** Moves the clock, then does what the alarm does: resume, wait for turns, run the door. */
   advance(ms: number): Promise<void>;
@@ -143,6 +143,7 @@ export async function openAgent(
     reports.push(`${message}: ${error instanceof Error ? error.message : String(error)}`);
   };
   const door = new TelegramChannelRuntime({
+    diag: { emit: (event) => diag.push(event) },
     harness,
     owner: "jerome",
     timeZone: ZONE,

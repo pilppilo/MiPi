@@ -168,7 +168,7 @@ describe("GET /api/admin/events", () => {
 });
 
 describe("Worker-only refusals", () => {
-  it("log a bad webhook secret and a bad relay token without touching the agent's log", async () => {
+  it("log a bad webhook secret, relay token and unlock token without touching the agent's log", async () => {
     const owner = "events-worker-only";
     const ownerEnv = {
       ...env,
@@ -210,7 +210,20 @@ describe("Worker-only refusals", () => {
     expect(crossSite.status).toBe(403);
     await crossSite.body?.cancel();
 
+    const unlock = await worker.fetch(
+      new Request(`${base}/api/unlock`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "a-wrong-guess" }),
+      }),
+      ownerEnv,
+    );
+    expect(unlock.status).toBe(401);
+    await unlock.body?.cancel();
+
     const lines = logged.mock.calls.flat().map(String).join("\n");
+    expect(lines).toContain("wrong unlock token");
+    expect(lines).not.toContain("a-wrong-guess");
     expect(lines).toContain('"kind":"telegram.webhook_refused"');
     expect(lines).toContain('"kind":"relay.auth_refused"');
     expect(lines).toContain('"kind":"ws.cross_origin"');
@@ -376,7 +389,10 @@ describe("heartbeat's recent events", () => {
       }),
     ).toEqual(["Recent events unavailable: GET /api/admin/events: 404 Not found"]);
     expect(await recentFaultLines(async <T>() => ({ events: "nope" }) as T)).toEqual([
-      "Recent events unavailable: Diagnostic snapshot is invalid",
+      "Recent events unavailable: The events answer has no event list",
     ]);
+    expect(
+      await recentFaultLines(async <T>() => ({ events: [{ ...fault, ts: "noon" }] }) as T),
+    ).toEqual(["Recent events unavailable: An event in the answer is invalid"]);
   });
 });

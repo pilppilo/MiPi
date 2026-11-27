@@ -388,6 +388,12 @@ describe("pause", () => {
         });
         await agent.settle();
         expect(sentTexts(agent)).toEqual([PAUSED_REPLY, "MiPi 0.0.0-test"]);
+        // The paused message is held in the log; the command came in as usual.
+        expect(
+          agent.diag
+            .filter(({ kind }) => kind === "telegram.admit")
+            .map(({ outcome, detail }) => `${outcome}:${String(detail?.update)}`),
+        ).toEqual(["held:text", "ok:command"]);
         expect((await agent.harness.snapshot(Proactive, ctx))?.pending ?? []).toEqual([]);
         const staged = await agent.harness.commit(
           async (tx) => (await tx.doc(TelegramChannel)).staged ?? [],
