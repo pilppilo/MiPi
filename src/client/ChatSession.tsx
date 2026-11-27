@@ -39,6 +39,14 @@ import { SettingsPanel } from "./SettingsPanel.tsx";
 import { askMiPi } from "./diagnostics.ts";
 import { DRAWER_CLOSED, drawerReducer } from "./drawer.ts";
 import {
+  availableSpaces,
+  conversationHref,
+  shownSpace,
+  type SpaceId,
+  spaceFromSearch,
+} from "./spaces.ts";
+import { Workbench } from "./Workbench.tsx";
+import {
   modelName,
   profileName,
   profileSummary,
@@ -51,6 +59,7 @@ import {
   botStatusLabel,
   CloseIcon,
   MenuIcon,
+  SpaceIcon,
   SendIcon,
   SettingsIcon,
   WIDE_LAYOUT,
@@ -191,6 +200,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [renamingCobot, setRenamingCobot] = useState<number>();
   const [confirmingArchive, setConfirmingArchive] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The space shown (COD-249): Chat, or one the agent's capabilities back. `?space=` links straight into one.
+  const [chosenSpace, setChosenSpace] = useState<SpaceId>(() =>
+    spaceFromSearch(window.location.search),
+  );
   // The spaces drawer on narrow screens (COD-244); on wide ones it is the sidebar, always shown.
   const [drawer, dispatchDrawer] = useReducer(drawerReducer, DRAWER_CLOSED);
   const drawerToggleRef = useRef<HTMLButtonElement | null>(null);
@@ -223,8 +236,18 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const activityGraph = hasActivity ? session.activity : undefined;
   const usage = hasUsage ? session.usage : undefined;
   const listed = listedBots(session.conversations);
+  const spaces = availableSpaces(session.capabilities);
+  const space = shownSpace(chosenSpace, spaces);
+  const topBots = [listed.main, ...listed.bots].filter(
+    (bot): bot is ConversationSummary => bot !== undefined,
+  );
   const activity = activityByBot(session.conversations, activityGraph);
-  const ownUnread = useUnread(sessionId, session.conversations, activeConversationId);
+  const ownUnread = useUnread(
+    sessionId,
+    session.conversations,
+    // Only the Chat space reads a bot's messages; looking at its Workbench leaves them unread.
+    space === "chat" ? activeConversationId : undefined,
+  );
   const unread = unreadByBot(session.conversations, ownUnread);
   const activityCount = Object.keys(activityGraph?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
@@ -302,7 +325,14 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
-    if (transcript === null) return;
+    if (transcript === null) {
+      // Another space shows instead of the transcript: forget its scroll state, so coming back
+      // lands on the latest message like opening the conversation fresh.
+      renderedConversationRef.current = undefined;
+      transcriptHeightRef.current = 0;
+      stopAutoScroll();
+      return;
+    }
 
     const conversationChanged = renderedConversationRef.current !== activeConversationId;
     const previousHeight = transcriptHeightRef.current;
@@ -337,7 +367,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     ) {
       session.openConversation(conversationId);
     }
-    // Back or forward lands on a conversation: Settings would hide it.
+    // Back or forward lands on a conversation, in the space its link names: Settings would hide it.
+    setChosenSpace(spaceFromSearch(window.location.search));
     setSettingsOpen(false);
   });
 
@@ -354,7 +385,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
       left?.archivedAt !== undefined &&
       activeConversationId === mainConversationId(session.conversations)
     ) {
-      window.history.replaceState(null, "", `?conversation=${activeConversationId}`);
+      window.history.replaceState(null, "", conversationHref(activeConversationId, space));
     }
   }, [activeConversationId]);
 
@@ -448,7 +479,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   const renderConversationLink = (summary: ConversationSummary) => (
     <a
-      href={`?conversation=${summary.id}`}
+      href={conversationHref(summary.id, space)}
       className={summary.kind === "main" ? "bot-link bot-link--main" : "bot-link"}
       aria-current={summary.id === activeConversationId ? "page" : undefined}
       onClick={(event) => followConversationLink(event, summary.id)}
@@ -514,6 +545,29 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     );
   };
 
+  /** Shows a space, from the drawer, the sidebar or the tabs; the page's link says which, so a reload keeps it. */
+  const pickSpace = (id: SpaceId): void => {
+    setChosenSpace(id);
+    setSettingsOpen(false);
+    const params = new URLSearchParams(window.location.search);
+    if (id === "chat") params.delete("space");
+    else params.set("space", id);
+    const query = params.toString();
+    window.history.replaceState(
+      null,
+      "",
+      query.length === 0 ? window.location.pathname : `?${query}`,
+    );
+    pickedFromDrawer();
+  };
+
+  /** Workbench's Other bots: the bot opens, still in Workbench. */
+  const openInWorkbench = (conversationId: number): void => {
+    if (conversationId === session.activeConversationId) return;
+    window.history.pushState(null, "", conversationHref(conversationId, "workbench"));
+    session.openConversation(conversationId);
+  };
+
   /** New bot cancelled: the sheet goes, and focus returns to the button that opened it. */
   const closeNewBot = (): void => {
     setNewBotOpen(false);
@@ -529,7 +583,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   const openFromSettings = (conversationId: number): void => {
     if (conversationId !== session.activeConversationId) {
-      window.history.pushState(null, "", `?conversation=${conversationId}`);
+      window.history.pushState(null, "", conversationHref(conversationId, space));
       session.openConversation(conversationId);
     }
     setSettingsOpen(false);
@@ -541,9 +595,13 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     askMiPi(prompt, {
       conversations: session.conversations,
       open: (conversationId) => {
+        // The prepared draft is for reading and sending: Chat, whichever space was open.
+        setChosenSpace("chat");
         if (conversationId !== session.activeConversationId) {
-          window.history.pushState(null, "", `?conversation=${conversationId}`);
+          window.history.pushState(null, "", conversationHref(conversationId, "chat"));
           session.openConversation(conversationId);
+        } else {
+          window.history.replaceState(null, "", conversationHref(conversationId, "chat"));
         }
       },
       // Not `updateDraft`: a prepared draft isn't the owner typing, so no typing presence goes out.
@@ -605,6 +663,30 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           <p className="session-error" role="alert">
             {session.error}
           </p>
+        )}
+
+        {spaces.length < 2 ? null : (
+          <nav className="space-navigation" aria-labelledby="spaces-heading">
+            <h2 id="spaces-heading" className="section-label">
+              Spaces
+            </h2>
+            <ul>
+              {spaces.map(({ id, label, summary }) => (
+                <li key={id}>
+                  <button
+                    className="space-link"
+                    type="button"
+                    aria-current={space === id ? "page" : undefined}
+                    title={summary}
+                    onClick={() => pickSpace(id)}
+                  >
+                    <SpaceIcon id={id} />
+                    {label}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </nav>
         )}
 
         <nav className="conversation-navigation" aria-labelledby="conversations-heading">
@@ -842,110 +924,127 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             )}
           </header>
 
-          <section
-            ref={transcriptRef}
-            className="transcript"
-            aria-labelledby="transcript-heading"
-            role="log"
-            tabIndex={0}
-            onScroll={trackTranscriptPosition}
-            onWheel={interruptAutoScroll}
-            onTouchStart={interruptAutoScroll}
-            onPointerDown={interruptAutoScroll}
-          >
-            {activeConversation === undefined ? (
-              <p className="transcript-empty">Loading conversation…</p>
-            ) : activeConversation.entries.length === 0 && activeConversation.live === null ? (
-              <p className="transcript-empty">Send a message to begin.</p>
-            ) : (
-              <>
-                {activeConversation.earlier ? (
-                  <button
-                    className="text-button transcript-load"
-                    type="button"
-                    onClick={() => session.loadEarlier(activeConversation.id)}
-                  >
-                    Load earlier messages
-                  </button>
-                ) : null}
-                <TranscriptList
-                  hideSystem={!showSystem}
-                  entries={activeConversation.entries}
-                  gaps={activeConversation.gaps}
-                  tools={activeConversation.tools}
-                  runActive={activeConversation.live !== null}
-                  // No forking from the web until forks are cobots (COD-200): a fork is a plain chat, which the bots
-                  // list doesn't show, so it would strand the owner in a chat they can't find again.
-                  onFork={undefined}
-                  onFillGap={(gap) => session.fillGap(activeConversation.id, gap)}
-                />
-              </>
-            )}
+          {space === "workbench" && activeSummary !== undefined ? (
+            <div className="workbench-scroll" tabIndex={0}>
+              <Workbench
+                bot={activeSummary}
+                label={conversationLabel}
+                bots={topBots}
+                conversations={session.conversations}
+                graph={activityGraph}
+                tools={activeConversation?.tools ?? []}
+                activity={activity}
+                unread={unread}
+                onOpenBot={openInWorkbench}
+              />
+            </div>
+          ) : (
+            <section
+              ref={transcriptRef}
+              className="transcript"
+              aria-labelledby="transcript-heading"
+              role="log"
+              tabIndex={0}
+              onScroll={trackTranscriptPosition}
+              onWheel={interruptAutoScroll}
+              onTouchStart={interruptAutoScroll}
+              onPointerDown={interruptAutoScroll}
+            >
+              {activeConversation === undefined ? (
+                <p className="transcript-empty">Loading conversation…</p>
+              ) : activeConversation.entries.length === 0 && activeConversation.live === null ? (
+                <p className="transcript-empty">Send a message to begin.</p>
+              ) : (
+                <>
+                  {activeConversation.earlier ? (
+                    <button
+                      className="text-button transcript-load"
+                      type="button"
+                      onClick={() => session.loadEarlier(activeConversation.id)}
+                    >
+                      Load earlier messages
+                    </button>
+                  ) : null}
+                  <TranscriptList
+                    hideSystem={!showSystem}
+                    entries={activeConversation.entries}
+                    gaps={activeConversation.gaps}
+                    tools={activeConversation.tools}
+                    runActive={activeConversation.live !== null}
+                    // No forking from the web until forks are cobots (COD-200): a fork is a plain chat, which the bots
+                    // list doesn't show, so it would strand the owner in a chat they can't find again.
+                    onFork={undefined}
+                    onFillGap={(gap) => session.fillGap(activeConversation.id, gap)}
+                  />
+                </>
+              )}
 
-            {activeConversation?.live === null || activeConversation?.live === undefined ? null : (
-              <article
-                className="transcript-message transcript-message--assistant transcript-message--live"
-                aria-busy={activeConversation.live.active}
-              >
-                <header>
-                  <div className="transcript-message-title">
-                    <strong>Assistant</strong>
-                  </div>
-                  <button
-                    className="text-button transcript-fork transcript-fork--placeholder"
-                    type="button"
-                    aria-hidden="true"
-                    tabIndex={-1}
-                    disabled
-                  >
-                    Fork
-                  </button>
-                </header>
-                {activeConversation.live.text.length === 0 ? (
-                  <p className="responding">Responding…</p>
-                ) : (
-                  <Markdown text={activeConversation.live.text} />
-                )}
-                {activeConversation.live.retry === undefined ? null : (
-                  <p role="status">Retrying: {activeConversation.live.retry.error}</p>
-                )}
-              </article>
-            )}
+              {activeConversation?.live === null ||
+              activeConversation?.live === undefined ? null : (
+                <article
+                  className="transcript-message transcript-message--assistant transcript-message--live"
+                  aria-busy={activeConversation.live.active}
+                >
+                  <header>
+                    <div className="transcript-message-title">
+                      <strong>Assistant</strong>
+                    </div>
+                    <button
+                      className="text-button transcript-fork transcript-fork--placeholder"
+                      type="button"
+                      aria-hidden="true"
+                      tabIndex={-1}
+                      disabled
+                    >
+                      Fork
+                    </button>
+                  </header>
+                  {activeConversation.live.text.length === 0 ? (
+                    <p className="responding">Responding…</p>
+                  ) : (
+                    <Markdown text={activeConversation.live.text} />
+                  )}
+                  {activeConversation.live.retry === undefined ? null : (
+                    <p role="status">Retrying: {activeConversation.live.retry.error}</p>
+                  )}
+                </article>
+              )}
 
-            {activeConversation === undefined ||
-            activeConversation.compactions.length === 0 ? null : (
-              <p className="compaction-status" role="status">
-                {compactionStatusText(activeConversation.compactions)}
-              </p>
-            )}
+              {activeConversation === undefined ||
+              activeConversation.compactions.length === 0 ? null : (
+                <p className="compaction-status" role="status">
+                  {compactionStatusText(activeConversation.compactions)}
+                </p>
+              )}
 
-            {activeConversation?.failure === undefined ? null : (
-              <p className="transcript-error" role="alert">
-                {activeConversation.failure.kind} failed: {activeConversation.failure.message}
-              </p>
-            )}
+              {activeConversation?.failure === undefined ? null : (
+                <p className="transcript-error" role="alert">
+                  {activeConversation.failure.kind} failed: {activeConversation.failure.message}
+                </p>
+              )}
 
-            {activeConversation === undefined || activeConversation.queued.length === 0 ? null : (
-              <ol className="transcript-list queued-inputs" aria-label="Queued messages">
-                {activeConversation.queued.map((input) => (
-                  <li key={input.submissionId}>
-                    <article className="transcript-message transcript-message--user transcript-message--queued">
-                      <header>
-                        <div className="transcript-message-title">
-                          <strong>User</strong>
-                          <span>Queued</span>
-                        </div>
-                      </header>
-                      {showSystem && input.stamp !== undefined ? (
-                        <MessageStamp stamp={input.stamp} />
-                      ) : null}
-                      <MessageText text={input.text} />
-                    </article>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
+              {activeConversation === undefined || activeConversation.queued.length === 0 ? null : (
+                <ol className="transcript-list queued-inputs" aria-label="Queued messages">
+                  {activeConversation.queued.map((input) => (
+                    <li key={input.submissionId}>
+                      <article className="transcript-message transcript-message--user transcript-message--queued">
+                        <header>
+                          <div className="transcript-message-title">
+                            <strong>User</strong>
+                            <span>Queued</span>
+                          </div>
+                        </header>
+                        {showSystem && input.stamp !== undefined ? (
+                          <MessageStamp stamp={input.stamp} />
+                        ) : null}
+                        <MessageText text={input.text} />
+                      </article>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
+          )}
 
           <form className="prompt-bar" onSubmit={submit}>
             <label className="visually-hidden" htmlFor="prompt">
@@ -976,6 +1075,23 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               {typingLabel(activeConversation?.typing ?? [])}
             </p>
           </form>
+
+          {/* On a phone, the spaces as tabs under the composer; on a wide screen the sidebar lists them. */}
+          {spaces.length < 2 ? null : (
+            <nav className="space-tabs" aria-label="Spaces">
+              {spaces.map(({ id, label }) => (
+                <button
+                  key={id}
+                  type="button"
+                  aria-current={space === id ? "page" : undefined}
+                  onClick={() => pickSpace(id)}
+                >
+                  <SpaceIcon id={id} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </nav>
+          )}
         </main>
 
         {/* Over the main screen while the drawer is open: a tap anywhere on it closes the drawer. */}
@@ -1028,7 +1144,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             closeButtonRef={activityCloseRef}
             onOpenConversation={(conversationId) => {
               if (conversationId !== session.activeConversationId) {
-                window.history.pushState(null, "", `?conversation=${conversationId}`);
+                window.history.pushState(null, "", conversationHref(conversationId, space));
                 session.openConversation(conversationId);
               }
               if (compactActivityLayout()) {

@@ -70,3 +70,18 @@ const THINKING: Readonly<Record<string, string>> = {
 };
 
 export const thinkingName = (level: string): string => THINKING[level] ?? readable(level);
+
+const TASKS: Readonly<Record<string, string>> = {
+  "pi.generation": "Answering",
+  "pi.tool": "Using a tool",
+  "pi.compaction": "Summarising the chat so far",
+  "app.reminder": "Reminder",
+  "app.deliver-scheduled-instruction": "Scheduled task",
+  "app.proactive-record-run": "Wrapping up a scheduled run",
+  "app.proactive-round-budget": "Checking today's budget",
+  "app.approval": "Waiting for your answer",
+};
+
+/** A durable task's plain name (Workbench, COD-249): `pi.generation` → "Answering". */
+export const taskName = (kind: string): string =>
+  TASKS[kind] ?? readable(kind.replace(/^(pi|app)\./, ""));
