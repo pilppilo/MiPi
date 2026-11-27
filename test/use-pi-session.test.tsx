@@ -145,6 +145,10 @@ it("subscribes, takes the tail, catches up after a reconnect, and unsubscribes",
     expect(sent().at(-1)).toMatchObject({ type: "diag.subscribe", limit: 200 });
     const subscribeId = sent().at(-1).requestId as string;
 
+    // An event ahead of the subscription's answer is ignored, and doesn't move the catch-up point past it.
+    receive({ type: "diag.event", event: diagEvent(99) });
+    expect(dispatchDiag).not.toHaveBeenCalled();
+
     receive({
       type: "command.result",
       command: "diag.subscribe",
@@ -169,6 +173,15 @@ it("subscribes, takes the tail, catches up after a reconnect, and unsubscribes",
       expect.objectContaining({ type: "diag.subscribe", after: 6 }),
     ]);
     expect(sent().find(({ type }) => type === "diag.subscribe")).not.toHaveProperty("limit");
+
+    // A catch-up keeps a limit when one is given, and asks for everything since when none is.
+    state.send.mockClear();
+    session.subscribeDiag({ after: 6, limit: 50 });
+    session.subscribeDiag({ after: 6 });
+    expect(sent()).toEqual([
+      expect.objectContaining({ type: "diag.subscribe", after: 6, limit: 50 }),
+      expect.not.objectContaining({ limit: expect.anything() }),
+    ]);
 
     state.send.mockClear();
     session.unsubscribeDiag();

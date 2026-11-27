@@ -1,6 +1,6 @@
 /**
  * The web client's diagnostic events (COD-236): what Settings → Diagnostics shows, kept apart from the session state
- * (`session-state.ts`) so a live frame never re-renders the transcript. At most `DIAG_CLIENT_MAX` events, one per id,
+ * (`session-state.ts`) so a live frame never touches the conversation state. At most `DIAG_CLIENT_MAX` events, one per id,
  * oldest first.
  */
 import type { DiagEvent, DiagHealth } from "../protocol.ts";

@@ -188,6 +188,10 @@ describe("Settings → Diagnostics", () => {
     // The table: five columns, a row per event, severity on the row for its accent.
     expect(html).toMatch(/<th scope="col">Time<\/th><th scope="col">Severity<\/th>/);
     expect(html.match(/class="diag-row /g)).toHaveLength(5);
+    // Newest first: the latest is at the top.
+    expect([...html.matchAll(/data-event="(\d+)"/g)].map(([, id]) => Number(id))).toEqual([
+      5, 4, 3, 2, 1,
+    ]);
     expect(html).toContain('class="diag-row diag-row--error" data-event="4"');
     expect(html).toContain('class="diag-row diag-row--warn" data-event="5"');
 
@@ -199,6 +203,14 @@ describe("Settings → Diagnostics", () => {
 
   it("filters by severity and source, with a chip for each source present", () => {
     expect(sourcesOf(events)).toEqual(["do", "door:telegram", "gate", "provider"]);
+    // A chosen source whose events aged out keeps its chip, pressed, so the filter can be turned off.
+    expect(sourcesOf(events, "door:relay")).toContain("door:relay");
+    expect(
+      render({
+        diag: { ...live, events: [events[0]!] },
+        filters: { level: "all", source: "door:relay" },
+      }),
+    ).toMatch(/aria-pressed="true"[^>]*>door:relay</);
     const errors = render({ filters: { level: "error", source: undefined } });
     expect(errors.match(/class="diag-row /g)).toHaveLength(1);
     expect(errors).toMatch(/aria-pressed="true"[^>]*>Error</);

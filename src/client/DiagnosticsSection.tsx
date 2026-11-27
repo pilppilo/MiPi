@@ -105,7 +105,7 @@ export function DiagnosticsView({
   const counts = countEvents(events);
   const { rows, pending } = shownEvents(events, filters, frozenAt);
   const banner = bannerItems(health, events, now);
-  const sources = sourcesOf(events);
+  const sources = sourcesOf(events, filters.source);
   const paused = frozenAt !== undefined;
   return (
     <section aria-labelledby="diagnostics-heading" className="diagnostics">
@@ -221,7 +221,8 @@ export function DiagnosticsView({
             </tr>
           </thead>
           <tbody>
-            {rows.map((event) => (
+            {/* Newest first: the latest faults are at the top, and new rows arrive there, not off-screen. */}
+            {rows.toReversed().map((event) => (
               <DiagRow
                 key={event.id}
                 event={event}

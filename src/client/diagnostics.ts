@@ -40,12 +40,20 @@ export const matchesFilters = (event: DiagEvent, filters: DiagFilters): boolean 
   (filters.level === "all" || event.level === filters.level) &&
   (filters.source === undefined || event.source === filters.source);
 
-/** The sources present, for their chips: sorted, each once. */
-export const sourcesOf = (events: readonly DiagEvent[]): string[] =>
-  [...new Set(events.map(({ source }) => source))].sort();
+/**
+ * The sources present, for their chips: sorted, each once. `selected` is kept even after its events age out of the
+ * buffer, so the filter in force stays visible and can be turned off.
+ */
+export const sourcesOf = (events: readonly DiagEvent[], selected?: string): string[] =>
+  [
+    ...new Set([
+      ...events.map(({ source }) => source),
+      ...(selected === undefined ? [] : [selected]),
+    ]),
+  ].sort();
 
 /**
- * The rows shown, oldest first. While scrolling is paused (`frozenAt`: the newest id when it paused), events that came
+ * The rows shown, oldest first (the table turns them newest first). While scrolling is paused (`frozenAt`: the newest id when it paused), events that came
  * after stay out, counted in `pending`, so a row being read doesn't move.
  */
 export function shownEvents(
