@@ -101,7 +101,7 @@ it("shows an archived chat's own profile, even one no picker offers (COD-201)", 
     const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
     expect(html).toContain("Archived: read-only. Restore it to talk to it again.");
     expect(html).toMatch(
-      /<select id="profile-picker"[^>]*disabled=""[^>]*>.*<option value="pidu" selected="">pidu<\/option>/,
+      /<select id="profile-picker"[^>]*disabled=""[^>]*>.*<option value="pidu" selected="">PiDu relay \(earlier\)<\/option>/,
     );
   } finally {
     open.id = 21;

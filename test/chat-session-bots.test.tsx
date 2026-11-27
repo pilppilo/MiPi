@@ -90,7 +90,8 @@ it("lists the main bot by its own name first, then purpose bots with their dots,
     // MiPi can't be archived, so it offers no Archive (COD-233).
     expect(html).not.toContain(">Archive bot</button>");
     // MiPi's profile is shown as text: no picker that would fall back to another profile.
-    expect(html).toMatch(/<output id="profile-picker"[^>]*>main<\/output>/);
+    // By its plain name (COD-244), not its id.
+    expect(html).toMatch(/<output id="profile-picker"[^>]*>MiPi&#x27;s toolkit<\/output>/);
   } finally {
     vi.unstubAllGlobals();
   }

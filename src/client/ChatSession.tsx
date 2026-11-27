@@ -39,8 +39,17 @@ import { SettingsPanel } from "./SettingsPanel.tsx";
 import { askMiPi } from "./diagnostics.ts";
 import { DRAWER_CLOSED, drawerReducer } from "./drawer.ts";
 import {
+  modelName,
+  profileName,
+  profileSummary,
+  thinkingName,
+  toolName,
+  toolSummary,
+} from "./names.ts";
+import {
   BotMark,
   botStatusLabel,
+  CloseIcon,
   MenuIcon,
   SendIcon,
   SettingsIcon,
@@ -186,6 +195,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [drawer, dispatchDrawer] = useReducer(drawerReducer, DRAWER_CLOSED);
   const drawerToggleRef = useRef<HTMLButtonElement | null>(null);
   const drawerRef = useRef<HTMLElement | null>(null);
+  const newBotToggleRef = useRef<HTMLButtonElement | null>(null);
   const settingsToggleRef = useRef<HTMLButtonElement | null>(null);
   const settingsCloseRef = useRef<HTMLButtonElement | null>(null);
   const activityToggleRef = useRef<HTMLButtonElement | null>(null);
@@ -504,6 +514,12 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     );
   };
 
+  /** New bot cancelled: the sheet goes, and focus returns to the button that opened it. */
+  const closeNewBot = (): void => {
+    setNewBotOpen(false);
+    requestAnimationFrame(() => newBotToggleRef.current?.focus());
+  };
+
   /** A bot picked in the drawer: it closes, and the conversation takes focus. */
   const pickedFromDrawer = (): void => {
     if (!drawer.open) return;
@@ -556,6 +572,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
         className="session-sidebar"
         aria-label="Bots and settings"
         tabIndex={-1}
+        inert={newBotOpen}
         onKeyDown={(event) => {
           if (event.key === "Escape" && drawer.open) {
             event.stopPropagation();
@@ -632,39 +649,23 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             <SettingsIcon />
           </button>
           <button
+            ref={newBotToggleRef}
             className="pill-button new-bot-toggle"
             type="button"
             aria-expanded={newBotOpen}
             aria-controls="new-bot-form"
+            aria-haspopup="dialog"
             onClick={() => setNewBotOpen((open) => !open)}
             disabled={!isConnected}
           >
             New bot
           </button>
-          {newBotOpen ? (
-            <NewBotForm
-              profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
-                ({ id }) => id,
-              )}
-              disabled={!isConnected}
-              onCreate={async (bot) => {
-                const created = await session.createBot(bot);
-                if (created) {
-                  setNewBotOpen(false);
-                  setSettingsOpen(false);
-                  pickedFromDrawer();
-                }
-                return created;
-              }}
-              onCancel={() => setNewBotOpen(false)}
-            />
-          ) : null}
         </div>
       </aside>
 
       <div className="session-main">
         {/* Behind the open drawer, only the scrim takes a tap: the conversation is inert. */}
-        <main className="conversation-view" inert={drawer.open}>
+        <main className="conversation-view" inert={drawer.open || newBotOpen}>
           <header className="conversation-header">
             <div className="conversation-titlebar">
               <button
@@ -697,87 +698,6 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                   {activeSummary?.kind !== "bot" || activeSummary.purpose === undefined ? null : (
                     <p className="bot-purpose">{activeSummary.purpose}</p>
                   )}
-                  {/* A side chat under this bot (COD-200): here, beside its other actions, not under every bot in the list. */}
-                  {activeSummary === undefined ||
-                  activeSummary.archivedAt !== undefined ||
-                  (activeSummary.kind !== "main" &&
-                    activeSummary.kind !== "bot") ? null : newCobotUnder === activeSummary.id ? (
-                    <CobotNameForm
-                      key={`cobot-${activeSummary.id}`}
-                      label="New cobot"
-                      disabled={!isConnected}
-                      onSave={async (name) => {
-                        const bot = activeSummary.id;
-                        if (await session.createCobot(bot, name)) {
-                          setNewCobotUnder((current) => (current === bot ? undefined : current));
-                          setSettingsOpen(false);
-                        }
-                      }}
-                      onCancel={() => setNewCobotUnder(undefined)}
-                    />
-                  ) : (
-                    <button
-                      className="text-button"
-                      type="button"
-                      aria-expanded={false}
-                      onClick={() => setNewCobotUnder(activeSummary.id)}
-                      disabled={!isConnected}
-                    >
-                      New cobot
-                    </button>
-                  )}
-                  {activeSummary?.kind !== "cobot" ||
-                  activeSummary.archivedAt !== undefined ? null : renamingCobot ===
-                    activeSummary.id ? (
-                    <CobotNameForm
-                      key={activeSummary.id}
-                      label="Rename cobot"
-                      name={activeSummary.name ?? ""}
-                      disabled={!isConnected}
-                      onSave={(name) => {
-                        session.renameBot(activeSummary.id, name);
-                        setRenamingCobot(undefined);
-                      }}
-                      onCancel={() => setRenamingCobot(undefined)}
-                    />
-                  ) : (
-                    <button
-                      className="text-button"
-                      type="button"
-                      disabled={!isConnected}
-                      onClick={() => setRenamingCobot(activeSummary.id)}
-                    >
-                      Rename cobot
-                    </button>
-                  )}
-                  {archiveQuestion === undefined ||
-                  activeSummary === undefined ? null : confirmingArchive === activeSummary.id ? (
-                    <div className="archive-confirm" role="group" aria-label="Archive">
-                      <p>{archiveQuestion}</p>
-                      <button
-                        type="button"
-                        disabled={!isConnected}
-                        onClick={() => {
-                          session.archiveBot(activeSummary.id);
-                          setConfirmingArchive(undefined);
-                        }}
-                      >
-                        Archive
-                      </button>
-                      <button type="button" onClick={() => setConfirmingArchive(undefined)}>
-                        Cancel
-                      </button>
-                    </div>
-                  ) : (
-                    <button
-                      className="text-button"
-                      type="button"
-                      disabled={!isConnected}
-                      onClick={() => setConfirmingArchive(activeSummary.id)}
-                    >
-                      {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
-                    </button>
-                  )}
                   {activeConversation === undefined ? null : (
                     <ConversationDetails
                       conversation={activeConversation}
@@ -790,6 +710,89 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                       }
                     />
                   )}
+                  <div className="bot-profile-links">
+                    {/* A side chat under this bot (COD-200): here, beside its other actions, not under every bot in the list. */}
+                    {activeSummary === undefined ||
+                    activeSummary.archivedAt !== undefined ||
+                    (activeSummary.kind !== "main" &&
+                      activeSummary.kind !== "bot") ? null : newCobotUnder === activeSummary.id ? (
+                      <CobotNameForm
+                        key={`cobot-${activeSummary.id}`}
+                        label="New cobot"
+                        disabled={!isConnected}
+                        onSave={async (name) => {
+                          const bot = activeSummary.id;
+                          if (await session.createCobot(bot, name)) {
+                            setNewCobotUnder((current) => (current === bot ? undefined : current));
+                            setSettingsOpen(false);
+                          }
+                        }}
+                        onCancel={() => setNewCobotUnder(undefined)}
+                      />
+                    ) : (
+                      <button
+                        className="text-button"
+                        type="button"
+                        aria-expanded={false}
+                        onClick={() => setNewCobotUnder(activeSummary.id)}
+                        disabled={!isConnected}
+                      >
+                        New cobot
+                      </button>
+                    )}
+                    {activeSummary?.kind !== "cobot" ||
+                    activeSummary.archivedAt !== undefined ? null : renamingCobot ===
+                      activeSummary.id ? (
+                      <CobotNameForm
+                        key={activeSummary.id}
+                        label="Rename cobot"
+                        name={activeSummary.name ?? ""}
+                        disabled={!isConnected}
+                        onSave={(name) => {
+                          session.renameBot(activeSummary.id, name);
+                          setRenamingCobot(undefined);
+                        }}
+                        onCancel={() => setRenamingCobot(undefined)}
+                      />
+                    ) : (
+                      <button
+                        className="text-button"
+                        type="button"
+                        disabled={!isConnected}
+                        onClick={() => setRenamingCobot(activeSummary.id)}
+                      >
+                        Rename cobot
+                      </button>
+                    )}
+                    {archiveQuestion === undefined ||
+                    activeSummary === undefined ? null : confirmingArchive === activeSummary.id ? (
+                      <div className="archive-confirm" role="group" aria-label="Archive">
+                        <p>{archiveQuestion}</p>
+                        <button
+                          type="button"
+                          disabled={!isConnected}
+                          onClick={() => {
+                            session.archiveBot(activeSummary.id);
+                            setConfirmingArchive(undefined);
+                          }}
+                        >
+                          Archive
+                        </button>
+                        <button type="button" onClick={() => setConfirmingArchive(undefined)}>
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        className="text-button"
+                        type="button"
+                        disabled={!isConnected}
+                        onClick={() => setConfirmingArchive(activeSummary.id)}
+                      >
+                        {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
+                      </button>
+                    )}
+                  </div>
                   <div className="bot-profile-actions">
                     <label className="system-toggle">
                       <input
@@ -982,6 +985,36 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
         />
       </div>
 
+      {/* New bot (COD-244): a sheet over everything; nothing behind it takes input meanwhile. */}
+      {newBotOpen ? (
+        <div className="sheet-layer">
+          <button
+            className="sheet-backdrop"
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            onClick={closeNewBot}
+          />
+          <NewBotForm
+            profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
+              ({ id }) => id,
+            )}
+            options={session.options}
+            disabled={!isConnected}
+            onCreate={async (bot) => {
+              const created = await session.createBot(bot);
+              if (created) {
+                setNewBotOpen(false);
+                setSettingsOpen(false);
+                pickedFromDrawer();
+              }
+              return created;
+            }}
+            onCancel={closeNewBot}
+          />
+        </div>
+      ) : null}
+
       {hasActivity ? (
         <ActivityPanel
           graph={activityGraph}
@@ -1103,11 +1136,13 @@ function CobotNameForm({
 
 function NewBotForm({
   profiles,
+  options,
   disabled,
   onCreate,
   onCancel,
 }: {
   readonly profiles: readonly string[];
+  readonly options: Options | undefined;
   readonly disabled: boolean;
   readonly onCreate: (bot: {
     readonly name: string;
@@ -1132,44 +1167,75 @@ function NewBotForm({
     }
   };
   return (
-    <form id="new-bot-form" className="new-bot-form" aria-label="New bot" onSubmit={submit}>
-      <label>
-        Name
+    <form
+      id="new-bot-form"
+      className="new-bot-form sheet"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="new-bot-heading"
+      onSubmit={submit}
+      onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          onCancel();
+        }
+      }}
+    >
+      <header className="sheet-header">
+        <h2 id="new-bot-heading">New bot</h2>
+        <button className="round-button" type="button" aria-label="Cancel" onClick={onCancel}>
+          <CloseIcon />
+        </button>
+      </header>
+      <label className="field">
+        <span className="field-label">Name</span>
         <input
           value={name}
           maxLength={MAX_BOT_NAME_CHARACTERS}
+          placeholder="Planner"
           onChange={(event) => setName(event.currentTarget.value)}
           required
           autoFocus
         />
       </label>
-      <label>
-        Purpose
+      <label className="field">
+        <span className="field-label">What it's for</span>
         <textarea
           value={purpose}
           maxLength={MAX_BOT_PURPOSE_CHARACTERS}
           rows={3}
-          placeholder="What this bot is for. It can't be changed later."
+          placeholder="Plan my week and keep my Linear issues tidy."
           onChange={(event) => setPurpose(event.currentTarget.value)}
           required
         />
+        <span className="field-hint">
+          This becomes its standing instructions. It can't be changed later.
+        </span>
       </label>
-      <label>
-        Profile
-        <select value={profile} onChange={(event) => setProfile(event.currentTarget.value)}>
-          {profiles.map((id) => (
-            <option key={id} value={id}>
-              {id}
-            </option>
-          ))}
-        </select>
-      </label>
+      <fieldset className="toolkit-choices">
+        <legend className="field-label">What it can use</legend>
+        {profiles.map((id) => {
+          const summary = profileSummary(id, options);
+          return (
+            <label key={id} className="toolkit-choice">
+              <input
+                type="radio"
+                name="toolkit"
+                value={id}
+                checked={profile === id}
+                onChange={() => setProfile(id)}
+              />
+              <span className="toolkit-choice-text">
+                <strong>{profileName(id)}</strong>
+                {summary === undefined ? null : <span>{summary}</span>}
+              </span>
+            </label>
+          );
+        })}
+      </fieldset>
       <div className="new-bot-actions">
-        <button type="submit" disabled={!ready}>
-          {creating ? "Creating…" : "Create"}
-        </button>
-        <button type="button" onClick={onCancel}>
-          Cancel
+        <button className="primary-button" type="submit" disabled={!ready}>
+          {creating ? "Creating…" : "Create bot"}
         </button>
       </div>
     </form>
@@ -1194,103 +1260,113 @@ function ConversationDetails({
 }) {
   const agent = conversation.agent;
   const totals = usageTotals(conversation.usage);
-  const model =
-    agent?.model === undefined
-      ? "Provider default"
-      : `${agent.model.provider}/${agent.model.modelId}`;
   const modelId = agent?.model?.modelId ?? options?.defaultModel;
+  const shownProfile = profile ?? (fixedProfile ? "main" : "default");
+  const summary = profileSummary(shownProfile, options);
+  // What the bot can use right now, by plain name (`names.ts`); the ids stay in each chip's title.
   const tools =
-    agent?.tools === undefined
-      ? "Host default"
-      : Array.isArray(agent.tools)
-        ? agent.tools.length === 0
-          ? "None"
-          : agent.tools.join(", ")
-        : `Host default except ${agent.tools.remove.join(", ")}`;
+    agent?.tools === undefined ? undefined : Array.isArray(agent.tools) ? agent.tools : undefined;
+  const removed =
+    agent?.tools !== undefined && !Array.isArray(agent.tools) ? agent.tools.remove : undefined;
 
   return (
-    <section className="runtime-information" aria-label="Runtime information">
-      <dl>
-        <div className="runtime-primary">
+    <section className="runtime-information" aria-label="Bot settings">
+      <div className="detail-rows">
+        <div className="detail-row">
           {options === undefined || options.models.length === 0 ? (
-            <RuntimeDatum
-              label="Model"
-              value={
-                options?.modelsError === undefined ? model : `${model} (${options.modelsError})`
-              }
-            />
-          ) : (
-            <div>
-              <dt>
-                <label htmlFor="model-picker">Model:</label>
-              </dt>
-              <dd>
-                <select
-                  id="model-picker"
-                  value={modelId}
-                  disabled={disabled}
-                  onChange={(event) => onConfigure({ model: event.currentTarget.value })}
-                >
-                  {options.models.some(({ id }) => id === modelId) ? null : (
-                    <option value={modelId}>{modelId}</option>
-                  )}
-                  {options.models.map((choice) => (
-                    <option key={choice.id} value={choice.id}>
-                      {choice.name}
-                    </option>
-                  ))}
-                </select>
-              </dd>
-            </div>
-          )}
-          <RuntimeDatum label="Thinking" value={agent?.thinkingLevel ?? "off"} />
-          <RuntimeDatum label="Tokens" value={totals.tokens.toLocaleString()} />
-          <RuntimeDatum label="Cached" value={formatCached(totals)} />
-          <RuntimeDatum label="Cost" value={formatCost(totals.cost)} />
-        </div>
-        <div className="runtime-tools">
-          <dt>
-            <label htmlFor="profile-picker">Profile:</label>
-          </dt>
-          <dd>
-            {fixedProfile ? (
-              <output id="profile-picker" title="MiPi always runs on the main profile">
-                {profile ?? "main"}
-              </output>
-            ) : (
-              <select
-                id="profile-picker"
-                value={profile ?? "default"}
-                disabled={disabled || options === undefined}
-                onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
-              >
-                {/* A profile no picker offers (the relay's old `pidu`) is shown as it is, never as another. */}
-                {options === undefined ||
-                options.profiles.some(({ id }) => id === (profile ?? "default")) ? null : (
-                  <option value={profile ?? "default"}>{profile ?? "default"}</option>
+            <>
+              <span className="detail-label">Model</span>
+              <span className="detail-value" title={modelId}>
+                {modelId === undefined ? "Provider default" : modelName(modelId, options)}
+                {options?.modelsError === undefined ? null : (
+                  <span className="detail-hint"> · the model list can't be read right now</span>
                 )}
-                {(options?.profiles ?? [{ id: profile ?? "default", name: "" }]).map((choice) => (
-                  <option key={choice.id} value={choice.id} title={choice.name}>
-                    {choice.id}
+              </span>
+            </>
+          ) : (
+            <>
+              <label className="detail-label" htmlFor="model-picker">
+                Model
+              </label>
+              <select
+                id="model-picker"
+                value={modelId}
+                disabled={disabled}
+                onChange={(event) => onConfigure({ model: event.currentTarget.value })}
+              >
+                {modelId === undefined || options.models.some(({ id }) => id === modelId) ? null : (
+                  <option value={modelId}>{modelName(modelId, options)}</option>
+                )}
+                {options.models.map((choice) => (
+                  <option key={choice.id} value={choice.id}>
+                    {choice.name}
                   </option>
                 ))}
               </select>
-            )}
-          </dd>
-          <dt>Tools:</dt>
-          <dd>{tools}</dd>
+            </>
+          )}
         </div>
-      </dl>
-    </section>
-  );
-}
+        <div className="detail-row">
+          <label className="detail-label" htmlFor="profile-picker">
+            Toolkit
+          </label>
+          {fixedProfile ? (
+            <output
+              id="profile-picker"
+              className="detail-value"
+              title="MiPi always has its own toolkit"
+            >
+              {profileName(shownProfile)}
+            </output>
+          ) : (
+            <select
+              id="profile-picker"
+              value={shownProfile}
+              disabled={disabled || options === undefined}
+              onChange={(event) => onConfigure({ profile: event.currentTarget.value })}
+            >
+              {/* A profile no picker offers (the relay's old `pidu`) is shown as it is, never as another. */}
+              {options === undefined ||
+              options.profiles.some(({ id }) => id === shownProfile) ? null : (
+                <option value={shownProfile}>{profileName(shownProfile)}</option>
+              )}
+              {(options?.profiles ?? [{ id: shownProfile, name: "" }]).map((choice) => (
+                <option key={choice.id} value={choice.id} title={choice.name}>
+                  {profileName(choice.id)}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+        {summary === undefined ? null : <p className="detail-note">{summary}</p>}
+      </div>
 
-function RuntimeDatum({ label, value }: { readonly label: string; readonly value: string }) {
-  return (
-    <div>
-      <dt>{label}:</dt>
-      <dd>{value}</dd>
-    </div>
+      <div className="detail-tools">
+        <h3 className="section-label">It can use</h3>
+        {tools === undefined ? (
+          <p className="detail-note">
+            {removed === undefined
+              ? "The usual tools"
+              : `The usual tools, except ${removed.map(toolName).join(", ")}`}
+          </p>
+        ) : tools.length === 0 ? (
+          <p className="detail-note">Nothing but chat</p>
+        ) : (
+          <ul className="tool-chips">
+            {tools.map((id) => (
+              <li key={id} title={toolSummary(id) ?? id}>
+                {toolName(id)}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <p className="detail-stats">
+        {totals.tokens.toLocaleString()} tokens · {formatCached(totals)} cached ·{" "}
+        {formatCost(totals.cost)} · Thinking: {thinkingName(agent?.thinkingLevel ?? "off")}
+      </p>
+    </section>
   );
 }
 

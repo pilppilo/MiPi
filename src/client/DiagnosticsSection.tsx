@@ -108,41 +108,47 @@ export function DiagnosticsView({
   const sources = sourcesOf(events, filters.source);
   const paused = frozenAt !== undefined;
   return (
-    <section aria-labelledby="diagnostics-heading" className="diagnostics">
-      <h3 id="diagnostics-heading">Diagnostics</h3>
-      <p className="settings-note">
-        The agent's own record of hops, holds and faults, live while this is open. It never holds
-        message text or secrets.
-      </p>
+    <section aria-labelledby="diagnostics-heading" className="diagnostics settings-section">
+      <header className="settings-section-head">
+        <h3 id="diagnostics-heading">Diagnostics</h3>
+        <p className="settings-note">
+          The agent's own record of hops, holds and faults, live while this is open. It never holds
+          message text or secrets.
+        </p>
+      </header>
 
-      <div className="diag-summary" role="group" aria-label="Summary">
-        <span className="diag-count">{counts.total} events</span>
-        <span className="diag-count diag-count--ok">{counts.ok} ok</span>
-        <span className="diag-count diag-count--warn">{counts.warnHeld} warn / held</span>
-        <span className="diag-count diag-count--error">{counts.error} error</span>
-        <span className="diag-alarm">
-          {health?.alarmAt === undefined ? "Idle" : `Next alarm: ${localTime(health.alarmAt)}`}
-        </span>
-        {health?.held === undefined ? null : (
-          <span className="diag-hold" title={HOLD_LABELS[health.held]}>
-            {health.held}
-            {health.heldUntil === undefined ? "" : ` until ${localTime(health.heldUntil)}`}
+      <div className="settings-card diag-health">
+        <div className="diag-summary" role="group" aria-label="Summary">
+          <span className="diag-count">{counts.total} events</span>
+          <span className="diag-count diag-count--ok">{counts.ok} ok</span>
+          <span className="diag-count diag-count--warn">{counts.warnHeld} warn / held</span>
+          <span className="diag-count diag-count--error">{counts.error} error</span>
+          <span className="diag-alarm">
+            {health?.alarmAt === undefined ? "Idle" : `Next alarm: ${localTime(health.alarmAt)}`}
           </span>
-        )}
-        <span className="diag-live">
-          {diag.subscribed ? "Live" : disabled ? "Offline" : "Connecting…"}
-        </span>
-        <button type="button" disabled={disabled} onClick={onRefresh}>
-          Refresh
-        </button>
-        <button
-          type="button"
-          disabled={disabled}
-          title="Pre-fills MiPi's message box without sending."
-          onClick={() => onAskMiPi(askMiPiPrompt(health, rows))}
-        >
-          Ask MiPi
-        </button>
+          {health?.held === undefined ? null : (
+            <span className="diag-hold" title={HOLD_LABELS[health.held]}>
+              {health.held}
+              {health.heldUntil === undefined ? "" : ` until ${localTime(health.heldUntil)}`}
+            </span>
+          )}
+          <span className={`diag-live${diag.subscribed ? " diag-live--on" : ""}`}>
+            {diag.subscribed ? "Live" : disabled ? "Offline" : "Connecting…"}
+          </span>
+        </div>
+        <div className="diag-actions">
+          <button type="button" disabled={disabled} onClick={onRefresh}>
+            Refresh
+          </button>
+          <button
+            type="button"
+            disabled={disabled}
+            title="Pre-fills MiPi's message box without sending."
+            onClick={() => onAskMiPi(askMiPiPrompt(health, rows))}
+          >
+            Ask MiPi
+          </button>
+        </div>
       </div>
       {diag.error === undefined ? null : <p className="diag-error">{diag.error}</p>}
 
@@ -158,58 +164,75 @@ export function DiagnosticsView({
         </div>
       )}
 
-      <div className="diag-filters">
-        <div role="group" aria-label="Severity">
-          {LEVEL_FILTERS.map(({ id, label }) => (
-            <button
-              key={id}
-              type="button"
-              className="diag-chip"
-              aria-pressed={filters.level === id}
-              onClick={() => onFilters({ ...filters, level: id })}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-        <div role="group" aria-label="Source">
-          <button
-            type="button"
-            className="diag-chip"
-            aria-pressed={filters.source === undefined}
-            onClick={() => onFilters({ ...filters, source: undefined })}
-          >
-            All
-          </button>
-          {sources.map((source) => (
-            <button
-              key={source}
-              type="button"
-              className="diag-chip"
-              aria-pressed={filters.source === source}
-              onClick={() => onFilters({ ...filters, source })}
-            >
-              {source}
-            </button>
-          ))}
-        </div>
-        <button type="button" aria-pressed={paused} onClick={() => onPause(!paused)}>
-          {paused ? "Resume" : "Pause scroll"}
-        </button>
-        {paused && pending > 0 ? (
-          <span className="diag-pending" aria-live="polite">
-            {pending} new
+      <div className="settings-card diag-filters">
+        <div className="diag-filter-row">
+          <span className="diag-filter-label" aria-hidden="true">
+            Severity
           </span>
-        ) : null}
+          <div role="group" aria-label="Severity" className="segmented">
+            {LEVEL_FILTERS.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                className="diag-chip"
+                aria-pressed={filters.level === id}
+                onClick={() => onFilters({ ...filters, level: id })}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="diag-filter-row">
+          <span className="diag-filter-label" aria-hidden="true">
+            Source
+          </span>
+          <div role="group" aria-label="Source" className="segmented">
+            <button
+              type="button"
+              className="diag-chip"
+              aria-pressed={filters.source === undefined}
+              onClick={() => onFilters({ ...filters, source: undefined })}
+            >
+              All
+            </button>
+            {sources.map((source) => (
+              <button
+                key={source}
+                type="button"
+                className="diag-chip"
+                aria-pressed={filters.source === source}
+                onClick={() => onFilters({ ...filters, source })}
+              >
+                {source}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="diag-filter-row diag-filter-row--end">
+          <button type="button" aria-pressed={paused} onClick={() => onPause(!paused)}>
+            {paused ? "Resume" : "Pause scroll"}
+          </button>
+          {paused && pending > 0 ? (
+            <span className="diag-pending" aria-live="polite">
+              {pending} new
+            </span>
+          ) : null}
+        </div>
       </div>
 
       {rows.length === 0 ? (
-        <p className="settings-empty">
+        <p className="settings-card settings-empty">
           {events.length === 0 ? "No events yet." : "No events match these filters."}
         </p>
       ) : (
         // Scrolls on its own on a narrow screen (COD-244), so five columns never widen the page.
-        <div className="diag-table-scroll" tabIndex={0} role="region" aria-label="Events">
+        <div
+          className="settings-card settings-card--flush diag-table-scroll"
+          tabIndex={0}
+          role="region"
+          aria-label="Events"
+        >
           <table className="diag-table">
             <thead>
               <tr>
