@@ -1,5 +1,243 @@
 # mipi
 
+## 0.2.0-alpha.0
+
+### Minor Changes
+
+- 0d70e5b: COD-233: archive from the web, archive one cobot, cobots in `list_bots`, and binding the relay back to MiPi.
+
+  **Added**
+
+  - The web shows an **Archive bot** or **Archive cobot** button on an open purpose bot or cobot, never on MiPi. It asks first, saying how many cobots go with a bot, then sends `bot.archive`. The tab then moves to MiPi, as the agent does: its link too, so a reload doesn't reopen the archived one.
+  - A cobot can be archived on its own: `bot.archive` on a cobot, or `stop_bot` with `cobot`. Its bot keeps working. Restore brings it back alone. Archiving its bot later leaves it archived, and restoring the bot doesn't bring it back.
+  - `list_bots` lists each bot's live cobots indented under it, MiPi's included.
+  - `stop_bot` takes an optional `cobot` to archive only that cobot of the named bot. An unknown bot or cobot is refused, and so is a cobot name that two live cobots of the bot share. It never falls back to archiving the bot.
+  - Purpose bots on `default` get `list_cobots` and `archive_cobot` to manage their own cobots. A profile can now name `botTools`, offered only to a purpose bot on it, so its cobots and plain chats on `default` don't get them, and bare core still offers no tool. `archive_cobot` needs an owner-only turn: a relay, bot or scheduled input, or untrusted tool content, refuses it.
+
+  **Changed**
+
+  - `bind_door`'s description says that naming MiPi binds the door back to MiPi. An unknown door name is refused with the list of doors, for example `relay:pidu`.
+
+  **Fixed**
+
+  - A web tab on a bot or cobot archived under it (by its Archive button, another tab, or `stop_bot`) moves to MiPi with the agent. Before, it stayed on the archived conversation while the agent watched MiPi for it, so a Restore there showed nothing new until the owner went away and back.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). No ledger changes.
+
+  **Migration**
+
+  - Nothing is stored differently: a cobot archived alone uses the same `archivedAt` and archive index as before.
+  - Purpose bots on `default` gain two tools at the first start of this build (the startup profile sync), so their cached prompt prefix changes once. Every other conversation keeps its tools.
+  - Rolling back works. An older build refuses to archive a cobot alone, but it still restores one. Not one-way.
+
+- f349b10: COD-198: archive and restore a bot (settings slice 1, agent side).
+
+  **Added**
+
+  - Protocol: `bot.archive { conversationId }` and `bot.restore { conversationId }`. MiPi can't be archived or restored, and neither can a chat from before bots yet (COD-201).
+  - Archiving a bot archives its cobots in the same commit, then aborts what they were doing (`Conversation.abort()`: queued inputs withdrawn, the run stopped). From that commit on, an archived bot is out of the bots list, out of `search_history` and the memory pass, and takes no message (`prompt.submit` refuses with a clear reason). A web tab open on it moves to MiPi.
+  - A door bound to an archived bot (the web, a Telegram chat, the relay) reaches MiPi instead, and the key is remembered. Restoring binds it back, unless it was bound somewhere else meanwhile.
+  - An archived bot's schedules hold: a repeat skips its times (`skippedArchived`), and a one-time reminder parks itself and ends. Restoring sends each parked reminder once, marked late (`held:<reminderId>`), where it would have answered; a second restore sends nothing twice. While MiPi is paused (`MIPI_PAUSED`) they stay parked, and the next start without the pause sends them; one whose bot is archived again first waits for the next restore. The daily caps don't hold them back: the owner asked for the restore, and each still counts as a run. The admin heartbeat counts an archived bot's schedules as `archivedSchedules`, never active or overdue.
+  - A message arriving as its bot is archived goes to MiPi: the relay and Telegram look again in the commit that admits it.
+  - An archived bot keeps its name, so restoring it never collides. A new bot asking for it is told the name belongs to an archived bot.
+
+  **Changed**
+
+  - Archived conversations, chats from before bots included, are no longer the owner's for history search and the memory pass: core's visibility reads them from one session index (`app.bots.archived`), so the memory pass's wake still reads no conversation's documents.
+  - Reminders made in a chat from before bots run in MiPi now, so an archived conversation never runs one itself: an answer meant for that chat's transcript goes to MiPi's, and one for a Telegram chat still goes to the chat.
+  - `held` is a request-id prefix of the reminders (automated, like `sched`).
+
+  **Pi Durable**
+
+  - No version change (1.6.1). Ledger: L11 added (workaround): Pi Durable can't pause a task, so each reminder asks core where it runs when it comes due, and holds itself for an archived bot. L10's entry now also covers archive: a binding to an archived bot falls back to MiPi on its first read, since bindings can't be listed. `abortConversation` joins the seam, with a contract test.
+
+  **Migration**
+
+  - `app.bots` gains `archived`, `released` and `held` (optional, still version 1). On the first start of this build, the archive index is filled once from each conversation's `archivedAt`.
+  - Reminders keep their stored tasks: a chat-from-before-bots reminder is routed to MiPi when it comes due, not rewritten (a task's conversation can't change). Covered against the 0.1.0-beta.1 fixture.
+  - Rolling back works: an older build ignores the new fields and still hides archived bots by `archivedAt`. One-time reminders parked while a bot was archived wait in `app.bots.held` until this build restores the bot. Not one-way.
+
+- 8b2a9c0: COD-197: MiPi becomes the main bot (bots slice 1).
+
+  **Added**
+
+  - MiPi, the main bot, on a new `main` profile (the everyday tools; the bot tools come in COD-199), made on the first start of this build.
+  - Bot fields on `app.conversation` (`kind`, `name`, `purpose`, `bot`, `createdBy`, `archivedAt`) and the session document `app.bots` (MiPi and the name index). Bot names are unique, ignoring case, and 1 to 40 characters. A purpose bot's purpose is its instructions.
+  - Protocol: `bot.create { name, purpose, profile }` makes a purpose bot (on a profile the pickers offer; a retry with the same request id makes it once), and `bot.rename` renames a bot, MiPi included. Conversation summaries carry `kind`, `name`, `purpose`, `bot`, `archivedAt` and `latestEntryId`, and a `conversation.head` event tells the list when a conversation gets a new entry, from the commit itself.
+  - The web app lists bots: MiPi first, by its own name, then the purpose bots with their purposes, each with a dot while it works or waits (its subagents' tasks count; a sleeping reminder doesn't) and a dot for anything unread since this browser last read it. A new browser starts with nothing unread. "New bot" asks for a name, a purpose and a profile.
+  - Telegram's `/bot` lists the bots, this chat's marked, and `/bot <name>` switches the chat to one (the whole name, in any case). The choice survives restarts, and messages still waiting in the chat's window go to the bot they were written to first. Telegram and the web on the same bot share one conversation.
+
+  **Changed**
+
+  - Every door reaches MiPi: the web opens it instead of Pi Durable's root conversation, and Telegram and the PiDu relay talk to it. Relay messages stay fenced and stamped as PiDu's. Pointing the relay at a purpose bot of its own comes with COD-199.
+  - Only MiPi runs on `main`, and MiPi always does. `pidu` stays only for the relay's chats from before bots: no conversation newly takes it, and the relay starts on the configured profile like the other doors. The web and Telegram's `/profile` refuse these switches, and pickers list only `default` and `empty`.
+  - A fork is a chat of its own, never a copy of its bot, and a fork of MiPi leaves `main` for `default`. The web app no longer offers forking until forks become cobots (COD-200): the bots list doesn't show plain chats.
+  - MiPi's profile shows as text in the web app, not as a picker.
+  - `conversation.create` is gone: "New conversation" became "New bot". Receipts stored by older builds still read.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). Ledger: L10 added (workaround): a transaction can't list a document family's keys, so each door's binding moves to MiPi on its first read. A contract test pins how Pi Durable renders a bot's purpose (`instructions`).
+
+  **Migration**
+
+  - On the first start, every chat from before bots is archived (`archivedAt`), kept whole: transcripts, reminders, relay receipts and memory are untouched. History search and the memory pass still read them (archiving's effects come with COD-198).
+  - Each door's binding moves to its bot the first time the door reads it, and is marked `bots`: Pi Durable can't list the bindings to move them all at once. A binding chosen since stays where it is.
+  - An older build ignores the new fields, so rolling back works: its doors find their bindings on MiPi, which works as an ordinary chat. Not one-way.
+
+- 4fe4ad2: COD-234: diagnostics slice 1. Core keeps a capped diagnostic event log in the Durable Object's SQLite, and core's own hops, holds and faults write to it. Nothing reads it from outside yet: the admin API and the live tail come in COD-235, and the Settings page in slice 3.
+
+  **Added**
+
+  - `src/agent/diag.ts`: the `DiagSink` connector, `NOOP_DIAG`, and `DiagLog`, which stores events in a raw `app_diag_events` table (outside Pi Durable: no document, no commit). It keeps the newest 1,000 rows, and ids keep rising across trims and restarts. `emit()` is synchronous and never throws. Reading a fresh database writes nothing.
+  - Shared event types in `src/protocol.ts`: `DiagEvent`, `DiagLevel`, `DiagOutcome`, `DiagDetail`.
+  - The guardrail lives in `diag.ts`, whatever an emitter passes. A summary is one line of at most 200 characters, with bearer tokens, Telegram bot tokens, `sk-` keys, JWTs and token query parameters scrubbed. `detail` is at most 12 flat values. A key that could hold content (`prompt`, `body`, `text`, `message` and the like) or a credential (any key containing `token`, `secret`, `password`, `cookie` and the like) is dropped.
+  - The sink reaches every part through the composition: `HarnessConfig.diag` → `Connectors.diag` (and `diagOf(registry)` for tasks), `BackgroundContext.diag` for extensions, `WakeSources`, `runAlarmConsumers` and `bindLimitRecorder`.
+  - Core emitters:
+    - Startup and maintenance: `startup.open`, `startup.refused` (a composition error or the startup guard), `startup.maintenance`, `maintenance.stale_export`, `maintenance.export_begin`, `maintenance.export_end`.
+    - Alarms and wake sources: `alarm.lost`, `alarm.fired` (debug), `alarm.consumer_failed`, `wake.refresh_failed`.
+    - The harness: `harness.report` (every `onReport`, by kind) and `harness.failed`.
+    - Gates and proactive runs: `gate.held` (a round stopped by a hold, a bot message refused by a hold), `proactive.terminated`, `proactive.tool_error` (tool names only), and `proactive.settled` (`ok`, `quiet`, `fault` or `held`).
+    - Provider limits: `provider.limit` and `provider.limit_cleared`.
+  - `MipiAgent.diagEvents(query)` reads the log in any state, for tests and for COD-235's route.
+
+  **Changed**
+
+  - Export, restore, the fingerprint and row counts leave `app_diag_events` and its indexes out. A restore starts the log empty, and the reopen is its first event.
+  - Nothing is written to the log while maintenance runs, because an export's fingerprint includes the database size. An event from then (`startup.maintenance`) goes to the console in the same shape instead.
+  - A restore skips the diagnostic table, its indexes and its rows when an export carries them. That happens with an export taken by an older build after a rollback.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). No ledger changes. `ReportInfo` is now re-exported as a type from `src/agent/pi/durable.ts`, for typing `harness.report` events.
+
+  **Migration**
+
+  - The first event creates `app_diag_events` (with `sqlite_sequence`). No Pi Durable data changes, so no fixture database is added. An older build ignores the table. After a rollback it would export the table, and this build's restore skips it.
+
+- 8499bc9: COD-235: diagnostics slice 2. The doors and providers write to the diagnostic log, the admin API can read it, web sockets can follow it live, and a failed heartbeat shows its latest faults.
+
+  **Added**
+
+  - `GET /api/admin/events?after=&source=&level=&limit=` (admin credentials) returns `{ events, health }`.
+    - Every parameter is checked strictly; an unknown parameter or an out-of-range value is a 400.
+    - `level` takes a comma-separated list such as `warn,error`. `limit` is 1 to 500, 100 by default.
+    - It works in every state, refused and maintenance included, and writes nothing.
+    - `health` (`DiagHealth`) gives the state and why, the alarm's time, a lost alarm, the hold and until when, the overdue schedules, and the last proactive run.
+  - A WebSocket live tail.
+    - `diag.subscribe` (`limit` 1 to 500, 200 by default, or `after`) answers with `{ events, health }`. From then on, each new event arrives as `diag.event`.
+    - `diag.unsubscribe` stops it.
+    - The subscription is kept in the socket's attachment, so it survives hibernation and switching conversations. A socket that hasn't subscribed gets no extra frames.
+  - Door events, with ids and outcomes only, never message text:
+    - Telegram: `telegram.admit` (`held` for a message turned away while paused), `telegram.outbox_enqueued`, `telegram.send_ok`, `telegram.send_retry`, `telegram.send_failed`, `telegram.send_unknown`.
+    - Relay: `relay.admitted`, `relay.refused`, `relay.settled`.
+    - Web: `ws.connect` and `ws.command_failed`.
+    - Door calls the agent turns away or fails (`telegram.admit`, `relay.admit`, `relay.poll`).
+  - Provider events: `provider.usage_ok` and `provider.usage_failed` for each real usage read (never a cached one), and `provider.models_failed`. They come from core's usage cache and model list, so every provider gets them without code of its own.
+  - Worker-only refusals go to Cloudflare's logs as `"source":"worker"` events and never reach the agent: `auth.refused` (a wrong `POST /api/unlock` token too), `telegram.webhook_refused`, `relay.auth_refused`, `ws.cross_origin`. They carry the route, status and reason, never the token.
+  - A failed heartbeat lists the agent's last 10 warnings and errors in its output and step summary. If those can't be read, it says so in one line. The heartbeat still runs with Node alone, as `heartbeat.yml` runs it without `pnpm install`.
+  - `pnpm check` fails if a script run without `pnpm install` (`scripts/heartbeat.ts`) loads anything but Node's own modules and other files under `scripts/`. A value import from `src/` reaches `@earendil-works/*`, and the script would die before its first line.
+
+  **Changed**
+
+  - The log keeps `debug` rows separately: 200 of them beside 800 of everything else, so the per-minute `alarm.fired` can't push out a fault.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). No ledger changes.
+
+  **Migration**
+
+  - Nothing stored changes. The log's table and its rows stay as they are, and trimming in two tiers starts with the next event.
+
+- fc8ce81: COD-236: diagnostics slice 3, the **Settings → Diagnostics** page in the web app.
+
+  **Added**
+
+  - Settings has a **Diagnostics** section beside Archived. It shows the agent's diagnostic log live while it's open:
+    - A summary strip: how many events, how many `ok`, `warn / held` and `error`, when the next alarm is (or `Idle`), any hold with its end time, whether it's live, and a **Refresh** button.
+    - A banner for what's wrong or waiting now: the agent refused or in maintenance, a lost alarm in the last 26 hours, a hold, late schedules, or errors in the last hour.
+    - Severity and source filters, and **Pause scroll**, which keeps the rows still and counts the events that arrive meanwhile.
+    - A table with time, severity, source, event and outcome, newest first, with a red or amber edge for errors and warnings. An event with more to it opens to its detail and its ids as JSON.
+  - **Ask MiPi** opens MiPi with a draft in the message box: the health and the last 15 events shown, under the current filters. It closes Settings and puts the cursor in the box. Nothing is sent until you send it, and no model runs in the background.
+  - The web app keeps up to 500 events, one per id, apart from the conversation's state, so a live event never touches it. Opening Diagnostics subscribes. Closing Settings or switching to Archived unsubscribes. After a reconnect it subscribes again from the newest event it has.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). No ledger changes.
+
+  **Migration**
+
+  - Nothing stored changes.
+
+- b0be761: **Added** · MiPi can create, list, message and archive purpose bots. Bot answers arrive as follow-ups. The owner can bind a relay to a live bot.
+
+  **Changed** · Bot-only turns share the proactive caps. Delegation can go three hops deep. Bot and relay input is excluded from both memory paths. Creating and archiving bots and binding doors require an owner-only turn with no external tool content.
+
+  **Fixed** · MiPi sends delegated follow-ups to the Telegram chat that asked for them. Proactive limit notices go to the owner without spending another model round.
+
+  **Pi Durable** · Ledger L12 documents durable bot submissions and follow-ups.
+
+  **Migration** · Startup refreshes the main profile's tools. The new bot records extend existing storage.
+
+- 28c80ac: COD-201: a settings menu with Archived (settings slice 2).
+
+  **Added**
+
+  - A Settings button in the web sidebar's header opens a wide panel with a list of sections. The first is Archived: archived bots with their cobots, then the chats from before bots, each with its purpose or first line and when it was archived.
+  - Each archived entry can be opened read-only or restored. There is no Delete yet: Pi Durable can't delete a conversation (ledger L13).
+  - Restoring a chat from before bots makes it a cobot under MiPi, named from its title, or its first message's first line when it has none. Its reminders run in it again, not in MiPi.
+
+  **Changed**
+
+  - An archived conversation opens read-only on the web. The composer and the pickers are off, the profile shows as stored (even the relay's old `pidu`), and a banner offers Restore. The agent refuses its messages and its profile or model changes, with wording for a bot, a cobot or a chat from before bots.
+  - Picking a conversation in the sidebar, making a bot or cobot, or going back in the browser closes Settings.
+  - A cobot archived with its bot comes back only with the bot. Restoring it alone is refused with "Restore <bot> first.", and the web shows the same hint by a disabled Restore.
+
+  **Fixed**
+
+  - A web tab that opens an archived conversation stays on it, read-only, through other changes (another tab making a cobot, say), until it is restored. Before, any such change moved it to MiPi. The mark lives on the socket, so it survives hibernation. A conversation archived while a tab is on it still moves the tab to MiPi.
+
+  **Pi Durable**
+
+  - No version change (1.6.1). Ledger: L13 added (watch): Pi Durable 1.6.1 can't delete a conversation, so Archived offers no Delete. Upstream: earendil-works/pi#11026, with an open PR (earendil-works/pi#12562).
+
+  **Migration**
+
+  - Nothing changes until the owner restores a chat from before bots. Then its conversation meta gains `kind: "cobot"`, `bot` (MiPi) and `name`, and it leaves `app.bots.archived`. It keeps its profile, except the relay's old `pidu`, which becomes `default`.
+  - Rolling back works: the fields are optional and the meta stays version 1, so a build with cobots (COD-200) shows the restored chat as a cobot under MiPi. Not one-way.
+
+### Patch Changes
+
+- d02ae65: COD-236: make **Ask MiPi** available whenever **Settings → Diagnostics** is open.
+
+  **Changed**
+
+  - **Ask MiPi** sits beside **Refresh**, so you can draft a message even when Diagnostics shows no faults or holds.
+  - The draft asks what the diagnostics show and whether anything is worth checking.
+
+- a79ecdd: **Added** · Create named side chats under a bot from the web sidebar or Telegram. Cobots inherit their bot's purpose and tool profile. MiPi's cobots start on the default profile.
+
+  **Changed** · Telegram `/new [name]` opens a cobot, and `/help` lists the commands. The web sidebar nests cobots and subagents and shows their activity and unread entries on parent rows.
+
+  **Fixed** · Reconnected web clients receive unread entry heads for task-owned subagents.
+
+  **Pi Durable** · The contract test pins the conversation and task IDs in the subagent ownership record.
+
+  **Migration** · Cobots use the existing conversation fields and archive index. Web creation receipts add a cobot variant.
+
+- COD-192: release 0.2.0-alpha.0 — purpose bots, cobots, Settings (Archived & Diagnostics), and the diagnostic event stream (`COD-197`–`COD-201`, `COD-233`, `COD-234`–`COD-236`), with its fixture database.
+
+  **Added**
+
+  - `test/fixtures/db/0.2.0-alpha.0.json`: this release's stored data (bot records, the bots index, archive holds, bot hops and cobots, beside everything 0.1.0 stored). Every later build restores it on each `pnpm test`, beside the 0.1.0 betas'.
+
+  **Migration**
+
+  - None in this step. The fixture is test data. The data changes themselves (pre-bot conversations folded into Archived, doors moved to MiPi, pre-bot reminders moved to MiPi) are in the COD-197 and COD-198 notes.
+
 ## 0.1.0
 
 ### Minor Changes
