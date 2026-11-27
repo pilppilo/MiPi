@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useState } from "react";
 import type { DiagEvent } from "../protocol.ts";
-import type { DiagState } from "./diag-buffer.ts";
-import { lastDiagId } from "./diag-buffer.ts";
+import type { DiagState } from "./session/diag-buffer.ts";
+import { lastDiagId } from "./session/diag-buffer.ts";
 import {
   ALL_EVENTS,
   askMiPiPrompt,

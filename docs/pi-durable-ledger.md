@@ -130,6 +130,14 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **MiPi:** `describeApproval` (`src/agent/approvals.ts`, COD-173) casts a pending approval's task input to `ToolTaskInput` and reads the call from the assistant entry it names (or from the input, for a nested call), to show the owner what they are asked. The pending list itself comes from the task graph's public fields. `test/contract.test.ts` checks the input's `kind` on a real harness. These are the arguments as the model sent them, before `prepareArguments` and any `beforeTool` rewrite: no MiPi hook rewrites arguments today, so they are what the gate approves. An extension that starts rewriting them must also have the gate keep the arguments it saw (a memo) and show those.
 - **Remove when:** the task graph or a tool slot carries a parked call's name and arguments, or `getTask` returns a typed tool task input.
 
+### L15 · pi-ai's types bring Node's globals into the browser session core
+
+- **Kind:** workaround
+- **Since:** 0.2.0-alpha.1
+- **Upstream:** pi-ai 1.6.1's declarations import the provider SDKs' types, and `@anthropic-ai/sdk` references `@types/node`. Any program that imports a pi-ai type therefore gets Node's globals, with `types: []` or not. The web session core reaches pi-ai's message types through `src/protocol.ts`, so its no-DOM build (`tsconfig.session.json`, COD-245) still accepts `setTimeout`, `localStorage`, `WebSocket`, `navigator`, `crypto` and `console`. Only DOM-only names (`window`, `document`) fail.
+- **MiPi:** `.oxlintrc.json` sets `no-restricted-globals` on `src/client/session/**` for the host globals (scope-aware, so a parameter named `window` is fine). The core takes them from `Platform` instead (`src/client/session/platform.ts`).
+- **Remove when:** pi-ai's public types no longer pull in `@types/node` (or provider SDK types), so the no-DOM build alone rejects these globals. Then drop the lint override and check that `tsc -p tsconfig.session.json` fails on `setTimeout`.
+
 ## Closed
 
 None yet.

@@ -24,7 +24,7 @@ import {
   type TranscriptItem,
   type TranscriptView,
   type UsageState,
-} from "../protocol.ts";
+} from "../../protocol.ts";
 
 export interface TranscriptToolCall {
   readonly callId: string;

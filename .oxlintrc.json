@@ -204,6 +204,110 @@
       }
     },
     {
+      "files": ["src/client/session/**"],
+      "rules": {
+        "no-restricted-globals": [
+          "error",
+          {
+            "name": "window",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "self",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "document",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "location",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "history",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "navigator",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "localStorage",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "sessionStorage",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "WebSocket",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "EventSource",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "fetch",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "XMLHttpRequest",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "setTimeout",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "clearTimeout",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "setInterval",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "clearInterval",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "requestAnimationFrame",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "cancelAnimationFrame",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "queueMicrotask",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "crypto",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "console",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "Notification",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "process",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          },
+          {
+            "name": "Buffer",
+            "message": "The session core (COD-245) takes the host through Platform and Transport (src/client/session/platform.ts, transport.ts), never a global. pi-ai's types bring Node's globals into its no-DOM build, so lint refuses them (ledger L15)."
+          }
+        ]
+      }
+    },
+    {
       "files": ["src/agent/pi/**", "test/**", "vitest.config.ts"],
       "rules": {
         "no-restricted-imports": "off"

@@ -6,7 +6,7 @@ import type {
   TranscriptGap,
   TranscriptToolCall,
   ToolProgress,
-} from "./session-state.ts";
+} from "./session/session-state.ts";
 
 interface TranscriptListProps {
   readonly entries: readonly TranscriptEntry[];

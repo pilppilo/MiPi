@@ -1,4 +1,4 @@
-import type { ClientCommand, CommandResult } from "../protocol.ts";
+import type { ClientCommand, CommandResult } from "../../protocol.ts";
 
 export type RetriableCommand = Extract<
   ClientCommand,

@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { sanitizeDiag } from "../src/agent/diag.ts";
 import { DiagnosticsView } from "../src/client/DiagnosticsSection.tsx";
 import { SettingsPanel } from "../src/client/SettingsPanel.tsx";
-import { type DiagState, initialDiagState } from "../src/client/diag-buffer.ts";
+import { type DiagState, initialDiagState } from "../src/client/session/diag-buffer.ts";
 import {
   ALL_EVENTS,
   ASK_MIPI_EVENTS,
