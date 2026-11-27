@@ -333,6 +333,46 @@ describe("diagnostic live tail", () => {
     chatter.socket.close(1000, "done");
   });
 
+  // The order the client relies on (`usePiSession` takes live events only after the answer). The race the agent's
+  // ordering closes needs an event from background work during the health read; another socket's command waits behind
+  // the object's input gate here, so this checks the order and that nothing is lost, not the race itself.
+  it("answers a subscription before any live event, and loses none around it", async () => {
+    const owner = "diag-tail-race";
+    const chatter = await connect(owner);
+    for (let round = 0; round < 5; round += 1) {
+      const watcher = await connect(owner);
+      // Back to back: the chatter's failure is emitted while the subscription reads the health.
+      watcher.send({ type: "diag.subscribe", requestId: `sub-${round}`, limit: 500 });
+      chatter.send({
+        type: "conversation.open",
+        requestId: `race-${round}`,
+        conversationId: 9_000 + round,
+      });
+      await chatter.result(`race-${round}`);
+      const result = await watcher.result(`sub-${round}`);
+      // A round trip on the watcher, so any live frame for it has arrived.
+      watcher.send({ type: "diag.unsubscribe", requestId: `ping-${round}` });
+      await watcher.result(`ping-${round}`);
+
+      const order = watcher.seen.flatMap((frame) =>
+        frame.type === "diag.event"
+          ? ["event"]
+          : frame.type === "command.result" && frame.requestId === `sub-${round}`
+            ? ["result"]
+            : [],
+      );
+      expect(order[0], `round ${round}`).toBe("result");
+      const snapshot = result.ok ? result.diag!.events : [];
+      const held = [...snapshot, ...watcher.diagEvents()];
+      expect(
+        held.filter(({ kind, reqId }) => kind === "ws.command_failed" && reqId === `race-${round}`),
+        `round ${round}`,
+      ).toHaveLength(1);
+      watcher.socket.close(1000, "done");
+    }
+    chatter.socket.close(1000, "done");
+  });
+
   it("refuses a subscription outside its bounds", async () => {
     const owner = "diag-tail-bounds";
     for (const command of [

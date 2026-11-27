@@ -35,6 +35,7 @@ import {
 } from "./bots-list.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
+import { askMiPi } from "./diagnostics.ts";
 import { Markdown } from "./Markdown.tsx";
 import { MessageText, TranscriptList } from "./Transcript.tsx";
 import { usePiSession } from "./usePiSession.ts";
@@ -180,6 +181,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const activityToggleRef = useRef<HTMLButtonElement | null>(null);
   const activityCloseRef = useRef<HTMLButtonElement | null>(null);
   const conversationHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const promptRef = useRef<HTMLTextAreaElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
   const pinToLatestRef = useRef(true);
   const renderedConversationRef = useRef<number | undefined>(undefined);
@@ -463,6 +465,24 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     }
     setSettingsOpen(false);
     requestAnimationFrame(() => conversationHeadingRef.current?.focus());
+  };
+
+  /** Ask MiPi (COD-236): MiPi opens with the diagnostics in its composer. Nothing is sent until the owner sends it. */
+  const askMiPiFromSettings = (prompt: string): void => {
+    askMiPi(prompt, {
+      conversations: session.conversations,
+      open: (conversationId) => {
+        if (conversationId !== session.activeConversationId) {
+          window.history.pushState(null, "", `?conversation=${conversationId}`);
+          session.openConversation(conversationId);
+        }
+      },
+      // Not `updateDraft`: a prepared draft isn't the owner typing, so no typing presence goes out.
+      setDraft,
+      closeSettings: () => setSettingsOpen(false),
+      // After the render that shows the conversation (and enables the composer).
+      focusComposer: () => requestAnimationFrame(() => promptRef.current?.focus()),
+    });
   };
 
   return (
@@ -800,6 +820,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             Message
           </label>
           <textarea
+            ref={promptRef}
             id="prompt"
             name="prompt"
             rows={3}
@@ -845,6 +866,12 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           onRestore={(conversationId) => session.restoreBot(conversationId)}
           onClose={closeSettings}
           closeButtonRef={settingsCloseRef}
+          diagnostics={{
+            diag: session.diag,
+            onSubscribe: session.subscribeDiag,
+            onUnsubscribe: session.unsubscribeDiag,
+            onAskMiPi: askMiPiFromSettings,
+          }}
         />
       ) : null}
     </div>

@@ -18,9 +18,11 @@ import {
   type ClientCommand,
   type ConnectionStatus,
   type ConversationSummary,
+  DEFAULT_DIAG_TAIL,
   type Options,
   type UsageReadout,
 } from "../protocol.ts";
+import { type DiagState, diagReducer, initialDiagState, lastDiagId } from "./diag-buffer.ts";
 import { CommandOutbox, type RetriableCommand } from "./command-outbox.ts";
 import {
   conversationAfterSnapshot,
@@ -58,6 +60,15 @@ export interface PiSession {
   readonly options: Options | undefined;
   /** Today's spend and usage (M9); undefined until the server sent it. Refreshed when the agent is awake anyway. */
   readonly usage: UsageReadout | undefined;
+  /** The diagnostic events and health Settings → Diagnostics shows (COD-236), kept apart from the transcript's state. */
+  readonly diag: DiagState;
+  /**
+   * Starts the live tail (`diag.subscribe`), or catches up while it runs: `after` asks only for what came since. It is
+   * asked for again after a reconnect, from the newest event held, until `unsubscribeDiag`.
+   */
+  subscribeDiag(query?: { readonly limit?: number; readonly after?: number }): void;
+  /** Stops the live tail. */
+  unsubscribeDiag(): void;
   /** Switches a conversation's model or tool profile from its next request. */
   configureConversation(
     conversationId: number,
@@ -89,6 +100,13 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
   const [state, dispatch] = useReducer(sessionReducer, initialSessionState);
   const [options, setOptions] = useState<Options>();
   const [usage, setUsage] = useState<UsageReadout>();
+  const [diag, dispatchDiag] = useReducer(diagReducer, initialDiagState);
+  // Whether Diagnostics wants the tail (asked again after a reconnect), and the newest event id this tab holds.
+  const diagWantedRef = useRef(false);
+  const diagLastIdRef = useRef<number | undefined>(undefined);
+  // Whether the agent answered this socket's subscription: live events count only after that answer (`diag-buffer.ts`
+  // drops them before it), so the newest id held never runs ahead of the events held.
+  const diagLiveRef = useRef(false);
   const socketRef = useRef<PartySocket | null>(null);
   const outboxRef = useRef<CommandOutbox | null>(null);
   outboxRef.current ??= new CommandOutbox();
@@ -194,6 +212,19 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     };
     document.addEventListener("visibilitychange", onVisible);
 
+    /** The tail again on a new socket: from the newest event held, so nothing comes twice. */
+    const resubscribeDiag = () => {
+      if (!diagWantedRef.current) return;
+      const after = diagLastIdRef.current;
+      socket.send(
+        JSON.stringify({
+          type: "diag.subscribe",
+          requestId: crypto.randomUUID(),
+          ...(after === undefined ? { limit: DEFAULT_DIAG_TAIL } : { after }),
+        } satisfies ClientCommand),
+      );
+    };
+
     socket.addEventListener("open", () => {
       conversationOpened = false;
       dispatch({ type: "connection", status: "connected" });
@@ -222,6 +253,30 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         showView(parsed.conversationId, parsed.view);
         return;
       }
+      // Diagnostics never reach the session reducer: a live frame leaves the conversation state alone. (It does
+      // re-render ChatSession, which holds this hook, but only while Diagnostics is open: no frames come otherwise.)
+      if (parsed.type === "diag.event") {
+        if (!diagWantedRef.current || !diagLiveRef.current) return;
+        diagLastIdRef.current = Math.max(diagLastIdRef.current ?? 0, parsed.event.id);
+        dispatchDiag({ type: "event", event: parsed.event });
+        return;
+      }
+      if (parsed.type === "command.result" && parsed.command === "diag.subscribe") {
+        if (!parsed.ok) {
+          dispatchDiag({ type: "failed", message: parsed.error.message });
+          return;
+        }
+        // Unsubscribed while it was on its way: the agent stops on the unsubscribe that follows it.
+        if (!diagWantedRef.current || parsed.diag === undefined) return;
+        diagLiveRef.current = true;
+        const newest = lastDiagId(parsed.diag.events);
+        if (newest !== undefined) {
+          diagLastIdRef.current = Math.max(diagLastIdRef.current ?? 0, newest);
+        }
+        dispatchDiag({ type: "snapshot", events: parsed.diag.events, health: parsed.diag.health });
+        return;
+      }
+      if (parsed.type === "command.result" && parsed.command === "diag.unsubscribe") return;
       if (parsed.type === "conversation.ops") {
         const view = viewsRef.current.get(parsed.conversationId);
         if (view !== undefined) {
@@ -316,6 +371,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         // Restore the previous watch first. Replayed create/fork commands then leave the server
         // watching the newest acknowledged conversation rather than the pre-disconnect one.
         outbox.replay((command) => socket.send(JSON.stringify(command)));
+        resubscribeDiag();
       }
       if (parsed.type === "command.result") {
         const acknowledged = outbox.acknowledge(parsed);
@@ -339,6 +395,9 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         pending.reject(new Error("The session connection closed"));
       }
       pagesRef.current.clear();
+      // The new socket subscribes again (`resubscribeDiag`); until then nothing streams.
+      diagLiveRef.current = false;
+      dispatchDiag({ type: "stopped" });
       if (disposed) return;
       if (terminalProtocolClose(event.code)) {
         terminal = true;
@@ -507,6 +566,43 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     [outbox, sendRetriable],
   );
 
+  const subscribeDiag = useCallback(
+    (query: { readonly limit?: number; readonly after?: number } = {}) => {
+      diagWantedRef.current = true;
+      const socket = socketRef.current;
+      // Not connected: the next socket subscribes once its session opens (`resubscribeDiag`).
+      if (socket === null || socket.readyState !== socket.OPEN) return;
+      socket.send(
+        JSON.stringify({
+          type: "diag.subscribe",
+          requestId: crypto.randomUUID(),
+          ...(query.after === undefined ? {} : { after: query.after }),
+          // A catch-up (`after`) takes everything since, up to the agent's own cap, unless a limit is given.
+          ...(query.after === undefined
+            ? { limit: query.limit ?? DEFAULT_DIAG_TAIL }
+            : query.limit === undefined
+              ? {}
+              : { limit: query.limit }),
+        } satisfies ClientCommand),
+      );
+    },
+    [],
+  );
+
+  const unsubscribeDiag = useCallback(() => {
+    diagWantedRef.current = false;
+    diagLiveRef.current = false;
+    dispatchDiag({ type: "stopped" });
+    const socket = socketRef.current;
+    if (socket === null || socket.readyState !== socket.OPEN) return;
+    socket.send(
+      JSON.stringify({
+        type: "diag.unsubscribe",
+        requestId: crypto.randomUUID(),
+      } satisfies ClientCommand),
+    );
+  }, []);
+
   const loadEarlier = useCallback((conversationId: number) => {
     const transcript = transcriptsRef.current.get(conversationId);
     if (transcript === undefined) return;
@@ -539,6 +635,9 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     error: state.error,
     options,
     usage,
+    diag,
+    subscribeDiag,
+    unsubscribeDiag,
     configureConversation,
     openConversation,
     createBot,

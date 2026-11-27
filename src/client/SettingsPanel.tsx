@@ -1,16 +1,27 @@
 import { type RefObject, useState } from "react";
 import type { ConversationSummary } from "../protocol.ts";
 import { type ArchivedEntry, archivedEntries } from "./bots-list.ts";
+import type { DiagState } from "./diag-buffer.ts";
+import { DiagnosticsSection } from "./DiagnosticsSection.tsx";
 
 /**
- * Settings (COD-201): a wide panel over the conversation and activity columns, with a section list so later sections
- * (Diagnostics in COD-216, model, Telegram and relay, usage) slot in beside Archived without crowding it.
+ * Settings (COD-201): a wide panel over the conversation and activity columns, with a section list: Archived, and
+ * Diagnostics (COD-236). Later sections (model, Telegram and relay, usage) slot in beside them.
  */
-export type SettingsSection = "archived";
+export type SettingsSection = "archived" | "diagnostics";
 
 const SECTIONS: readonly { readonly id: SettingsSection; readonly label: string }[] = [
   { id: "archived", label: "Archived" },
+  { id: "diagnostics", label: "Diagnostics" },
 ];
+
+/** What the Diagnostics section needs from the session (`usePiSession`). */
+export interface DiagnosticsProps {
+  readonly diag: DiagState;
+  readonly onSubscribe: (query?: { readonly after?: number }) => void;
+  readonly onUnsubscribe: () => void;
+  readonly onAskMiPi: (prompt: string) => void;
+}
 
 export function SettingsPanel({
   conversations,
@@ -19,6 +30,8 @@ export function SettingsPanel({
   onRestore,
   onClose,
   closeButtonRef,
+  diagnostics,
+  initialSection = "archived",
 }: {
   readonly conversations: readonly ConversationSummary[];
   readonly disabled: boolean;
@@ -27,8 +40,12 @@ export function SettingsPanel({
   readonly onRestore: (conversationId: number) => void;
   readonly onClose: () => void;
   readonly closeButtonRef?: RefObject<HTMLButtonElement | null>;
+  /** Without it, Settings has no Diagnostics section. */
+  readonly diagnostics?: DiagnosticsProps;
+  readonly initialSection?: SettingsSection;
 }) {
-  const [section, setSection] = useState<SettingsSection>("archived");
+  const [section, setSection] = useState<SettingsSection>(initialSection);
+  const sections = SECTIONS.filter(({ id }) => id !== "diagnostics" || diagnostics !== undefined);
   return (
     <section id="settings-panel" className="settings-panel" aria-labelledby="settings-heading">
       <header className="settings-header">
@@ -40,7 +57,7 @@ export function SettingsPanel({
       <div className="settings-body">
         <nav className="settings-sections" aria-label="Settings sections">
           <ul>
-            {SECTIONS.map(({ id, label }) => (
+            {sections.map(({ id, label }) => (
               <li key={id}>
                 <button
                   type="button"
@@ -61,6 +78,16 @@ export function SettingsPanel({
               disabled={disabled}
               onOpen={onOpen}
               onRestore={onRestore}
+            />
+          ) : null}
+          {/* Mounted only while shown: leaving it (Archived, Close) unsubscribes the live tail. */}
+          {section === "diagnostics" && diagnostics !== undefined ? (
+            <DiagnosticsSection
+              diag={diagnostics.diag}
+              disabled={disabled}
+              onSubscribe={diagnostics.onSubscribe}
+              onUnsubscribe={diagnostics.onUnsubscribe}
+              onAskMiPi={diagnostics.onAskMiPi}
             />
           ) : null}
         </div>

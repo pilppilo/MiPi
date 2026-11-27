@@ -637,7 +637,9 @@ export class MipiAgent extends DurableObject<Env> {
   }
 
   async #diagSnapshot(query: DiagQuery): Promise<DiagSnapshot> {
-    return { events: this.#diag.read(query), health: await this.#diagHealth() };
+    // The health first, so the events read after it include anything emitted while it was read.
+    const health = await this.#diagHealth();
+    return { events: this.#diag.read(query), health };
   }
 
   async #diagHealth(): Promise<DiagHealth> {
@@ -1922,17 +1924,22 @@ export class MipiAgent extends DurableObject<Env> {
         return;
       }
       case "diag.subscribe": {
+        // The health first: it awaits storage. Then, with nothing awaited between them, the socket is marked, the log
+        // read and the result sent. An event emitted while the health was read is in the result; any later one is a
+        // `diag.event` sent after it. Marked before the await, an event could arrive ahead of the result and be lost.
+        const health = await this.#diagHealth();
         const state = connectionState(socket);
         if (state !== null) setConnectionState(socket, { ...state, diag: true });
+        const events = this.#diag.read({
+          ...(command.after === undefined ? {} : { after: command.after }),
+          limit: command.limit ?? DEFAULT_DIAG_TAIL,
+        });
         this.#send(socket, {
           type: "command.result",
           command: command.type,
           requestId: command.requestId,
           ok: true,
-          diag: await this.#diagSnapshot({
-            ...(command.after === undefined ? {} : { after: command.after }),
-            limit: command.limit ?? DEFAULT_DIAG_TAIL,
-          }),
+          diag: { events, health },
         });
         return;
       }
