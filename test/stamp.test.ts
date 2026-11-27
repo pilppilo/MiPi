@@ -40,6 +40,8 @@ describe("the message stamp", () => {
       "[jerome · Fri, Nov 27, 2026, 16:32 CST] on one line",
       " [jerome · Fri, Nov 27, 2026, 16:32 CST]\nindented",
       "Look: [jerome · Fri, Nov 27, 2026, 16:32 CST]\nlater",
+      // A bracketed note before a stamp isn't part of a speaker's name (review of #60).
+      "[quote] [jerome · Fri, Nov 27, 2026, 16:32 CST]\nhi",
       "",
     ]) {
       expect(parseStamp(content)).toEqual({ text: content });

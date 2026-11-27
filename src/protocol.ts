@@ -75,11 +75,12 @@ const REMINDER_NOTES_PREFIX = "\n\n[Notes for this run]";
 export const formatStamp = (speaker: string, time: string): string => `[${speaker} · ${time}]\n`;
 
 /**
- * A stamp at the very start of a message. The time must look exactly like `localTime()`'s (`Sun, Nov 22, 2026, 12:40
- * CST`), so ordinary text that only starts with a bracket is never taken for one.
+ * A stamp at the very start of a message. The speaker holds no `]` (doors strip brackets from names) and the time must
+ * look exactly like `localTime()`'s (`Sun, Nov 22, 2026, 12:40 CST`), so ordinary text that only starts with a bracket,
+ * or a bracketed note before a stamp, is never taken for one.
  */
 const STAMP =
-  /^\[([^\n]+?) · ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{2}:\d{2} [^\]\n]+)\]\n/;
+  /^\[([^\]\n]+?) · ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), [A-Z][a-z]{2} \d{1,2}, \d{4}, \d{2}:\d{2} [^\]\n]+)\]\n/;
 
 export interface Stamp {
   /** Who sent it: the owner's name, `bot:<name>`, the relay's speaker. */
