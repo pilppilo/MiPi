@@ -20,8 +20,13 @@ import {
 } from "../protocol.ts";
 
 export const DIAG_TABLE = "app_diag_events";
-/** Rows kept: the oldest go as new ones come in. */
+/** Rows kept in all: the oldest go as new ones come in. */
 export const DIAG_MAX_ROWS = 1_000;
+/**
+ * Of those, the most `debug` rows kept. Debug rows are trimmed on their own, so a noisy one (`alarm.fired`, every
+ * minute while work runs) never pushes out a warning or a fault.
+ */
+export const DIAG_MAX_DEBUG_ROWS = 200;
 export const DIAG_DEFAULT_LIMIT = 200;
 export const DIAG_MAX_LIMIT = 500;
 
@@ -155,6 +160,32 @@ export function sanitizeDiag(input: DiagInput, now: number): Omit<DiagEvent, "id
   };
 }
 
+/**
+ * A Worker-only event (`source: "worker"`): an unauthenticated or cross-site request refused before it reaches the
+ * agent. It goes to Cloudflare's logs in the stored events' shape and never wakes or writes to the Durable Object, so a
+ * flood of bad requests costs the agent nothing.
+ */
+export function logWorkerDiag(input: Omit<DiagInput, "source">, now: number = Date.now()): void {
+  const diag = sanitizeDiag({ ...input, source: "worker" }, now);
+  console.log(JSON.stringify({ message: "Diagnostic event (Worker)", diag }));
+}
+
+/** A refused request as a Worker event: its route and status, never its headers or body. */
+export function logRefusedRequest(
+  kind: string,
+  request: Request,
+  status: number,
+  reason: string,
+): void {
+  logWorkerDiag({
+    level: "warn",
+    kind,
+    outcome: "refused",
+    summary: `${request.method} ${new URL(request.url).pathname} refused (${status}): ${reason}`,
+    detail: { status, method: request.method, path: new URL(request.url).pathname },
+  });
+}
+
 /** An error's message, for a summary or `detail` (scrubbed when stored). */
 export const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -183,7 +214,10 @@ export interface DiagLogOptions {
   readonly canWrite?: () => boolean;
   /** Each stored event, after the write (the live tail, COD-235). */
   readonly onEmit?: (event: DiagEvent) => void;
+  /** Rows kept other than `debug`. Default `DIAG_MAX_ROWS - DIAG_MAX_DEBUG_ROWS`. */
   readonly maxRows?: number;
+  /** `debug` rows kept. Default `DIAG_MAX_DEBUG_ROWS`. */
+  readonly maxDebugRows?: number;
   readonly now?: () => number;
 }
 
@@ -239,7 +273,8 @@ const COLUMNS =
   "id, ts, level, source, kind, outcome, summary, req_id, conv_id, task_id, duration_ms, detail";
 
 /**
- * The agent's diagnostic log, in raw Durable Object SQLite (`app_diag_events`). The table is made on the first write,
+ * The agent's diagnostic log, in raw Durable Object SQLite (`app_diag_events`), trimmed in two tiers: `debug` rows
+ * and the rest each keep their own newest rows. The table is made on the first write,
  * never by a read, so reading a fresh database writes nothing. `AUTOINCREMENT` keeps ids rising after the oldest rows
  * are trimmed and after a restart, so a reader's cursor never sees an id twice.
  */
@@ -248,6 +283,7 @@ export class DiagLog implements DiagSink {
   readonly #canWrite: () => boolean;
   readonly #onEmit: ((event: DiagEvent) => void) | undefined;
   readonly #maxRows: number;
+  readonly #maxDebugRows: number;
   readonly #now: () => number;
   #ready = false;
   #warned = false;
@@ -256,7 +292,8 @@ export class DiagLog implements DiagSink {
     this.#sql = sql;
     this.#canWrite = options.canWrite ?? (() => true);
     this.#onEmit = options.onEmit;
-    this.#maxRows = Math.max(1, Math.trunc(options.maxRows ?? DIAG_MAX_ROWS));
+    this.#maxRows = Math.max(1, Math.trunc(options.maxRows ?? DIAG_MAX_ROWS - DIAG_MAX_DEBUG_ROWS));
+    this.#maxDebugRows = Math.max(1, Math.trunc(options.maxDebugRows ?? DIAG_MAX_DEBUG_ROWS));
     this.#now = options.now ?? Date.now;
   }
 
@@ -288,10 +325,13 @@ export class DiagLog implements DiagSink {
           clean.detail === undefined ? null : JSON.stringify(clean.detail),
         )
         .one();
-      // Keeps the newest `maxRows`: deletes the row `maxRows` back from the newest, and everything older.
+      // Keeps the newest rows of the new one's tier (debug, or the rest): deletes the row `cap` back from the newest
+      // of that tier, and everything older in it. The other tier is left alone.
+      const debug = clean.level === "debug";
+      const tier = debug ? "level = 'debug'" : "level <> 'debug'";
       this.#sql.exec(
-        `DELETE FROM ${DIAG_TABLE} WHERE id <= (SELECT id FROM ${DIAG_TABLE} ORDER BY id DESC LIMIT 1 OFFSET ?)`,
-        this.#maxRows,
+        `DELETE FROM ${DIAG_TABLE} WHERE ${tier} AND id <= (SELECT id FROM ${DIAG_TABLE} WHERE ${tier} ORDER BY id DESC LIMIT 1 OFFSET ?)`,
+        debug ? this.#maxDebugRows : this.#maxRows,
       );
       event = { id, ...clean };
     } catch (error) {

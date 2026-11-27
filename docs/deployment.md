@@ -40,9 +40,19 @@ The response has a `usage` object with `rolling`, `weekly`, and `monthly` window
 
 Run [`spike-probe.yml`](../.github/workflows/spike-probe.yml) manually to check the live endpoint URLs and response shape from outside the Worker.
 
+## Diagnostic events
+
+The agent keeps its last 1,000 diagnostic events (hops, holds and faults, never message text) in its own SQLite, outside backups. Debug events have their own 200 of those rows, so frequent ones can't push out warnings and errors. Read them with the admin credentials:
+
+```
+GET /api/admin/events?after=<id>&source=<source>&level=warn,error&limit=<1-500>
+```
+
+Every parameter is optional; `limit` defaults to 100. The answer is `{ events, health }`, oldest event first. It works whatever the agent's state, refused or in maintenance included, and writes nothing. A request the Worker refuses before it reaches the agent (a wrong webhook secret, relay token or admin token, a cross-site WebSocket) is never stored. It goes to Cloudflare's logs as a `"source":"worker"` event.
+
 ## Scheduled checks
 
-- [`heartbeat.yml`](../.github/workflows/heartbeat.yml) checks both deployed lanes daily at 14:17 UTC. It flags recent lost alarms, unhealthy agent state, and overdue schedules without a hold.
+- [`heartbeat.yml`](../.github/workflows/heartbeat.yml) checks both deployed lanes daily at 14:17 UTC. It flags recent lost alarms, unhealthy agent state, and overdue schedules without a hold. When a check fails, the report also lists the agent's last 10 warnings and errors from the diagnostic log. If those can't be read, the report says so in one line and the check still fails for its own reason.
 - [`evals.yml`](../.github/workflows/evals.yml) checks proactive replies against OpenCode Go on Mondays at 15:17 UTC using staging credentials and mocked fetch results.
 - [`canary.yml`](../.github/workflows/canary.yml) exercises the latest Pi Durable release on Mondays at 16:17 UTC. It runs the upgrade, checks, and tests in the runner. If a candidate fails, it creates or updates one open GitHub issue for that version. Use **Run workflow** to check a specific version or leave the input blank to check npm's latest. A version that isn't published on npm stops the run before the upgrade and opens no issue.
 

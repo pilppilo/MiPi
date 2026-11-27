@@ -4,6 +4,7 @@
  * token once Access is on, `Authorization: Bearer <ADMIN_TOKEN>` before.
  *
  *   GET  /api/admin/status
+ *   GET  /api/admin/events?after=&source=&level=&limit= → { events, health } (COD-235; any state, writes nothing)
  *   POST /api/admin/export/begin                      → export header (pauses the agent)
  *   GET  /api/admin/export/page?cursor=<json>         → { rows, next? }
  *   POST /api/admin/export/end                        → { consistent } (reopens the agent)
@@ -13,6 +14,13 @@
  *   POST /api/admin/restore-bookmark { bookmark, confirm }
  */
 import type { ExportCursor, ExportHeader, ExportRow } from "../agent/maintenance.ts";
+import type { DiagQuery } from "../agent/diag.ts";
+import { DIAG_LEVELS, type DiagLevel, MAX_DIAG_EVENTS } from "../protocol.ts";
+
+/** `GET /api/admin/events` answers this many events when no `limit` is given. */
+export const ADMIN_EVENTS_DEFAULT_LIMIT = 100;
+const MAX_SOURCE_CHARACTERS = 64;
+const LEVELS: ReadonlySet<string> = new Set(DIAG_LEVELS);
 
 const json = (body: unknown, status: number, headers?: HeadersInit): Response =>
   Response.json(body, { status, headers });
@@ -36,6 +44,52 @@ function parseCursor(value: string | null): ExportCursor | undefined {
   return cursor as ExportCursor;
 }
 
+const wholeNumber = (value: string, name: string, min: number, max: number): number => {
+  if (!/^\d+$/.test(value)) throw new BadRequest(`${name} must be a whole number`);
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < min || number > max) {
+    throw new BadRequest(`${name} must be from ${min} to ${max}`);
+  }
+  return number;
+};
+
+/** The events route's query, strictly: an unknown parameter, or a value out of range, is a 400. */
+export function parseEventsQuery(params: URLSearchParams): DiagQuery {
+  for (const name of params.keys()) {
+    if (!["after", "source", "level", "limit"].includes(name)) {
+      throw new BadRequest(`Unknown parameter ${name}`);
+    }
+  }
+  for (const name of ["after", "source", "level", "limit"]) {
+    if (params.getAll(name).length > 1) throw new BadRequest(`${name} is given twice`);
+  }
+  const after = params.get("after");
+  const source = params.get("source");
+  const level = params.get("level");
+  const limit = params.get("limit");
+  if (source !== null && (source.length === 0 || source.length > MAX_SOURCE_CHARACTERS)) {
+    throw new BadRequest(`source must be 1 to ${MAX_SOURCE_CHARACTERS} characters`);
+  }
+  let levels: DiagLevel[] | undefined;
+  if (level !== null) {
+    levels = level.split(",").map((item) => {
+      if (!LEVELS.has(item)) {
+        throw new BadRequest(
+          `level must be one or more of ${DIAG_LEVELS.join(", ")}, comma-separated`,
+        );
+      }
+      return item as DiagLevel;
+    });
+  }
+  return {
+    ...(after === null ? {} : { after: wholeNumber(after, "after", 0, Number.MAX_SAFE_INTEGER) }),
+    ...(source === null ? {} : { source }),
+    ...(levels === undefined ? {} : { levels: [...new Set(levels)] }),
+    limit:
+      limit === null ? ADMIN_EVENTS_DEFAULT_LIMIT : wholeNumber(limit, "limit", 1, MAX_DIAG_EVENTS),
+  };
+}
+
 export async function handleAdmin(request: Request, env: Env, path: string): Promise<Response> {
   const agent = env.AGENT.getByName(env.MIPI_OWNER);
   const route = `${request.method} ${path}`;
@@ -43,6 +97,11 @@ export async function handleAdmin(request: Request, env: Env, path: string): Pro
     switch (route) {
       case "GET /api/admin/status":
         return json(await agent.adminStatus(), 200);
+      case "GET /api/admin/events":
+        return json(
+          await agent.adminEvents(parseEventsQuery(new URL(request.url).searchParams)),
+          200,
+        );
       case "POST /api/admin/export/begin":
         return json(await agent.exportBegin(), 200);
       case "GET /api/admin/export/page":

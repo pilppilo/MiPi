@@ -275,6 +275,38 @@ export interface DiagEvent {
   readonly detail?: DiagDetail;
 }
 
+/** The most events one read returns (`GET /api/admin/events`, `diag.subscribe`). */
+export const MAX_DIAG_EVENTS = 500;
+export const DEFAULT_DIAG_TAIL = 200;
+
+/** Why proactive work waits, as the diagnostics show it (the gates' `ProactiveHold`). */
+export const DIAG_HOLDS = ["paused", "spend-cap", "provider-limit", "run-cap"] as const;
+export const PROACTIVE_OUTCOMES = ["sent", "quiet", "failed", "stopped"] as const;
+
+/** The agent's health beside its events (COD-235): what the Diagnostics page's summary strip and banner show. */
+export interface DiagHealth {
+  readonly state: "open" | "refused" | "maintenance";
+  /** Why it is refused, or which maintenance runs. */
+  readonly reason?: string;
+  /** When the Durable Object's alarm is set for, ms since the epoch; absent when none is. */
+  readonly alarmAt?: number;
+  readonly alarmLostAt?: number;
+  readonly held?: (typeof DIAG_HOLDS)[number];
+  readonly heldUntil?: number;
+  /** Schedules more than two hours past due with no known hold; 0 while not open. */
+  readonly overdueSchedules: number;
+  readonly lastProactiveRun?: {
+    readonly at: number;
+    readonly outcome: (typeof PROACTIVE_OUTCOMES)[number];
+  };
+}
+
+/** Events and health together: the admin route's answer and `diag.subscribe`'s first page. */
+export interface DiagSnapshot {
+  readonly events: readonly DiagEvent[];
+  readonly health: DiagHealth;
+}
+
 export type ClientCommand =
   | {
       readonly type: "presence.typing";
@@ -369,6 +401,21 @@ export type ClientCommand =
       readonly conversationId: number;
       readonly model?: string;
       readonly profile?: string;
+    }
+  | {
+      /**
+       * Starts the diagnostic live tail on this socket (COD-235): the result carries the newest `limit` events (or those
+       * after `after`) and the health, then each new event comes as `diag.event`. Kept across hibernation.
+       */
+      readonly type: "diag.subscribe";
+      readonly requestId: string;
+      readonly limit?: number;
+      readonly after?: number;
+    }
+  | {
+      /** Stops the live tail on this socket. */
+      readonly type: "diag.unsubscribe";
+      readonly requestId: string;
     };
 export type ClientCommandType = Exclude<ClientCommand["type"], "presence.typing">;
 
@@ -386,6 +433,8 @@ export type CommandResult =
       readonly options?: Options;
       /** For `usage.read`. */
       readonly usage?: UsageReadout;
+      /** For `diag.subscribe`. */
+      readonly diag?: DiagSnapshot;
     }
   | {
       readonly type: "command.result";
@@ -436,6 +485,11 @@ export type ServerEvent =
       readonly type: "presence.typing";
       readonly conversationId: number;
       readonly usernames: readonly string[];
+    }
+  | {
+      /** One new diagnostic event, sent only to sockets that subscribed (`diag.subscribe`). */
+      readonly type: "diag.event";
+      readonly event: DiagEvent;
     }
   | CommandResult
   | {
@@ -625,6 +679,8 @@ const commandTypes = new Set<ClientCommandType>([
   "options.list",
   "usage.read",
   "conversation.configure",
+  "diag.subscribe",
+  "diag.unsubscribe",
 ]);
 
 const requireCommandType = (value: unknown): ClientCommandType => {
@@ -775,6 +831,111 @@ const parseConversationSummary = (value: unknown): ConversationSummary => {
   return summary;
 };
 
+const LEVEL_SET: ReadonlySet<string> = new Set(DIAG_LEVELS);
+const OUTCOME_SET: ReadonlySet<string> = new Set(DIAG_OUTCOMES);
+const HOLD_SET: ReadonlySet<string> = new Set(DIAG_HOLDS);
+const RUN_OUTCOME_SET: ReadonlySet<string> = new Set(PROACTIVE_OUTCOMES);
+
+const optionalFinite = (value: unknown, name: string): number | undefined =>
+  value === undefined ? undefined : finite(value, name);
+
+const optionalString = (value: unknown, name: string): string | undefined => {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") throw new Error(`${name} is invalid`);
+  return value;
+};
+
+/** One diagnostic event off the wire (or the admin API): every field checked, `detail` flat. */
+export const parseDiagEvent = (value: unknown): DiagEvent => {
+  if (
+    !isRecord(value) ||
+    typeof value.level !== "string" ||
+    !LEVEL_SET.has(value.level) ||
+    typeof value.outcome !== "string" ||
+    !OUTCOME_SET.has(value.outcome) ||
+    typeof value.source !== "string" ||
+    typeof value.kind !== "string" ||
+    typeof value.summary !== "string"
+  ) {
+    throw new Error("Diagnostic event is invalid");
+  }
+  let detail: Record<string, string | number | boolean> | undefined;
+  if (value.detail !== undefined) {
+    if (!isRecord(value.detail)) throw new Error("Diagnostic event detail is invalid");
+    detail = {};
+    for (const [key, item] of Object.entries(value.detail)) {
+      if (
+        typeof item !== "string" &&
+        typeof item !== "boolean" &&
+        !(typeof item === "number" && Number.isFinite(item))
+      ) {
+        throw new Error("Diagnostic event detail is invalid");
+      }
+      detail[key] = item;
+    }
+  }
+  const reqId = optionalString(value.reqId, "diagnostic event reqId");
+  const taskId = optionalString(value.taskId, "diagnostic event taskId");
+  const convId = optionalId(value.convId, "diagnostic event convId");
+  const durationMs = optionalFinite(value.durationMs, "diagnostic event durationMs");
+  return {
+    id: requireId(value.id, "diagnostic event id"),
+    ts: finite(value.ts, "diagnostic event ts"),
+    level: value.level as DiagLevel,
+    source: value.source,
+    kind: value.kind,
+    outcome: value.outcome as DiagOutcome,
+    summary: value.summary,
+    ...(reqId === undefined ? {} : { reqId }),
+    ...(convId === undefined ? {} : { convId }),
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(durationMs === undefined ? {} : { durationMs }),
+    ...(detail === undefined ? {} : { detail }),
+  };
+};
+
+export const parseDiagHealth = (value: unknown): DiagHealth => {
+  if (
+    !isRecord(value) ||
+    (value.state !== "open" && value.state !== "refused" && value.state !== "maintenance") ||
+    (value.held !== undefined && (typeof value.held !== "string" || !HOLD_SET.has(value.held)))
+  ) {
+    throw new Error("Diagnostic health is invalid");
+  }
+  let lastProactiveRun: DiagHealth["lastProactiveRun"];
+  if (value.lastProactiveRun !== undefined) {
+    const run = value.lastProactiveRun;
+    if (!isRecord(run) || typeof run.outcome !== "string" || !RUN_OUTCOME_SET.has(run.outcome)) {
+      throw new Error("Diagnostic health last run is invalid");
+    }
+    lastProactiveRun = {
+      at: finite(run.at, "diagnostic health last run at"),
+      outcome: run.outcome as NonNullable<DiagHealth["lastProactiveRun"]>["outcome"],
+    };
+  }
+  const reason = optionalString(value.reason, "diagnostic health reason");
+  const alarmAt = optionalFinite(value.alarmAt, "diagnostic health alarmAt");
+  const alarmLostAt = optionalFinite(value.alarmLostAt, "diagnostic health alarmLostAt");
+  const heldUntil = optionalFinite(value.heldUntil, "diagnostic health heldUntil");
+  return {
+    state: value.state,
+    ...(reason === undefined ? {} : { reason }),
+    ...(alarmAt === undefined ? {} : { alarmAt }),
+    ...(alarmLostAt === undefined ? {} : { alarmLostAt }),
+    ...(value.held === undefined ? {} : { held: value.held as NonNullable<DiagHealth["held"]> }),
+    ...(heldUntil === undefined ? {} : { heldUntil }),
+    overdueSchedules: finite(value.overdueSchedules, "diagnostic health overdueSchedules"),
+    ...(lastProactiveRun === undefined ? {} : { lastProactiveRun }),
+  };
+};
+
+export const parseDiagSnapshot = (value: unknown): DiagSnapshot => {
+  if (!isRecord(value) || !Array.isArray(value.events)) {
+    throw new Error("Diagnostic snapshot is invalid");
+  }
+  return { events: value.events.map(parseDiagEvent), health: parseDiagHealth(value.health) };
+};
+
 export function parseClientCommand(message: string): ClientCommand {
   let value: unknown;
   try {
@@ -867,7 +1028,27 @@ export function parseClientCommand(message: string): ClientCommand {
     }
     case "options.list":
     case "usage.read":
+    case "diag.unsubscribe":
       return { type: value.type, requestId };
+    case "diag.subscribe": {
+      const limit = value.limit;
+      if (
+        limit !== undefined &&
+        (typeof limit !== "number" ||
+          !Number.isSafeInteger(limit) ||
+          limit < 1 ||
+          limit > MAX_DIAG_EVENTS)
+      ) {
+        throw new InvalidClientCommand(`limit must be an integer from 1 to ${MAX_DIAG_EVENTS}`);
+      }
+      const after = optionalCommandId(value.after, "after");
+      return {
+        type: value.type,
+        requestId,
+        ...(limit === undefined ? {} : { limit }),
+        ...(after === undefined ? {} : { after }),
+      };
+    }
     case "conversation.configure": {
       const model = optionalChoiceId(value.model, "model");
       const profile = optionalChoiceId(value.profile, "profile");
@@ -1003,6 +1184,7 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
             : { page: value.page as unknown as { items: EntryRecord[]; next?: Cursor } }),
           ...(value.options === undefined ? {} : { options: parseOptions(value.options) }),
           ...(value.usage === undefined ? {} : { usage: parseUsageReadout(value.usage) }),
+          ...(value.diag === undefined ? {} : { diag: parseDiagSnapshot(value.diag) }),
         };
       }
       if (value.ok === false) {
@@ -1016,6 +1198,8 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
       }
       throw new Error("Command result payload is invalid");
     }
+    case "diag.event":
+      return { type: value.type, event: parseDiagEvent(value.event) };
     case "error":
       return { type: value.type, error: requireError(value.error) };
     default:

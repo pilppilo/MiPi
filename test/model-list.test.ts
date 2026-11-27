@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 import { describe, expect, it } from "vitest";
 import { ModelList, pickableModels } from "../src/agent/model-list.ts";
 import { DEFAULT_MODEL_ID } from "../src/agent/pi/models.ts";
@@ -69,15 +70,30 @@ describe("model list", () => {
 
   it("does not cache a failed load", async () => {
     let fail = true;
-    const list = new ModelList([
-      goWith(async () => {
-        if (fail) throw new Error("offline");
-        return [DEFAULT_MODEL_ID];
-      }),
-    ]);
+    const diag: DiagInput[] = [];
+    const list = new ModelList(
+      [
+        goWith(async () => {
+          if (fail) throw new Error("offline");
+          return [DEFAULT_MODEL_ID];
+        }),
+      ],
+      fetch,
+      { emit: (event) => diag.push(event) },
+    );
     await expect(list.models()).rejects.toThrow("offline");
     fail = false;
     await expect(list.models()).resolves.toHaveLength(1);
+    // The failed read is an event; the good one isn't.
+    expect(diag).toEqual([
+      expect.objectContaining({
+        source: "provider",
+        kind: "provider.models_failed",
+        level: "warn",
+        detail: { provider: "opencode-go" },
+      }),
+    ]);
+    expect(diag[0]!.summary).toContain("offline");
   });
 
   it("lists each source's models in source order, and takes a model's provider from its source", async () => {

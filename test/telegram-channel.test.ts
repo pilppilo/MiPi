@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 /**
  * The Telegram door inside the agent: admission, receipts, commands, replies and the outbox, on a real harness with a
  * faux model over Durable Object SQLite. A "restart" closes the harness and the channel and opens new ones on the same
@@ -77,6 +78,8 @@ interface Agent {
   /** Core's answer settlement, which turns the door's settled inputs into replies (`answers.ts`). */
   readonly answers: AnswerSettlement;
   readonly sent: Sent[];
+  /** The door's diagnostic events, in order. */
+  readonly diag: DiagInput[];
   /** Waits for every turn, then runs what the alarm would. */
   settle(): Promise<void>;
   restart(options?: AgentOptions): Promise<Agent>;
@@ -161,7 +164,9 @@ async function openAgent(
   const reports: string[] = [];
   const behaviour = options.send ?? delivered;
   let calls = 0;
+  const diag: DiagInput[] = [];
   const channel = new TelegramChannelRuntime({
+    diag: { emit: (event) => diag.push(event) },
     harness,
     owner: "jerome",
     timeZone: "America/Chicago",
@@ -215,6 +220,7 @@ async function openAgent(
     channel,
     answers,
     sent,
+    diag,
     settle: async () => {
       // Turns, then what the alarm would do; let window deadlines, pacing and retry waits pass on the test clock.
       for (let rounds = 0; rounds < 100; rounds++) {
@@ -312,6 +318,15 @@ describe("Telegram admission", () => {
         );
         expect(await channelState(agent.harness)).toMatchObject({ inputs: [], commands: [] });
         expect(agent.channel.wake()).toEqual({ active: false });
+        // In, queued, out: ids and outcomes only, never the chat's text.
+        expect(agent.diag.map(({ kind, outcome }) => `${kind}:${outcome}`)).toEqual([
+          "telegram.admit:ok",
+          "telegram.outbox_enqueued:ok",
+          "telegram.send_ok:ok",
+        ]);
+        expect(agent.diag.every(({ source }) => source === "door:telegram")).toBe(true);
+        expect(agent.diag[0]).toMatchObject({ reqId: "tg:1", detail: { update: "text" } });
+        expect(JSON.stringify(agent.diag)).not.toMatch(/Hello/);
       } finally {
         await agent.close();
       }
@@ -935,6 +950,12 @@ describe("Telegram replies", () => {
         const [reply] = (await outbox(agent.harness)).replies;
         expect(reply!.chunks[0]).toMatchObject({ status: "failed" });
         expect(agent.channel.wake()).toEqual({ active: false });
+        expect(agent.diag.find(({ kind }) => kind === "telegram.send_failed")).toMatchObject({
+          level: "error",
+          outcome: "fault",
+          detail: { result: "failed" },
+        });
+        expect(JSON.stringify(agent.diag)).not.toContain("Nobody hears this");
       } finally {
         await agent.close();
       }
@@ -958,6 +979,11 @@ describe("Telegram replies", () => {
         expect(attempts).toHaveLength(2);
         expect(attempts[1]! - attempts[0]!).toBeGreaterThanOrEqual(30_000);
         expect(agent.sent).toEqual([{ chatId: CHAT, text: "Patience" }]);
+        expect(
+          agent.diag
+            .filter(({ kind }) => kind.startsWith("telegram.send"))
+            .map(({ kind, outcome }) => `${kind}:${outcome}`),
+        ).toEqual(["telegram.send_retry:retry", "telegram.send_ok:ok"]);
       } finally {
         await agent.close();
       }

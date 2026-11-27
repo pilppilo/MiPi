@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 /**
  * The usage readout (M9, COD-193): each provider's own figures where MiPi can read them (OpenCode Go first), MiPi's
  * own estimate always, and the same readout on every door (Telegram `/usage` here; the web and admin status use the
@@ -179,7 +180,8 @@ describe("the provider cache", () => {
         return { provider: "p", label: "P", status: "ok", windows: [] };
       },
     };
-    const cache = new ProviderUsageCache([source]);
+    const diag: DiagInput[] = [];
+    const cache = new ProviderUsageCache([source], fetch, { emit: (event) => diag.push(event) });
     expect(await cache.read(0)).toEqual([
       { provider: "p", label: "P", status: "unavailable", reason: "down" },
     ]);
@@ -194,6 +196,13 @@ describe("the provider cache", () => {
     expect(cache.cached(USAGE_CACHE_MS + 1)).toHaveLength(1);
     expect(cache.cached(2 * USAGE_CACHE_MS)).toEqual([]);
     expect(reads).toBe(2);
+    // One event per real read, none for a cached answer.
+    expect(diag.map(({ kind, level }) => `${kind}:${level}`)).toEqual([
+      "provider.usage_failed:warn",
+      "provider.usage_ok:debug",
+    ]);
+    expect(diag[0]).toMatchObject({ source: "provider", detail: { provider: "p" } });
+    expect(diag[0]!.summary).toContain("down");
   });
 });
 
