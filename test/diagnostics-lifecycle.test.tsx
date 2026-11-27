@@ -1,7 +1,7 @@
 import { expect, it, vi } from "vitest";
 import { DiagnosticsSection } from "../src/client/DiagnosticsSection.tsx";
 import { SettingsPanel } from "../src/client/SettingsPanel.tsx";
-import { initialDiagState } from "../src/client/diag-buffer.ts";
+import { initialDiagState } from "../src/client/session/diag-buffer.ts";
 
 const hooks = vi.hoisted(() => ({
   effects: [] as Array<() => void | (() => void)>,

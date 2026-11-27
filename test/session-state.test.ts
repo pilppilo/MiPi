@@ -6,7 +6,7 @@ import {
   initialSessionState,
   sessionReducer,
   type SessionState,
-} from "../src/client/session-state.ts";
+} from "../src/client/session/session-state.ts";
 import {
   formatScheduledInstruction,
   MAX_BOT_NAME_CHARACTERS,

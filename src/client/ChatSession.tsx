@@ -19,7 +19,7 @@ import {
   ROOT_CONVERSATION_ID,
   type UsageReadout,
 } from "../protocol.ts";
-import type { ConversationSnapshot } from "./session-state.ts";
+import type { ConversationSnapshot } from "./session/session-state.ts";
 import {
   activityByBot,
   advanceLastRead,
@@ -32,10 +32,11 @@ import {
   saveLastRead,
   unreadByBot,
   unreadIds,
-} from "./bots-list.ts";
+} from "./session/bots-list.ts";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { askMiPi } from "./diagnostics.ts";
+import { webPlatform } from "./platform/web.ts";
 import { Markdown } from "./Markdown.tsx";
 import { MessageText, TranscriptList } from "./Transcript.tsx";
 import { usePiSession } from "./usePiSession.ts";
@@ -54,26 +55,21 @@ const conversationLabel = ({ id, parent, owner, title, name }: ConversationSumma
   return "New conversation";
 };
 
-/** Which bots have something unread, remembered in this browser (`localStorage`), the open one never. */
+/** Which bots have something unread, remembered on this device (`Platform.storage`), the open one never. */
 function useUnread(
   sessionId: string,
   conversations: readonly ConversationSummary[],
   activeConversationId: number | undefined,
 ): ReadonlySet<number> {
-  const storage = (): Storage | undefined => {
-    try {
-      return window.localStorage;
-    } catch {
-      return undefined;
-    }
-  };
-  const [lastRead, setLastRead] = useState<LastRead>(() => loadLastRead(storage(), sessionId));
+  const [lastRead, setLastRead] = useState<LastRead>(() =>
+    loadLastRead(webPlatform.storage, sessionId),
+  );
   const next = advanceLastRead(lastRead, conversations, activeConversationId);
   useEffect(() => {
     if (next === lastRead) return;
     setLastRead(next);
-    saveLastRead(storage(), sessionId, next);
-  });
+    saveLastRead(webPlatform.storage, sessionId, next);
+  }, [next, lastRead, sessionId]);
   return unreadIds(next, conversations);
 }
 

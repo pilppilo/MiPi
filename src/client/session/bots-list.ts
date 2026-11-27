@@ -2,7 +2,8 @@
  * The web list of bots (COD-197): which conversations it shows, what each is doing, and which have something unread.
  * Pure functions over the session's summaries and activity graph, so the sidebar only draws them.
  */
-import type { ConversationSummary, TaskGraph, TaskGraphNode } from "../protocol.ts";
+import type { ConversationSummary, TaskGraph, TaskGraphNode } from "../../protocol.ts";
+import type { PlatformStorage } from "./platform.ts";
 
 /** MiPi first, then purpose bots. Cobots and subagents hang from their parent conversations. */
 export function listedBots(conversations: readonly ConversationSummary[]): {
@@ -165,16 +166,13 @@ export function unreadIds(
   return unread;
 }
 
-/** Where a session's `LastRead` is kept: this browser only, so it can come back empty, and storage can throw. */
+/** Where a session's `LastRead` is kept (`Platform.storage`): this device only, so it can come back empty. */
 export const lastReadKey = (sessionId: string): string => `mipi:last-read:${sessionId}`;
 
-export function loadLastRead(
-  storage: Pick<Storage, "getItem"> | undefined,
-  sessionId: string,
-): LastRead {
+export function loadLastRead(storage: Pick<PlatformStorage, "get">, sessionId: string): LastRead {
   try {
-    const raw = storage?.getItem(lastReadKey(sessionId));
-    if (raw === null || raw === undefined) return NOTHING_READ;
+    const raw = storage.get(lastReadKey(sessionId));
+    if (raw === undefined) return NOTHING_READ;
     const parsed: unknown = JSON.parse(raw);
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return NOTHING_READ;
     const { seeded, entries } = parsed as { seeded?: unknown; entries?: unknown };
@@ -194,15 +192,12 @@ export function loadLastRead(
 }
 
 export function saveLastRead(
-  storage: Pick<Storage, "setItem"> | undefined,
+  storage: Pick<PlatformStorage, "set">,
   sessionId: string,
   lastRead: LastRead,
 ): void {
-  try {
-    storage?.setItem(lastReadKey(sessionId), JSON.stringify(lastRead));
-  } catch {
-    // Storage full or off: the dots just don't survive a reload.
-  }
+  // Storage full or off: the platform drops the write, and the dots just don't survive a reload.
+  storage.set(lastReadKey(sessionId), JSON.stringify(lastRead));
 }
 
 /** One row of Settings → Archived (COD-201). */

@@ -5,6 +5,7 @@ import {
   extensionOf,
   importSpecifiers,
   runtimeSpecifiers,
+  sessionCoreProblems,
   standaloneProblems,
 } from "../scripts/boundaries.ts";
 
@@ -104,5 +105,44 @@ describe("standalone scripts", () => {
     expect(standaloneProblems(["scripts/missing.ts"], (path) => files[path])).toEqual([
       expect.objectContaining({ file: "scripts/missing.ts", reason: "the file can't be read" }),
     ]);
+  });
+});
+
+// COD-245: the web session core is plain TypeScript a native shell could run.
+describe("the session core boundary", () => {
+  it("allows the protocol, lib and the core's own files", () => {
+    expect(
+      sessionCoreProblems([
+        {
+          path: "src/client/session/session-client.ts",
+          text: 'import { x } from "../../protocol.ts";\nimport type { P } from "./platform.ts";\nimport { y } from "../../lib/markdown.ts";',
+        },
+        // Outside the core, anything goes (lint polices the rest of the client).
+        { path: "src/client/usePiSession.ts", text: 'import { useMemo } from "react";' },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("refuses React, PartySocket and the rest of the client, type-only imports too", () => {
+    const problems = sessionCoreProblems([
+      {
+        path: "src/client/session/session-client.ts",
+        text: [
+          'import { useState } from "react";',
+          'import type { Root } from "react-dom/client";',
+          'import PartySocket from "partysocket";',
+          'import { webPlatform } from "../platform/web.ts";',
+          'import type { PiSession } from "../usePiSession.ts";',
+        ].join("\n"),
+      },
+    ]);
+    expect(problems.map(({ specifier }) => specifier)).toEqual([
+      "react",
+      "react-dom/client",
+      "partysocket",
+      "../platform/web.ts",
+      "../usePiSession.ts",
+    ]);
+    expect(problems[3]!.reason).toContain("src/client/platform/web.ts");
   });
 });

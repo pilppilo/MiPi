@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CommandOutbox } from "../src/client/command-outbox.ts";
+import { CommandOutbox } from "../src/client/session/command-outbox.ts";
 import { KeyedSerialQueue } from "../src/lib/serial.ts";
 
 const create = (requestId: string) =>

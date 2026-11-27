@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { quietAnswers, TranscriptList } from "../src/client/Transcript.tsx";
-import type { TranscriptEntry, ToolProgress } from "../src/client/session-state.ts";
+import type { TranscriptEntry, ToolProgress } from "../src/client/session/session-state.ts";
 
 const toolRequest: TranscriptEntry = {
   id: 2,

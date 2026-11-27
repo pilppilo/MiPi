@@ -12,7 +12,7 @@ import {
   unreadByBot,
   unreadIds,
   restoreHintFor,
-} from "../src/client/bots-list.ts";
+} from "../src/client/session/bots-list.ts";
 import type { TaskGraph } from "../src/agent/pi/shared.ts";
 import type { ConversationSummary } from "../src/protocol.ts";
 
@@ -154,11 +154,12 @@ describe("the bots list (COD-197)", () => {
     expect(unreadIds(advanceLastRead(seeded, later, 4), later)).toEqual(new Set([9]));
   });
 
-  it("keeps what was read in this browser, and survives storage that fails or holds junk", () => {
+  it("keeps what was read on this device, and survives storage that holds junk", () => {
+    // `Platform.storage`: it never throws (a failing browser storage is guarded in `webPlatform`).
     const items = new Map<string, string>();
     const storage = {
-      getItem: (key: string) => items.get(key) ?? null,
-      setItem: (key: string, value: string) => void items.set(key, value),
+      get: (key: string) => items.get(key),
+      set: (key: string, value: string) => void items.set(key, value),
     };
     saveLastRead(storage, "jerome", { seeded: true, entries: { "4": 10 } });
     expect(loadLastRead(storage, "jerome")).toEqual({ seeded: true, entries: { "4": 10 } });
@@ -170,17 +171,6 @@ describe("the bots list (COD-197)", () => {
       JSON.stringify({ seeded: true, entries: { "4": "x", "9": 3 } }),
     );
     expect(loadLastRead(storage, "jerome")).toEqual({ seeded: true, entries: { "9": 3 } });
-    const throwing = {
-      getItem: () => {
-        throw new Error("denied");
-      },
-      setItem: () => {
-        throw new Error("full");
-      },
-    };
-    expect(loadLastRead(throwing, "jerome")).toEqual(NOTHING_READ);
-    expect(() => saveLastRead(throwing, "jerome", NOTHING_READ)).not.toThrow();
-    expect(loadLastRead(undefined, "jerome")).toEqual(NOTHING_READ);
   });
 });
 

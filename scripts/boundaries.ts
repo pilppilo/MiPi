@@ -80,6 +80,45 @@ export function boundaryProblems(files: readonly SourceFile[]): BoundaryProblem[
   return problems;
 }
 
+const SESSION_CORE = "src/client/session/";
+/** Packages that need a DOM or are a view framework: the host's side, never the session core's. */
+const HOST_PACKAGES = ["react", "react-dom", "partysocket"];
+
+/**
+ * The web session core (COD-245): `src/client/session/` is plain TypeScript a native shell could run. Its files never
+ * import React, ReactDOM or PartySocket, nor any of `src/client/` outside `session/` (the views, `platform/`): the host
+ * hands it a `Transport` and a `Platform` instead. Type-only imports count too. Its no-DOM build
+ * (`tsconfig.session.json`) and lint (`no-restricted-globals`) cover the globals.
+ */
+export function sessionCoreProblems(files: readonly SourceFile[]): BoundaryProblem[] {
+  const problems: BoundaryProblem[] = [];
+  for (const file of files) {
+    if (!file.path.startsWith(SESSION_CORE)) continue;
+    for (const specifier of importSpecifiers(file.text)) {
+      if (!specifier.startsWith(".")) {
+        const name = specifier.split("/")[0]!;
+        if (HOST_PACKAGES.includes(name)) {
+          problems.push({
+            file: file.path,
+            specifier,
+            reason: `the session core never imports ${name}: the host adapts it (src/client/usePiSession.ts, src/client/platform/)`,
+          });
+        }
+        continue;
+      }
+      const target = toPosix(normalize(join(dirname(file.path), specifier)));
+      if (target.startsWith("src/client/") && !target.startsWith(SESSION_CORE)) {
+        problems.push({
+          file: file.path,
+          specifier,
+          reason: `the session core imports ${target}: it never reaches the rest of src/client/ (take a Platform or Transport instead)`,
+        });
+      }
+    }
+  }
+  return problems;
+}
+
 /**
  * The module specifiers a file loads when it runs: every static import and re-export but those that are types as a
  * whole statement (`import type …`, `export type …`), which Node's type stripping removes. An inline `{ type X }`

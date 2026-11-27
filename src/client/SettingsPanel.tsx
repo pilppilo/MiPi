@@ -1,7 +1,7 @@
 import { type RefObject, useState } from "react";
 import type { ConversationSummary } from "../protocol.ts";
-import { type ArchivedEntry, archivedEntries } from "./bots-list.ts";
-import type { DiagState } from "./diag-buffer.ts";
+import { type ArchivedEntry, archivedEntries } from "./session/bots-list.ts";
+import type { DiagState } from "./session/diag-buffer.ts";
 import { DiagnosticsSection } from "./DiagnosticsSection.tsx";
 
 /**

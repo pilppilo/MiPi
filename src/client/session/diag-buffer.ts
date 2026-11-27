@@ -3,7 +3,7 @@
  * (`session-state.ts`) so a live frame never touches the conversation state. At most `DIAG_CLIENT_MAX` events, one per id,
  * oldest first.
  */
-import type { DiagEvent, DiagHealth } from "../protocol.ts";
+import type { DiagEvent, DiagHealth } from "../../protocol.ts";
 
 export const DIAG_CLIENT_MAX = 500;
 
