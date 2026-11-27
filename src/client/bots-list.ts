@@ -2,8 +2,7 @@
  * The web list of bots (COD-197): which conversations it shows, what each is doing, and which have something unread.
  * Pure functions over the session's summaries and activity graph, so the sidebar only draws them.
  */
-import type { TaskGraph, TaskGraphNode } from "../agent/pi/shared.ts";
-import type { ConversationSummary } from "../protocol.ts";
+import type { ConversationSummary, TaskGraph, TaskGraphNode } from "../protocol.ts";
 
 /** MiPi first, then purpose bots. Cobots and subagents hang from their parent conversations. */
 export function listedBots(conversations: readonly ConversationSummary[]): {

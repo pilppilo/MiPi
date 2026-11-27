@@ -7,9 +7,15 @@ import type { PiSession } from "../src/client/usePiSession.ts";
 vi.mock("../src/client/usePiSession.ts", () => ({
   usePiSession: (): Pick<
     PiSession,
-    "status" | "conversations" | "activeConversationId" | "activeConversation" | "usage"
+    | "status"
+    | "capabilities"
+    | "conversations"
+    | "activeConversationId"
+    | "activeConversation"
+    | "usage"
   > => ({
     status: "connected",
+    capabilities: new Set(["activity", "diagnostics", "usage"]),
     conversations: [{ id: 1 }],
     activeConversationId: 1,
     activeConversation: {

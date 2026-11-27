@@ -86,6 +86,8 @@ import {
 } from "./pi/storage.ts";
 import { MIPI_VERSION, PI_DURABLE_VERSION } from "../version.ts";
 import {
+  capabilityList,
+  CORE_CAPABILITIES,
   InvalidClientCommand,
   MAX_CLIENT_FRAME_CHARACTERS,
   parseClientCommand,
@@ -1998,15 +2000,34 @@ export class MipiAgent extends DurableObject<Env> {
   async #sendSessionSnapshot(socket: WebSocket): Promise<void> {
     this.#send(socket, {
       type: "session.snapshot",
-      session: { conversations: await this.#sessionSnapshot(), activity: this.#activity.value },
+      session: {
+        conversations: await this.#sessionSnapshot(),
+        activity: this.#activity.value,
+        capabilities: this.#capabilities(),
+      },
     });
   }
 
   async #broadcastSessionSnapshot(): Promise<void> {
     this.#broadcast({
       type: "session.snapshot",
-      session: { conversations: await this.#sessionSnapshot(), activity: this.#activity.value },
+      session: {
+        conversations: await this.#sessionSnapshot(),
+        activity: this.#activity.value,
+        capabilities: this.#capabilities(),
+      },
     });
+  }
+
+  /**
+   * What the agent advertises beyond chat (COD-246): core's capabilities and the active extensions'. Every snapshot
+   * carries the whole set, so a door decides which panels to show from one frame.
+   */
+  #capabilities(): readonly string[] {
+    return capabilityList([
+      ...CORE_CAPABILITIES,
+      ...(this.#composition?.extensions.capabilities ?? []),
+    ]);
   }
 
   #sessionSnapshot(): Promise<readonly ConversationSummary[]> {

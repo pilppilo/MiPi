@@ -196,11 +196,17 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const activeConversationId = session.activeConversationId;
   const activeConversation = session.activeConversation;
   const activeSummary = session.conversations.find(({ id }) => id === activeConversationId);
+  // Optional panels follow what the agent advertises (COD-246): one it doesn't is simply not there.
+  const hasUsage = session.capabilities.has("usage");
+  const hasActivity = session.capabilities.has("activity");
+  const hasDiagnostics = session.capabilities.has("diagnostics");
+  const activityGraph = hasActivity ? session.activity : undefined;
+  const usage = hasUsage ? session.usage : undefined;
   const listed = listedBots(session.conversations);
-  const activity = activityByBot(session.conversations, session.activity);
+  const activity = activityByBot(session.conversations, activityGraph);
   const ownUnread = useUnread(sessionId, session.conversations, activeConversationId);
   const unread = unreadByBot(session.conversations, ownUnread);
-  const activityCount = Object.keys(session.activity?.tasks ?? {}).length;
+  const activityCount = Object.keys(activityGraph?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
   // An archived conversation opens read-only (COD-201): the agent refuses its messages too.
   const readOnly = activeSummary?.archivedAt !== undefined;
@@ -487,7 +493,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   return (
     <div
-      className={`session-workspace${activityOpen ? " session-workspace--activity-open" : ""}${settingsOpen ? " session-workspace--settings-open" : ""}`}
+      className={`session-workspace${hasActivity && activityOpen ? " session-workspace--activity-open" : ""}${settingsOpen ? " session-workspace--settings-open" : ""}`}
     >
       <aside className="session-sidebar">
         <header className="session-header">
@@ -511,8 +517,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           <p className="connection-status" role="status">
             {statusLabel[session.status]}
           </p>
-          {session.usage === undefined ? null : <UsageLine usage={session.usage} />}
-          {session.usage?.limits?.map((limit) => (
+          {usage === undefined ? null : <UsageLine usage={usage} />}
+          {usage?.limits?.map((limit) => (
             <p key={limit.provider} className="usage-line usage-line--held" role="status">
               {limit.text}
             </p>
@@ -611,16 +617,18 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             <h2 ref={conversationHeadingRef} id="transcript-heading" tabIndex={-1}>
               {activeSummary === undefined ? "Conversation" : conversationLabel(activeSummary)}
             </h2>
-            <button
-              ref={activityToggleRef}
-              className="activity-toggle"
-              type="button"
-              aria-controls="activity-panel"
-              aria-expanded={activityOpen}
-              onClick={toggleActivity}
-            >
-              Activity <span aria-hidden="true">{activityCount}</span>
-            </button>
+            {hasActivity ? (
+              <button
+                ref={activityToggleRef}
+                className="activity-toggle"
+                type="button"
+                aria-controls="activity-panel"
+                aria-expanded={activityOpen}
+                onClick={toggleActivity}
+              >
+                Activity <span aria-hidden="true">{activityCount}</span>
+              </button>
+            ) : null}
           </div>
           {!readOnly ? null : (
             <div className="read-only-banner" role="status">
@@ -841,22 +849,24 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
         </form>
       </main>
 
-      <ActivityPanel
-        graph={session.activity}
-        activeConversationId={activeConversationId}
-        onClose={closeActivity}
-        closeButtonRef={activityCloseRef}
-        onOpenConversation={(conversationId) => {
-          if (conversationId !== session.activeConversationId) {
-            window.history.pushState(null, "", `?conversation=${conversationId}`);
-            session.openConversation(conversationId);
-          }
-          if (compactActivityLayout()) {
-            setActivityOpen(false);
-            requestAnimationFrame(() => conversationHeadingRef.current?.focus());
-          }
-        }}
-      />
+      {hasActivity ? (
+        <ActivityPanel
+          graph={activityGraph}
+          activeConversationId={activeConversationId}
+          onClose={closeActivity}
+          closeButtonRef={activityCloseRef}
+          onOpenConversation={(conversationId) => {
+            if (conversationId !== session.activeConversationId) {
+              window.history.pushState(null, "", `?conversation=${conversationId}`);
+              session.openConversation(conversationId);
+            }
+            if (compactActivityLayout()) {
+              setActivityOpen(false);
+              requestAnimationFrame(() => conversationHeadingRef.current?.focus());
+            }
+          }}
+        />
+      ) : null}
 
       {settingsOpen ? (
         <SettingsPanel
@@ -866,12 +876,16 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           onRestore={(conversationId) => session.restoreBot(conversationId)}
           onClose={closeSettings}
           closeButtonRef={settingsCloseRef}
-          diagnostics={{
-            diag: session.diag,
-            onSubscribe: session.subscribeDiag,
-            onUnsubscribe: session.unsubscribeDiag,
-            onAskMiPi: askMiPiFromSettings,
-          }}
+          diagnostics={
+            hasDiagnostics
+              ? {
+                  diag: session.diag,
+                  onSubscribe: session.subscribeDiag,
+                  onUnsubscribe: session.unsubscribeDiag,
+                  onAskMiPi: askMiPiFromSettings,
+                }
+              : undefined
+          }
         />
       ) : null}
     </div>

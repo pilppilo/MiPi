@@ -18,6 +18,7 @@ import type { OriginRegistration, Origins } from "./origin.ts";
 import type { ProviderRegistration } from "./providers.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
 import type { DiagSink } from "./diag.ts";
+import { capabilityList, isCapabilityId } from "../protocol.ts";
 
 /** `builtin` ships on by default; `optional` is added at build time (an npm extension is one too, on Workers). */
 export type ExtensionTier = "builtin" | "optional";
@@ -87,6 +88,12 @@ export interface MipiExtension {
   readonly schedules?: ScheduleReader;
   /** A provider's usage reader and model list (`providers.ts`). Not registered for an extension that was replaced. */
   readonly providers?: readonly ProviderRegistration[];
+  /**
+   * Door-agnostic domain capability ids it adds (COD-246), such as `memory.search`: what the agent can do, never a UI
+   * label, icon or layout hint (each door maps ids to its own panels). Advertised in `session.snapshot` only while the
+   * extension is active: a replaced one advertises nothing.
+   */
+  readonly capabilities?: readonly string[];
 }
 
 /** One replacement, for the startup report and the admin status. */
@@ -108,6 +115,8 @@ export interface ResolvedExtensions {
   readonly selection: readonly Extension[];
   /** Names a conversation may switch off: the active extensions with a Pi Durable part, never core's own. */
   readonly switchable: readonly string[];
+  /** The active extensions' capability ids, deduplicated and sorted (core adds its own, `CORE_CAPABILITIES`). */
+  readonly capabilities: readonly string[];
   /** Every tool any installed extension registers, by name: the first registration wins, core's first. */
   readonly tools: ReadonlyMap<string, ToolRegistration>;
   /**
@@ -155,6 +164,12 @@ export function resolveExtensions(
     names.add(name);
   }
   for (const extension of extensions) {
+    for (const id of extension.capabilities ?? []) {
+      // A door matches ids exactly, so a malformed one would never switch anything on: refuse to compose.
+      if (!isCapabilityId(id)) {
+        throw new Error(`Extension "${extension.name}" declares an invalid capability id "${id}"`);
+      }
+    }
     if (extension.pi !== undefined && extension.pi.name !== extension.name) {
       throw new Error(
         `Extension "${extension.name}" wraps a Pi Durable extension named "${extension.pi.name}"`,
@@ -239,6 +254,7 @@ export function resolveExtensions(
     installed,
     selection,
     switchable: active.flatMap((extension) => (extension.pi === undefined ? [] : [extension.name])),
+    capabilities: capabilityList(active.flatMap((extension) => extension.capabilities ?? [])),
     tools,
     untrustedTools,
   };

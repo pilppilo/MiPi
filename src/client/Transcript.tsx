@@ -1,5 +1,5 @@
 import { Markdown } from "./Markdown.tsx";
-import type { ToolDiagnostic } from "../agent/pi/shared.ts";
+import type { ToolDiagnostic } from "../protocol.ts";
 import { isNoSend } from "../lib/proactive-text.ts";
 import type {
   TranscriptEntry,

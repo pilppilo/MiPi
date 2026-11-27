@@ -1,27 +1,29 @@
-import type { JsonValue } from "../agent/pi/shared.ts";
-import type { AssistantMessage, Message, NestedToolCalls } from "../agent/pi/shared.ts";
-import type {
-  AgentState,
-  CompactionReason,
-  EntryRecord,
-  InboxState,
-  LiveState,
-  RunFailure,
-  TaskGraph,
-  ToolDiagnostic,
-  TranscriptItem,
-  TranscriptView,
-  UsageState,
-} from "../agent/pi/shared.ts";
-import { CompactionEntry, ResetEntry, ToolResultEntry } from "../agent/pi/shared.ts";
 import {
+  CompactionEntry,
   mainConversationId,
   parseScheduledInstruction,
   queuedInputs,
+  ResetEntry,
+  ToolResultEntry,
+  type AgentState,
+  type AssistantMessage,
+  type CompactionReason,
   type ConnectionStatus,
   type ConversationSummary,
+  type EntryRecord,
+  type InboxState,
+  type JsonValue,
+  type LiveState,
+  type Message,
+  type NestedToolCalls,
   type QueuedInput,
-  type ServerEvent,
+  type RunFailure,
+  type ReceivedServerEvent,
+  type TaskGraph,
+  type ToolDiagnostic,
+  type TranscriptItem,
+  type TranscriptView,
+  type UsageState,
 } from "../protocol.ts";
 
 export interface TranscriptToolCall {
@@ -118,23 +120,41 @@ export interface SessionState {
   readonly activeConversationId?: number;
   readonly snapshots: Readonly<Record<number, ConversationSnapshot>>;
   readonly activity?: TaskGraph;
+  /**
+   * What the agent advertised beyond chat in its last snapshot (COD-246). Empty until one arrives, and for an older
+   * agent that sends none: every optional panel is then off.
+   */
+  readonly capabilities: ReadonlySet<string>;
   readonly error?: string;
 }
 
 export type SessionAction =
   | { readonly type: "connection"; readonly status: ConnectionStatus }
   | { readonly type: "select"; readonly conversationId: number }
-  | { readonly type: "event"; readonly event: ServerEvent }
+  | { readonly type: "event"; readonly event: ReceivedServerEvent }
   /** A conversation's view with the client's whole transcript (`ConversationTranscript.merge()`). */
   | { readonly type: "view"; readonly conversationId: number; readonly view: TranscriptView }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "clear-error" };
 
+const NO_CAPABILITIES: ReadonlySet<string> = new Set();
+
 export const initialSessionState: SessionState = {
   status: "connecting",
   conversations: [],
   snapshots: {},
+  capabilities: NO_CAPABILITIES,
 };
+
+/** The capabilities a snapshot advertises; the same set object while they don't change, so nothing re-renders. */
+function nextCapabilities(
+  before: ReadonlySet<string>,
+  advertised: readonly string[] | undefined,
+): ReadonlySet<string> {
+  const ids = advertised ?? [];
+  if (ids.length === before.size && ids.every((id) => before.has(id))) return before;
+  return ids.length === 0 ? NO_CAPABILITIES : new Set(ids);
+}
 
 export function sessionReducer(state: SessionState, action: SessionAction): SessionState {
   switch (action.type) {
@@ -179,7 +199,7 @@ export function conversationAfterSnapshot(
     : selected;
 }
 
-function reduceServerEvent(state: SessionState, event: ServerEvent): SessionState {
+function reduceServerEvent(state: SessionState, event: ReceivedServerEvent): SessionState {
   switch (event.type) {
     case "session.snapshot": {
       const conversations = event.session.conversations;
@@ -192,6 +212,7 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
         ...state,
         conversations,
         activeConversationId,
+        capabilities: nextCapabilities(state.capabilities, event.session.capabilities),
         ...(event.session.activity === undefined ? {} : { activity: event.session.activity }),
       };
     }
@@ -243,6 +264,9 @@ function reduceServerEvent(state: SessionState, event: ServerEvent): SessionStat
         : { ...state, activeConversationId: event.conversationId, error: undefined };
     case "error":
       return { ...state, error: event.error.message };
+    // A frame this client doesn't know (a newer agent's): nothing to show.
+    case "unknown":
+      return state;
     default: {
       const _: never = event;
       return state;

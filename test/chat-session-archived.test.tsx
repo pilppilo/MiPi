@@ -19,9 +19,15 @@ const open = vi.hoisted(() => ({ id: 21 }));
 vi.mock("../src/client/usePiSession.ts", () => ({
   usePiSession: (): Pick<
     PiSession,
-    "status" | "conversations" | "activeConversationId" | "activeConversation" | "options"
+    | "status"
+    | "capabilities"
+    | "conversations"
+    | "activeConversationId"
+    | "activeConversation"
+    | "options"
   > => ({
     status: "connected",
+    capabilities: new Set(["activity", "diagnostics", "usage"]),
     conversations,
     activeConversationId: open.id,
     options: {

@@ -1,25 +1,23 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { BACKGROUND_CONTEXT } from "../agent/pi/shared.ts";
-import { applyImmutable } from "../agent/pi/shared.ts";
-import {
-  ConversationTranscript,
-  type ConversationView,
-  type Cursor,
-  type EntryRecord,
-  type Page,
-  type TaskGraph,
-} from "../agent/pi/shared.ts";
 import PartySocket from "partysocket";
 import {
+  applyImmutable,
+  BACKGROUND_CONTEXT,
+  ConversationTranscript,
+  DEFAULT_DIAG_TAIL,
   MAX_ENTRY_PAGE,
   MAX_PROMPT_CHARACTERS,
-  parseServerEventEnvelope,
   mainConversationId,
+  parseServerEventEnvelope,
   type ClientCommand,
   type ConnectionStatus,
   type ConversationSummary,
-  DEFAULT_DIAG_TAIL,
+  type ConversationView,
+  type Cursor,
+  type EntryRecord,
   type Options,
+  type Page,
+  type TaskGraph,
   type UsageReadout,
 } from "../protocol.ts";
 import { type DiagState, diagReducer, initialDiagState, lastDiagId } from "./diag-buffer.ts";
@@ -51,6 +49,11 @@ const USAGE_REFRESH_MS = 30_000;
 
 export interface PiSession {
   readonly status: ConnectionStatus;
+  /**
+   * What the agent advertised beyond chat (COD-246, `CORE_CAPABILITIES` and extensions'). A panel whose capability is
+   * absent isn't shown, and its requests aren't sent: an older agent, or one with the feature off, never sees them.
+   */
+  readonly capabilities: ReadonlySet<string>;
   readonly conversations: readonly ConversationSummary[];
   readonly activeConversationId: number | undefined;
   readonly activeConversation: ConversationSnapshot | undefined;
@@ -107,6 +110,8 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
   // Whether the agent answered this socket's subscription: live events count only after that answer (`diag-buffer.ts`
   // drops them before it), so the newest id held never runs ahead of the events held.
   const diagLiveRef = useRef(false);
+  // The capabilities of the agent this socket reaches, as its last snapshot said: none until one arrives.
+  const capabilitiesRef = useRef<ReadonlySet<string>>(initialSessionState.capabilities);
   const socketRef = useRef<PartySocket | null>(null);
   const outboxRef = useRef<CommandOutbox | null>(null);
   outboxRef.current ??= new CommandOutbox();
@@ -189,7 +194,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     let usageLater: number | undefined;
     /** Reads the usage now, or once `USAGE_REFRESH_MS` has passed since the last read (`force`: now regardless). */
     const requestUsage = (force = false) => {
-      if (socket.readyState !== socket.OPEN) return;
+      if (socket.readyState !== socket.OPEN || !capabilitiesRef.current.has("usage")) return;
       const wait = usageReadAt + USAGE_REFRESH_MS - Date.now();
       if (!force && wait > 0) {
         // One trailing read, so the line catches up with the work that just ran.
@@ -214,7 +219,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
 
     /** The tail again on a new socket: from the newest event held, so nothing comes twice. */
     const resubscribeDiag = () => {
-      if (!diagWantedRef.current) return;
+      if (!diagWantedRef.current || !capabilitiesRef.current.has("diagnostics")) return;
       const after = diagLastIdRef.current;
       socket.send(
         JSON.stringify({
@@ -248,6 +253,8 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         socket.close(1002, "Invalid protocol frame");
         return;
       }
+      // A newer agent's frame (COD-246): ignored, so version skew never closes the socket.
+      if (parsed.type === "unknown") return;
 
       if (parsed.type === "conversation.view") {
         showView(parsed.conversationId, parsed.view);
@@ -337,6 +344,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
           );
         }
         conversationsRef.current = parsed.session.conversations;
+        capabilitiesRef.current = new Set(parsed.session.capabilities ?? []);
       }
       dispatch({ type: "event", event: parsed });
       if (parsed.type === "session.snapshot" && !conversationOpened) {
@@ -570,8 +578,14 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     (query: { readonly limit?: number; readonly after?: number } = {}) => {
       diagWantedRef.current = true;
       const socket = socketRef.current;
-      // Not connected: the next socket subscribes once its session opens (`resubscribeDiag`).
-      if (socket === null || socket.readyState !== socket.OPEN) return;
+      // Not connected, or no snapshot has said the agent has diagnostics yet: the session's snapshot subscribes, if
+      // the agent has them (`resubscribeDiag`).
+      if (
+        socket === null ||
+        socket.readyState !== socket.OPEN ||
+        !capabilitiesRef.current.has("diagnostics")
+      )
+        return;
       socket.send(
         JSON.stringify({
           type: "diag.subscribe",
@@ -594,7 +608,13 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     diagLiveRef.current = false;
     dispatchDiag({ type: "stopped" });
     const socket = socketRef.current;
-    if (socket === null || socket.readyState !== socket.OPEN) return;
+    // An agent without diagnostics was never subscribed, and may not know the command.
+    if (
+      socket === null ||
+      socket.readyState !== socket.OPEN ||
+      !capabilitiesRef.current.has("diagnostics")
+    )
+      return;
     socket.send(
       JSON.stringify({
         type: "diag.unsubscribe",
@@ -628,6 +648,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
 
   return {
     status: state.status,
+    capabilities: state.capabilities,
     conversations: state.conversations,
     activeConversationId: state.activeConversationId,
     activeConversation,

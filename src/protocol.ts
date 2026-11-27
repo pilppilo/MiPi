@@ -10,6 +10,44 @@ import type {
   TaskGraphState,
 } from "./agent/pi/shared.ts";
 
+/**
+ * The wire contract's Pi pieces (COD-246): what the web client needs of Pi Durable, pi-ai and chord to read views,
+ * transcripts and the task graph. `src/client/` imports them from here, never from `src/agent/` (lint-enforced), so
+ * the client depends on the protocol alone. Browser-safe values and types only (`src/agent/pi/shared.ts`).
+ */
+export {
+  applyImmutable,
+  BACKGROUND_CONTEXT,
+  CompactionEntry,
+  ConversationTranscript,
+  ResetEntry,
+  ToolResultEntry,
+} from "./agent/pi/shared.ts";
+export type {
+  AgentState,
+  AssistantMessage,
+  BlockedReason,
+  CompactionReason,
+  ConversationView,
+  Cursor,
+  EntryRecord,
+  InboxState,
+  JsonValue,
+  LiveState,
+  Message,
+  NestedToolCalls,
+  Op,
+  Page,
+  RunFailure,
+  TaskGraph,
+  TaskGraphNode,
+  TaskGraphState,
+  ToolDiagnostic,
+  TranscriptItem,
+  TranscriptView,
+  UsageState,
+} from "./agent/pi/shared.ts";
+
 export const ROOT_CONVERSATION_ID = 1;
 export const MAX_PROMPT_CHARACTERS = 100_000;
 /** A bot's name and purpose, as `bot.create` and `bot.rename` take them (COD-197). */
@@ -307,6 +345,27 @@ export interface DiagSnapshot {
   readonly health: DiagHealth;
 }
 
+/**
+ * Capabilities (COD-246): door-agnostic domain feature ids the agent advertises in every `session.snapshot`. Core's
+ * own are below; an active extension adds its own (`MipiExtension.capabilities`). They name what the agent can do,
+ * never how a door shows it: the web client maps them to its panels. Chat itself (sending, the transcript, the bots
+ * list, reconnecting) is the door contract and has no capability. A capability the snapshot doesn't list is off, so
+ * an older agent (no `capabilities` at all) turns every optional panel off rather than breaking the client.
+ */
+export const CORE_CAPABILITIES = ["activity", "diagnostics", "usage"] as const;
+export type CoreCapability = (typeof CORE_CAPABILITIES)[number];
+
+/** A capability id: lower-case words joined by `-` or `.`, such as `usage` or `memory.search`. */
+const CAPABILITY_ID = /^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/;
+export const MAX_CAPABILITY_ID_CHARACTERS = 64;
+
+export const isCapabilityId = (value: string): boolean =>
+  value.length <= MAX_CAPABILITY_ID_CHARACTERS && CAPABILITY_ID.test(value);
+
+/** Capabilities as the snapshot sends them: deduplicated and sorted, so the same set is always the same frame. */
+export const capabilityList = (ids: Iterable<string>): readonly string[] =>
+  [...new Set(ids)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
 export type ClientCommand =
   | {
       readonly type: "presence.typing";
@@ -453,6 +512,8 @@ export type ServerEvent =
       readonly session: {
         readonly conversations: readonly ConversationSummary[];
         readonly activity?: TaskGraph;
+        /** What the agent can do beyond chat (`CORE_CAPABILITIES` and extensions'); absent from an older agent. */
+        readonly capabilities?: readonly string[];
       };
     }
   | {
@@ -499,6 +560,20 @@ export type ServerEvent =
         readonly message: string;
       };
     };
+
+/**
+ * A frame this client doesn't know (COD-246), from a newer or older agent: an event type it has never heard of, or a
+ * `command.result` for a command it never sends (`rawType: "command.result:<command>"`). The client ignores it, so
+ * version skew and rollbacks never close the socket. Only `parseServerEventEnvelope` makes one; the agent never sends
+ * it, so `ServerEvent` (what the agent sends) leaves it out.
+ */
+export interface UnknownServerEvent {
+  readonly type: "unknown";
+  readonly rawType: string;
+}
+
+/** What `parseServerEventEnvelope` reads off the wire: a known event, or one to ignore. */
+export type ReceivedServerEvent = ServerEvent | UnknownServerEvent;
 
 export class InvalidClientCommand extends Error {}
 
@@ -683,12 +758,8 @@ const commandTypes = new Set<ClientCommandType>([
   "diag.unsubscribe",
 ]);
 
-const requireCommandType = (value: unknown): ClientCommandType => {
-  if (typeof value !== "string" || !commandTypes.has(value as ClientCommandType)) {
-    throw new Error("Command result command is invalid");
-  }
-  return value as ClientCommandType;
-};
+const isCommandType = (value: string): value is ClientCommandType =>
+  commandTypes.has(value as ClientCommandType);
 
 const requireError = (value: unknown): { readonly code: string; readonly message: string } => {
   if (!isRecord(value) || typeof value.code !== "string" || typeof value.message !== "string") {
@@ -1093,7 +1164,7 @@ export function parseClientCommand(message: string): ClientCommand {
 }
 
 /** Validate the application envelope. View payloads remain owned by pi-durable's typed protocol. */
-export function parseServerEventEnvelope(message: string): ServerEvent {
+export function parseServerEventEnvelope(message: string): ReceivedServerEvent {
   const value: unknown = JSON.parse(message);
   if (!isRecord(value) || typeof value.type !== "string") {
     throw new Error("Server message is not an event object");
@@ -1105,6 +1176,13 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
         throw new Error("Session snapshot payload is invalid");
       }
       const conversations = value.session.conversations.map(parseConversationSummary);
+      const capabilities: unknown = value.session.capabilities;
+      if (
+        capabilities !== undefined &&
+        (!Array.isArray(capabilities) || !capabilities.every((id) => typeof id === "string"))
+      ) {
+        throw new Error("Session snapshot capabilities are invalid");
+      }
       return {
         type: value.type,
         session: {
@@ -1112,6 +1190,10 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
           ...(value.session.activity === undefined
             ? {}
             : { activity: parseTaskGraph(value.session.activity) }),
+          // An id this client doesn't know is kept: it simply maps to no panel.
+          ...(capabilities === undefined
+            ? {}
+            : { capabilities: capabilityList(capabilities as string[]) }),
         },
       };
     }
@@ -1158,8 +1240,13 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
       return { type: value.type, conversationId, usernames: value.usernames };
     }
     case "command.result": {
+      if (typeof value.command !== "string") throw new Error("Command result command is invalid");
+      // A result for a command this client never sends (a newer agent's): nothing waits for it.
+      if (!isCommandType(value.command)) {
+        return { type: "unknown", rawType: `command.result:${value.command}` };
+      }
+      const command = value.command;
       const requestId = requireRequestId(value.requestId);
-      const command = requireCommandType(value.command);
       if (value.ok === true) {
         const conversationId = optionalId(value.conversationId, "conversationId");
         const submissionId = optionalId(value.submissionId, "submissionId");
@@ -1203,6 +1290,7 @@ export function parseServerEventEnvelope(message: string): ServerEvent {
     case "error":
       return { type: value.type, error: requireError(value.error) };
     default:
-      throw new Error(`Unknown server event: ${value.type}`);
+      // A newer agent's event: ignorable, never a protocol error.
+      return { type: "unknown", rawType: value.type };
   }
 }

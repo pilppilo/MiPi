@@ -1,5 +1,5 @@
 import type { MouseEvent, ReactNode, Ref } from "react";
-import type { BlockedReason, TaskGraph, TaskGraphNode } from "../agent/pi/shared.ts";
+import type { BlockedReason, TaskGraph, TaskGraphNode } from "../protocol.ts";
 
 interface ActivityPanelProps {
   readonly graph: TaskGraph | undefined;
