@@ -2142,3 +2142,8 @@ ul.diagnostics {
 .bot-profile-links > form {
   flex-basis: 100%;
 }
+
+/* Activity and Settings, together: no box of their own, so each keeps its place in the workspace grid. */
+.session-panels {
+  display: contents;
+}

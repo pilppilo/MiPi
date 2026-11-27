@@ -1015,50 +1015,52 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
         </div>
       ) : null}
 
-      {hasActivity ? (
-        <ActivityPanel
-          graph={activityGraph}
-          activeConversationId={activeConversationId}
-          onClose={closeActivity}
-          closeButtonRef={activityCloseRef}
-          onOpenConversation={(conversationId) => {
-            if (conversationId !== session.activeConversationId) {
-              window.history.pushState(null, "", `?conversation=${conversationId}`);
-              session.openConversation(conversationId);
-            }
-            if (compactActivityLayout()) {
-              setActivityOpen(false);
-              requestAnimationFrame(() => conversationHeadingRef.current?.focus());
-            }
-          }}
-        />
-      ) : null}
+      {/* Layout-free (`display: contents`), so the panels keep their grid places; inert behind New bot. */}
+      <div className="session-panels" inert={newBotOpen}>
+        {hasActivity ? (
+          <ActivityPanel
+            graph={activityGraph}
+            activeConversationId={activeConversationId}
+            onClose={closeActivity}
+            closeButtonRef={activityCloseRef}
+            onOpenConversation={(conversationId) => {
+              if (conversationId !== session.activeConversationId) {
+                window.history.pushState(null, "", `?conversation=${conversationId}`);
+                session.openConversation(conversationId);
+              }
+              if (compactActivityLayout()) {
+                setActivityOpen(false);
+                requestAnimationFrame(() => conversationHeadingRef.current?.focus());
+              }
+            }}
+          />
+        ) : null}
 
-      {settingsOpen ? (
-        <SettingsPanel
-          conversations={session.conversations}
-          disabled={!isConnected}
-          onOpen={openFromSettings}
-          onRestore={(conversationId) => session.restoreBot(conversationId)}
-          onClose={closeSettings}
-          closeButtonRef={settingsCloseRef}
-          diagnostics={
-            hasDiagnostics
-              ? {
-                  diag: session.diag,
-                  onSubscribe: session.subscribeDiag,
-                  onUnsubscribe: session.unsubscribeDiag,
-                  onAskMiPi: askMiPiFromSettings,
-                }
-              : undefined
-          }
-        />
-      ) : null}
+        {settingsOpen ? (
+          <SettingsPanel
+            conversations={session.conversations}
+            disabled={!isConnected}
+            onOpen={openFromSettings}
+            onRestore={(conversationId) => session.restoreBot(conversationId)}
+            onClose={closeSettings}
+            closeButtonRef={settingsCloseRef}
+            diagnostics={
+              hasDiagnostics
+                ? {
+                    diag: session.diag,
+                    onSubscribe: session.subscribeDiag,
+                    onUnsubscribe: session.unsubscribeDiag,
+                    onAskMiPi: askMiPiFromSettings,
+                  }
+                : undefined
+            }
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
 
-/** "New bot": a name and a purpose (its fixed instructions), on a profile the pickers offer (COD-197). */
 /** A bot's dots: working or waiting (from the activity graph), and something unread. */
 function BotDots({
   activity,
@@ -1134,6 +1136,7 @@ function CobotNameForm({
   );
 }
 
+/** "New bot": a name and a purpose (its fixed instructions), on a toolkit the pickers offer (COD-197). */
 function NewBotForm({
   profiles,
   options,

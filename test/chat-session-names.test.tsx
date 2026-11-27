@@ -103,4 +103,6 @@ it("offers toolkits as plain-named choices in a New bot sheet", () => {
   // Nothing behind the sheet takes input while it is open.
   expect(html).toMatch(/<aside[^>]*id="spaces-drawer"[^>]*inert=""/);
   expect(html).toMatch(/<main class="conversation-view" inert="">/);
+  // Settings (open here too) is behind the sheet as well, and Tab can't reach it.
+  expect(html).toMatch(/<div class="session-panels" inert=""><section id="settings-panel"/);
 });
