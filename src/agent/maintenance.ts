@@ -4,8 +4,11 @@
  * even when the running code can't open the data (the rollback case). `app_meta` holds MiPi's own bookkeeping.
  *
  * An export is a JSON document: one header (versions, schema DDL) and the rows of every table, page by page.
- * Cloudflare's internal `_cf_*` tables and SQLite's `sqlite_*` tables are skipped; they can't be written back.
+ * Cloudflare's internal `_cf_*` tables and SQLite's `sqlite_*` tables are skipped; they can't be written back. The
+ * diagnostic log (`app_diag_events`, `diag.ts`) is skipped too: it is operational, not the agent's data, and a
+ * restore starts it empty.
  */
+import { DIAG_TABLE } from "./diag.ts";
 
 export const META_TABLE = "app_meta";
 
@@ -117,7 +120,10 @@ export interface PageLimits {
 export const DEFAULT_PAGE_LIMITS: PageLimits = { maxRows: 500, maxChars: 1_000_000 };
 
 const isExported = (name: string): boolean =>
-  !name.startsWith("_cf_") && !name.startsWith("sqlite_") && name !== META_TABLE;
+  !name.startsWith("_cf_") &&
+  !name.startsWith("sqlite_") &&
+  name !== META_TABLE &&
+  name !== DIAG_TABLE;
 
 /** Tables, then their indexes and triggers, in a stable order. */
 export function readSchema(sql: SqlStorage): readonly SchemaObject[] {
@@ -254,6 +260,8 @@ export function restoreSchema(sql: SqlStorage, header: ExportHeader): void {
     throw new Error("Not a MiPi export (format mipi-export, version 1)");
   }
   for (const object of header.schema) {
+    // A build before the log was kept out of exports (after a rollback) copies it like any table: left out here.
+    if (object.table === DIAG_TABLE) continue;
     if (!isExported(object.name) || !isExported(object.table)) {
       throw new Error(`Refusing to restore ${object.type} ${object.name}`);
     }
@@ -269,6 +277,7 @@ export function restoreRows(
 ): void {
   const tables = new Set(tablesOf(schema));
   for (const row of rows) {
+    if (row.table === DIAG_TABLE) continue;
     if (!tables.has(row.table)) throw new Error(`Row for unknown table ${row.table}`);
     const columns = Object.keys(row.values);
     const names = ["rowid", ...columns].map((column) =>

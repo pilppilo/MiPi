@@ -1,3 +1,4 @@
+import type { DiagInput } from "../src/agent/diag.ts";
 /**
  * A test agent for scheduled runs (M6): MiPi's real harness options, a faux model, Durable Object SQLite, and a test
  * clock the Harness and the Telegram door share. With `onWake`, the Harness keeps no timer of its own; a test moves the
@@ -63,6 +64,8 @@ export interface Agent {
   readonly harness: Harness;
   readonly channel: TestDoor;
   readonly sent: Array<{ chatId: number; text: string }>;
+  /** The diagnostic events core emitted (COD-216), in order. */
+  readonly diag: DiagInput[];
   /** Moves the clock, then does what the alarm does: resume, wait for turns, run the door. */
   advance(ms: number): Promise<void>;
   settle(): Promise<void>;
@@ -84,7 +87,9 @@ export async function openAgent(
   models.setProvider(faux.provider);
   const provider = "faux";
   const label = "OpenCode Go";
+  const diag: DiagInput[] = [];
   const composition = composeMipi({
+    diag: { emit: (event) => diag.push(event) },
     models,
     model: { provider, modelId: "faux-1" },
     extensions: [
@@ -194,6 +199,7 @@ export async function openAgent(
     harness,
     channel,
     sent,
+    diag,
     settle: async () => {
       for (let rounds = 0; rounds < 50; rounds++) {
         await harness.waitForIdle(ctx);

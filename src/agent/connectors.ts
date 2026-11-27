@@ -1,6 +1,6 @@
 /**
- * The connectors a door or an extension reaches core through (COD-210): origin, delivery, and the inputs waiting for an
- * answer. Doors register them (`DoorRegistration`), extensions register origins (`MipiExtension.origins`), and
+ * The connectors a door or an extension reaches core through (COD-210): origin, delivery, the inputs waiting for an
+ * answer, and the diagnostic log (COD-216, `diag.ts`). Doors register them (`DoorRegistration`), extensions register origins (`MipiExtension.origins`), and
  * `composeAgent` builds one `Connectors` per agent from both.
  *
  * Tools and tasks reach the agent's connectors from their registry snapshot (`connectorsOf(api.registry)`), through a
@@ -13,6 +13,7 @@ import { type OriginRegistration, Origins } from "./origin.ts";
 import { CORE_EXTENSION_NAME } from "./untrusted.ts";
 import { BOT_ORIGIN } from "./bot-hops.ts";
 import { botReplyDelivery } from "./bot-messages.ts";
+import { type DiagSink, NOOP_DIAG } from "./diag.ts";
 
 /** One input a door admitted and answers: a "direct" expectation, delivered to `destination` when it settles. */
 export type PendingInput = {
@@ -53,12 +54,15 @@ export interface Connectors {
   readonly pending: readonly PendingSource[];
   /** Every document kind a pending source watches. */
   readonly pendingDocKinds: ReadonlySet<string>;
+  /** Where diagnostic events go: the agent's log, or nowhere (`NOOP_DIAG`) outside a Durable Object. */
+  readonly diag: DiagSink;
 }
 
 /** Builds an agent's connectors from its doors and its extensions' origins. Duplicates throw. */
 export function createConnectors(
   doors: readonly DoorRegistration[],
   extensionOrigins: readonly OriginRegistration[],
+  diag: DiagSink = NOOP_DIAG,
 ): Connectors {
   const names = new Set<string>();
   for (const { name } of doors) {
@@ -86,6 +90,7 @@ export function createConnectors(
     ),
     pending,
     pendingDocKinds: new Set(pending.flatMap(({ docKinds }) => docKinds)),
+    diag,
   };
 }
 
@@ -105,4 +110,13 @@ export function connectorsOf(registry: Pick<RegistrySnapshot, "extension">): Con
   const connectors = core === undefined ? undefined : bound.get(core);
   if (connectors === undefined) throw new Error("This agent has no connectors bound");
   return connectors;
+}
+
+/**
+ * The diagnostic sink of the agent a registry belongs to, or `NOOP_DIAG` when none was bound: unlike delivery, a
+ * diagnostic is never a reason for a task to fail.
+ */
+export function diagOf(registry: Pick<RegistrySnapshot, "extension">): DiagSink {
+  const core = registry.extension(CORE_EXTENSION_NAME);
+  return (core === undefined ? undefined : bound.get(core))?.diag ?? NOOP_DIAG;
 }

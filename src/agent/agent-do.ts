@@ -8,6 +8,7 @@ import {
   configure,
   type Cursor,
   defineDocFamily,
+  type ReportInfo,
   type EntryId,
   Harness,
   type TaskGraph,
@@ -90,6 +91,7 @@ import {
   parseClientCommand,
   type ClientCommand,
   type ConversationSummary,
+  type DiagEvent,
   type Options,
   type ServerEvent,
   type UsageReadout,
@@ -106,6 +108,7 @@ import {
 } from "./alarm.ts";
 import { type HeartbeatStatus, readHeartbeat } from "./heartbeat.ts";
 import { WakeSources } from "./wake-sources.ts";
+import { DIAG_TABLE, type DiagInput, DiagLog, type DiagQuery, errorText } from "./diag.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../doors/telegram/channel.ts";
 import { botApiSender } from "../doors/telegram/bot-api.ts";
 import { RelayRuntime, type RelayResult } from "../doors/relay/relay.ts";
@@ -126,6 +129,60 @@ const reportError = (
       error: error instanceof Error ? error.message : String(error),
     }),
   );
+};
+
+type ReportTask = Extract<ReportInfo, { kind: "task_error" }>["task"];
+
+/** A harness report as a diagnostic event: its kind, task and extension, and the error's message. */
+const harnessReportEvent = (report: ReportInfo, error: unknown): DiagInput => {
+  const event = (
+    level: "warn" | "error",
+    about: {
+      readonly task?: ReportTask;
+      readonly extension?: string;
+      readonly detail?: Readonly<Record<string, string | number>>;
+    } = {},
+  ): DiagInput => ({
+    level,
+    source: "harness",
+    kind: "harness.report",
+    outcome: "fault",
+    summary: `${report.kind}: ${errorText(error)}`,
+    ...(about.task === undefined
+      ? {}
+      : { taskId: String(about.task.id), convId: about.task.conversationId }),
+    detail: {
+      report: report.kind,
+      ...(about.task === undefined ? {} : { task: about.task.kind }),
+      ...(about.extension === undefined ? {} : { extension: about.extension }),
+      ...about.detail,
+    },
+  });
+  switch (report.kind) {
+    case "storage_failed":
+    case "listener_error":
+      return event(report.kind === "storage_failed" ? "error" : "warn");
+    case "migration_failed":
+      return event("error", report);
+    case "task_faulted":
+    case "task_outdated":
+      return event("error", { ...report, detail: { reason: report.reason } });
+    case "task_interrupted":
+      return event("error", {
+        ...report,
+        detail: { reason: report.reason, restarts: report.restarts },
+      });
+    case "task_error":
+      return event("warn", report);
+    case "extension_error":
+      return event("error", report);
+    case "host_error":
+      return event("error", { ...report, detail: { callback: report.callback } });
+    default: {
+      const _: never = report;
+      return event("error");
+    }
+  }
 };
 
 const CONVERSATION_PAGE_SIZE = 100;
@@ -308,10 +365,17 @@ export class MipiAgent extends DurableObject<Env> {
   readonly #typingConnections = new Set<WebSocket>();
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
   /**
+   * The diagnostic log (COD-216, `diag.ts`): raw SQLite outside Pi Durable, so it records in every state. Nothing is
+   * written while maintenance runs: an export's fingerprint includes the database size.
+   */
+  readonly #diag = new DiagLog(this.ctx.storage.sql, {
+    canWrite: () => this.#state.kind !== "maintenance",
+  });
+  /**
    * The parts that need the alarm besides Pi Durable (`wake-sources.ts`): registered while the harness opens
    * (`#initialize`), cleared when it closes (`#shutdown`).
    */
-  readonly #wakeSources = new WakeSources(reportError);
+  readonly #wakeSources = new WakeSources(reportError, this.#diag);
   /** The one alarm, for Pi Durable's sleeps, the wake sources and the heartbeat (`alarm.ts`). */
   readonly #alarm = new AlarmScheduler(this.ctx.storage, () => this.#wakeSources.wake());
   /** The Telegram door's admissions, replies and outbox; present while the harness is open. */
@@ -338,11 +402,30 @@ export class MipiAgent extends DurableObject<Env> {
       });
       writeMeta(sql, { maintenance: undefined, maintenance_started_at: undefined });
       meta = readMeta(sql);
+      // No longer in maintenance: the event is stored (an object that stayed in memory still says `maintenance`).
+      this.#state = { kind: "refused", reason: "Starting" };
+      this.#diag.emit({
+        level: "warn",
+        source: "do",
+        kind: "maintenance.stale_export",
+        outcome: "fault",
+        summary: "Abandoned an export whose script never ended it",
+        detail: { startedAt: Number(meta.maintenance_started_at ?? Number.NaN) },
+      });
     }
     if (meta.maintenance === "export" || meta.maintenance === "restore") {
       this.#state = { kind: "maintenance", mode: meta.maintenance };
       reportError("Started during maintenance", new Error(`A ${meta.maintenance} was running`), {
         build: MIPI_VERSION,
+      });
+      // Not stored while maintenance runs: it goes to the console in the event's shape.
+      this.#diag.emit({
+        level: "warn",
+        source: "do",
+        kind: "startup.maintenance",
+        outcome: "held",
+        summary: `Started during a ${meta.maintenance}; the agent stays closed until it ends`,
+        detail: { mode: meta.maintenance, build: MIPI_VERSION },
       });
       return;
     }
@@ -356,6 +439,14 @@ export class MipiAgent extends DurableObject<Env> {
       const reason = `The extensions don't compose: ${error instanceof Error ? error.message : String(error)}`;
       this.#state = { kind: "refused", reason };
       reportError("Composing the agent failed", error, { build: MIPI_VERSION });
+      this.#diag.emit({
+        level: "error",
+        source: "do",
+        kind: "startup.refused",
+        outcome: "refused",
+        summary: reason,
+        detail: { cause: "composition", build: MIPI_VERSION },
+      });
       await this.ctx.storage.deleteAlarm();
       return;
     }
@@ -367,10 +458,23 @@ export class MipiAgent extends DurableObject<Env> {
         storedBy: guard.storedBy,
         build: MIPI_VERSION,
       });
+      this.#diag.emit({
+        level: "error",
+        source: "do",
+        kind: "startup.refused",
+        outcome: "refused",
+        summary: guard.reason,
+        detail: {
+          cause: "startup-guard",
+          build: MIPI_VERSION,
+          ...(guard.storedBy === undefined ? {} : { storedBy: guard.storedBy }),
+        },
+      });
       // Nothing can run, so no heartbeat: a newer deploy or a restore reopens the object.
       await this.ctx.storage.deleteAlarm();
       return;
     }
+    const opening = Date.now();
     await this.#initialize(checkAlarm && !staleExport && meta.app_version !== undefined);
     // Recorded only after Pi Durable opened the data successfully.
     writeMeta(sql, {
@@ -380,6 +484,21 @@ export class MipiAgent extends DurableObject<Env> {
       task_versions: JSON.stringify(supportedTaskVersions(composition.tasks)),
     });
     this.#state = { kind: "open" };
+    this.#diag.emit({
+      level: "info",
+      source: "do",
+      kind: "startup.open",
+      outcome: "ok",
+      summary: `Opened MiPi ${MIPI_VERSION}`,
+      durationMs: Date.now() - opening,
+      detail: {
+        build: MIPI_VERSION,
+        piDurable: PI_DURABLE_VERSION,
+        ...(meta.app_version === undefined || meta.app_version === MIPI_VERSION
+          ? {}
+          : { previous: meta.app_version }),
+      },
+    });
   }
 
   /**
@@ -489,9 +608,18 @@ export class MipiAgent extends DurableObject<Env> {
     };
   }
 
+  /**
+   * The diagnostic events as stored (COD-216), oldest first. Readable in every state, maintenance too: it writes
+   * nothing. The admin API and the live tail come with COD-235.
+   */
+  diagEvents(query: DiagQuery = {}): readonly DiagEvent[] {
+    return this.#diag.read(query);
+  }
+
   /** Core, the built-in extensions and the profile table, configured from the bindings. Throws on a conflict. */
   #compose(): AgentComposition {
     const composition = composeMipi({
+      diag: this.#diag,
       modelId: this.env.MIPI_MODEL,
       profile: profileOrDefault(this.env.MIPI_PROFILE),
       readEnv: (name) => {
@@ -522,6 +650,14 @@ export class MipiAgent extends DurableObject<Env> {
     await this.#closeForMaintenance();
     return this.#exclusive(async () => {
       refuseBusy();
+      // Before the agent enters maintenance (no writes after that) and before the fingerprint is taken.
+      this.#diag.emit({
+        level: "info",
+        source: "do",
+        kind: "maintenance.export_begin",
+        outcome: "ok",
+        summary: "An export began; the agent is closed until it ends",
+      });
       writeMeta(this.ctx.storage.sql, {
         maintenance: "export",
         maintenance_started_at: String(Date.now()),
@@ -556,6 +692,17 @@ export class MipiAgent extends DurableObject<Env> {
         maintenance_started_at: undefined,
       });
       await this.#start();
+      // After the reopen: maintenance is over, so the event is stored.
+      this.#diag.emit({
+        level: consistent ? "info" : "warn",
+        source: "do",
+        kind: "maintenance.export_end",
+        outcome: consistent ? "ok" : "fault",
+        summary: consistent
+          ? "The export ended consistent"
+          : "The export ended inconsistent: something wrote during it, so it must be taken again",
+        detail: { consistent },
+      });
       return { consistent };
     });
   }
@@ -586,6 +733,8 @@ export class MipiAgent extends DurableObject<Env> {
       });
       this.#state = { kind: "maintenance", mode: "restore" };
       await this.ctx.storage.deleteAll();
+      // The diagnostic table went with everything else; the next event made after the restore makes it again.
+      this.#diag.reset();
       writeMeta(sql, { ...header.meta, restoring: "1", maintenance: "restore" });
       restoreSchema(sql, header);
     });
@@ -603,7 +752,12 @@ export class MipiAgent extends DurableObject<Env> {
       this.#requireMaintenance("restore");
       const sql = this.ctx.storage.sql;
       const actual = rowCounts(sql);
-      const tables = new Set([...Object.keys(actual), ...Object.keys(expectedRows)]);
+      // An older build's export counts the diagnostic log too; the restore leaves it out (`restoreRows`).
+      const tables = new Set(
+        [...Object.keys(actual), ...Object.keys(expectedRows)].filter(
+          (table) => table !== DIAG_TABLE,
+        ),
+      );
       const mismatched = [...tables].filter(
         (table) => (actual[table] ?? 0) !== (expectedRows[table] ?? 0),
       );
@@ -728,6 +882,15 @@ export class MipiAgent extends DurableObject<Env> {
     writeMeta(this.ctx.storage.sql, { alarm_lost_at: String(at) });
     this.#pendingAlarmLost = undefined;
     reportError("The agent's alarm was missing at startup", new Error("Lost alarm"), { at });
+    this.#diag.emit({
+      level: "warn",
+      source: "do",
+      kind: "alarm.lost",
+      outcome: "fault",
+      summary: "The agent's alarm was missing at startup",
+      ts: at,
+      detail: { at },
+    });
   }
 
   async #initialize(checkAlarm: boolean): Promise<void> {
@@ -750,8 +913,10 @@ export class MipiAgent extends DurableObject<Env> {
       {
         ...options,
         // `kind` says what happened, e.g. `task_faulted` or `task_interrupted`, with the task and extension.
-        onReport: ({ error, ...report }) =>
-          reportError("Harness reported a failure", error, report),
+        onReport: ({ error, ...report }) => {
+          reportError("Harness reported a failure", error, report);
+          this.#diag.emit(harnessReportEvent(report, error));
+        },
         // Called after open and whenever the next wake changes. With `onWake`, the Harness keeps no timer for
         // sleeps: the alarm calls `resume()`. A failed alarm write resets the object; it arms again on restart.
         onWake: (wake) =>
@@ -762,7 +927,15 @@ export class MipiAgent extends DurableObject<Env> {
 
     // A storage error closes the harness. Reset the object so the next event reopens it.
     void harness.closed.then((end) => {
-      if (end.kind === "failed") this.ctx.abort("Harness failed");
+      if (end.kind !== "failed") return;
+      this.#diag.emit({
+        level: "error",
+        source: "harness",
+        kind: "harness.failed",
+        outcome: "fault",
+        summary: "The harness failed and closed; the object resets",
+      });
+      this.ctx.abort("Harness failed");
     });
 
     let activity: WatchHandle<TaskGraph> | undefined;
@@ -775,6 +948,7 @@ export class MipiAgent extends DurableObject<Env> {
         this.#providerUsage,
         Date.now,
         (error, provider) => reportError("Recording a provider limit failed", error, { provider }),
+        this.#diag,
       );
       // Tasks (scheduled deliveries) read the owner's time zone from the session, not from module state.
       const timeZone = ownerTimeZone(this.env.MIPI_TIMEZONE);
@@ -919,6 +1093,7 @@ export class MipiAgent extends DurableObject<Env> {
                 .schedule(harness.wake())
                 .catch(() => this.ctx.abort("Alarm write failed")),
             report: reportError,
+            diag: this.#diag,
           }) ?? [];
         for (const source of sources) {
           this.#wakeSources.register(source);
@@ -1132,6 +1307,7 @@ export class MipiAgent extends DurableObject<Env> {
       async () => {
         if (this.#state.kind === "open") await this.#alarm.schedule(harness.wake());
       },
+      this.#diag,
     );
   }
 

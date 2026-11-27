@@ -6,6 +6,7 @@
  */
 import type { Wake } from "./pi/durable.ts";
 import { earliestWake, type SourceWake } from "./wake-sources.ts";
+import { type DiagSink, errorText, NOOP_DIAG } from "./diag.ts";
 
 export { earliestWake };
 
@@ -82,22 +83,48 @@ export class AlarmScheduler {
 
 /**
  * Runs the alarm's consumers one after another, each in its own `try`, so one that throws can't stop the others, then
- * `last` whatever happened. A failure is reported with the consumer's name.
+ * `last` whatever happened. A failure is reported with the consumer's name, and each run is a diagnostic event
+ * (`alarm.fired`, and `alarm.consumer_failed` for each consumer that threw).
  */
 export async function runAlarmConsumers(
   consumers: readonly (readonly [name: string, run: () => unknown])[],
   report: (message: string, error: unknown) => void,
   last: () => Promise<void>,
+  diag: DiagSink = NOOP_DIAG,
+  now: () => number = Date.now,
 ): Promise<void> {
+  const started = now();
+  let failed = 0;
   try {
     for (const [name, run] of consumers) {
       try {
         await run();
       } catch (error) {
+        failed += 1;
         report(`The alarm's ${name} failed`, error);
+        diag.emit({
+          level: "error",
+          source: "do",
+          kind: "alarm.consumer_failed",
+          outcome: "fault",
+          summary: `The alarm's ${name} failed: ${errorText(error)}`,
+          detail: { consumer: name },
+        });
       }
     }
   } finally {
     await last();
+    diag.emit({
+      level: "debug",
+      source: "do",
+      kind: "alarm.fired",
+      outcome: failed === 0 ? "ok" : "fault",
+      summary:
+        failed === 0
+          ? `The alarm ran ${consumers.length} consumers`
+          : `The alarm ran ${consumers.length} consumers; ${failed} failed`,
+      durationMs: now() - started,
+      detail: { consumers: consumers.length, failed },
+    });
   }
 }

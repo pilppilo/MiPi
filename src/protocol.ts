@@ -242,6 +242,39 @@ export interface UsageReadout {
   readonly providers: readonly ProviderUsage[];
 }
 
+/** How bad a diagnostic event is (COD-216). */
+export const DIAG_LEVELS = ["debug", "info", "warn", "error"] as const;
+export type DiagLevel = (typeof DIAG_LEVELS)[number];
+
+/** What came of the step a diagnostic event records: a status pill, decided by the emitter, never by a model. */
+export const DIAG_OUTCOMES = ["ok", "held", "retry", "quiet", "fault", "refused"] as const;
+export type DiagOutcome = (typeof DIAG_OUTCOMES)[number];
+
+/** A diagnostic event's flat extra fields: ids, counts, statuses, durations. Never message content or secrets. */
+export type DiagDetail = Readonly<Record<string, string | number | boolean>>;
+
+/**
+ * One diagnostic event (COD-216): a hop, a hold or a fault, recorded by core (`src/agent/diag.ts`). `id` is a
+ * monotonic cursor; `source` names the boundary that emitted it (`do`, `harness`, `gate`, `provider`, `door:<name>`,
+ * `ext:<name>`); `kind` is a dotted name such as `alarm.fired`.
+ */
+export interface DiagEvent {
+  readonly id: number;
+  /** Milliseconds since the Unix epoch. */
+  readonly ts: number;
+  readonly level: DiagLevel;
+  readonly source: string;
+  readonly kind: string;
+  readonly outcome: DiagOutcome;
+  /** One line, for the stream table. */
+  readonly summary: string;
+  readonly reqId?: string;
+  readonly convId?: number;
+  readonly taskId?: string;
+  readonly durationMs?: number;
+  readonly detail?: DiagDetail;
+}
+
 export type ClientCommand =
   | {
       readonly type: "presence.typing";

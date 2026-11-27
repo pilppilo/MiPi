@@ -3,6 +3,7 @@
  * deadlines, a background job's next run. Each registers once, as a `WakeSource`, when the harness opens; the alarm,
  * the commit observer and shutdown loop over the list and name none of them. Core code: no door or extension imports.
  */
+import { type DiagSink, errorText, NOOP_DIAG } from "./diag.ts";
 
 /** When a source next needs the alarm (`at`), and whether it has work that can run now, which keeps a heartbeat. */
 export type SourceWake = { readonly at?: number; readonly active: boolean };
@@ -45,10 +46,12 @@ export type ReportSourceError = (message: string, error: unknown) => void;
  */
 export class WakeSources {
   readonly #report: ReportSourceError;
+  readonly #diag: DiagSink;
   #sources: WakeSource[] = [];
 
-  constructor(report: ReportSourceError) {
+  constructor(report: ReportSourceError, diag: DiagSink = NOOP_DIAG) {
     this.#report = report;
+    this.#diag = diag;
   }
 
   /** Adds a source. A second source with the same name is a wiring mistake, so it throws. */
@@ -76,6 +79,14 @@ export class WakeSources {
         if (source.observes?.(publication) === true) source.refresh?.();
       } catch (error) {
         this.#report(`Refreshing the ${source.name} after a commit failed`, error);
+        this.#diag.emit({
+          level: "error",
+          source: "do",
+          kind: "wake.refresh_failed",
+          outcome: "fault",
+          summary: `Refreshing the ${source.name} after a commit failed: ${errorText(error)}`,
+          detail: { wakeSource: source.name },
+        });
       }
     }
   }

@@ -247,7 +247,7 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
         if (target === api.conversationId) throw new Error("MiPi cannot message itself.");
         const to = await api.conversation(target as ConversationId, context);
         if (to === undefined) throw new Error(`The bot ${name} is missing.`);
-        const { origins } = connectorsOf(api.registry);
+        const { origins, diag } = connectorsOf(api.registry);
         // pi-ledger L12: store the target admission, its hop and the pending reply atomically.
         const requestId = `bot:${api.conversationId}:${api.callId}`;
         const now = api.now();
@@ -269,7 +269,18 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
           if (hop > BOT_HOP_LIMIT)
             throw new Error(`The bot message hop limit is ${BOT_HOP_LIMIT}.`);
           const hold = await proactiveHold(tx, now);
-          if (hold !== undefined) throw new Error(`Bot work is on hold (${hold}).`);
+          if (hold !== undefined) {
+            diag.emit({
+              level: "info",
+              source: "gate",
+              kind: "gate.held",
+              outcome: "held",
+              summary: `A bot message is held by the ${hold} gate`,
+              convId: api.conversationId,
+              detail: { gate: hold, at: "message_bot" },
+            });
+            throw new Error(`Bot work is on hold (${hold}).`);
+          }
           await admitBotInput(
             tx,
             to,
