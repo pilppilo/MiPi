@@ -19,13 +19,17 @@ import {
   Harness,
   type Storage,
   type TaskGraph,
+  type TaskGraphNode,
+  ToolTask,
 } from "@earendil-works/pi-durable";
 import { MemoryStorage } from "@earendil-works/pi-durable/storage/memory";
 import { bool, obj, opt, str } from "@earendil-works/pi-schema";
 import { describe, expect, it } from "vitest";
 import {
   ApprovalNotices,
+  ApprovalSignal,
   approvalsIn,
+  ApprovalTracker,
   ApprovalWatch,
   awaitApproval,
   describeApproval,
@@ -485,6 +489,189 @@ describe("a tool that asks for itself", () => {
   });
 });
 
+/** What one approval watch reported: the owner notices and the diagnostics. */
+interface Seen {
+  readonly told: { id: string; text: string }[];
+  readonly events: DiagInput[];
+}
+
+const seen = (): Seen => ({ told: [], events: [] });
+
+/** An approval watch over `harness`, reporting into `into`; `reach` says whether a door can reach the owner. */
+function approvalWatch(
+  harness: Harness,
+  into: Seen,
+  options: { watched?: () => boolean; reach?: () => boolean; now?: () => number } = {},
+): ApprovalWatch {
+  return new ApprovalWatch({
+    harness,
+    delivery: {
+      tellOwner: async (_tx, notice) => {
+        if (options.reach !== undefined && !options.reach()) return false;
+        into.told.push(notice);
+        return true;
+      },
+    },
+    tools: new Map([
+      ["post", postTool],
+      ["note", noteTool],
+    ]),
+    diag: { emit: (event) => into.events.push(event) },
+    watched: options.watched ?? (() => false),
+    now: options.now ?? Date.now,
+    report: (error) => {
+      throw error;
+    },
+  });
+}
+
+/** Attaches `watch` to the harness's task-graph watch as the Durable Object does: seeded, then every frame. */
+async function attach(harness: Harness, watch: ApprovalWatch): Promise<() => Promise<void>> {
+  const activity = await harness.watchTaskGraph(ctx);
+  void watch.seed(activity.value, ctx);
+  activity.start(async (call) => {
+    if (call.kind === "value") void watch.observe(call.value, ctx);
+  });
+  return async () => {
+    await activity.stop();
+    await watch.settled();
+  };
+}
+
+/** Waits until `check` holds, letting frames and notices land. */
+async function eventually(check: () => boolean | Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt++) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error("Timed out waiting");
+}
+
+describe("the approval tracker", () => {
+  /** A one-task graph: the call's tool task in `state`. */
+  const graphWith = (state: TaskGraphNode["state"] | undefined): TaskGraph => ({
+    tasks:
+      state === undefined
+        ? {}
+        : {
+            "7": {
+              id: 7 as TaskGraphNode["id"],
+              kind: ToolTask.definition.name,
+              conversationId: 1 as TaskGraphNode["conversationId"],
+              background: false,
+              abortRequested: false,
+              state,
+              conversations: [],
+            },
+          },
+  });
+  const asleep = graphWith({
+    status: "sleeping",
+    phase: "call",
+    until: 1_000,
+    signals: [ApprovalSignal.key("7")],
+  });
+  const checking = graphWith({ status: "running", phase: "call" });
+
+  it("keeps a request while its gate checks again, and ends it only when the task goes", () => {
+    const tracker = new ApprovalTracker();
+    expect(tracker.update(asleep, 0).map(({ kind }) => kind)).toEqual(["requested"]);
+    // Woken on a reopen or registry change: running, then asleep once more. Neither is a change.
+    expect(tracker.update(checking, 1)).toEqual([]);
+    expect(tracker.pending.map(({ id }) => id)).toEqual(["7"]);
+    expect(tracker.update(asleep, 2)).toEqual([]);
+    // Gone before its deadline: canceled. A fresh one past its deadline: expired.
+    expect(tracker.update(graphWith(undefined), 3)).toEqual([
+      expect.objectContaining({ kind: "ended", how: "canceled" }),
+    ]);
+    tracker.update(asleep, 4);
+    expect(tracker.update(graphWith(undefined), 1_000)).toEqual([
+      expect.objectContaining({ kind: "ended", how: "expired" }),
+    ]);
+  });
+
+  it("ends an answered request once it stops sleeping, and seeds without changes", () => {
+    const tracker = new ApprovalTracker();
+    tracker.seed(asleep);
+    expect(tracker.pending.map(({ id }) => id)).toEqual(["7"]);
+    expect(tracker.update(asleep, 0)).toEqual([]);
+    tracker.answered("7");
+    expect(tracker.pending).toEqual([]);
+    expect(tracker.update(checking, 1)).toEqual([
+      expect.objectContaining({ kind: "ended", how: "resolved" }),
+    ]);
+    // An id it never saw pending can't be marked answered.
+    tracker.answered("8");
+    expect(tracker.update(graphWith(undefined), 2)).toEqual([]);
+  });
+});
+
+describe("the approval watch across a restart", () => {
+  it.each([
+    ["a gated call", "post", { text: "durable" }],
+    ["a call that asked for itself", "note", { text: "durable", ask: true }],
+  ] as const)(
+    "keeps %s pending, tells the owner once, and logs no false end",
+    async (_label, tool, args) => {
+      const stub = env.AGENT.getByName(`approvals-watch-restart-${tool}`);
+      await runInDurableObject(stub, async (_instance, state) => {
+        await state.blockConcurrencyWhile(async () => {});
+        const agent = await openAgent([call(tool, args), say("Done.")], () =>
+          openDurableObjectSqliteStorage(state.storage),
+        );
+        try {
+          const before = seen();
+          const first = approvalWatch(agent.harness, before, { now: () => agent.clock.now });
+          let detach = await attach(agent.harness, first);
+          const chat = await conversation(agent.harness);
+          const submission = await send(agent.harness, chat.id, `${tool} durable`);
+          const [ref] = approvalsIn(await pending(agent.harness));
+          await eventually(() => before.told.length === 1);
+          await detach();
+
+          await agent.reopen();
+          const after = seen();
+          const second = approvalWatch(agent.harness, after, { now: () => agent.clock.now });
+          detach = await attach(agent.harness, second);
+          const graph = await pending(agent.harness);
+          await eventually(async () => {
+            await second.settled();
+            return second.pending.some(({ id }) => id === ref!.id);
+          });
+          // Let any frames from the call checking again on reopen land.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          await second.settled();
+          expect(second.pending.map(({ id }) => id)).toEqual([ref!.id]);
+          expect(after.told).toEqual([]);
+          expect(after.events).toEqual([]);
+          expect((await agent.harness.snapshot(ApprovalNotices, ctx))?.notified).toEqual([ref!.id]);
+
+          await resolveApproval(
+            agent.harness,
+            graph,
+            ref!.id,
+            answer("approve"),
+            agent.clock.now,
+            ctx,
+          );
+          second.answered(ref!.id);
+          expect(second.pending).toEqual([]);
+          const reacquired = await agent.harness.submission(submission.id, ctx);
+          expect((await reacquired!.wait(ctx)).status).toBe("done");
+          await eventually(() => after.events.length > 0);
+          await detach();
+          expect(after.events.map(({ kind }) => kind)).toEqual(["approval.resolved"]);
+          expect(before.told).toHaveLength(1);
+          expect(ran).toEqual([`${tool}:durable`]);
+        } finally {
+          await agent.close();
+        }
+      });
+      await evictDurableObject(stub);
+    },
+  );
+});
+
 describe("the approval watch", () => {
   it("tells the owner once per request, also after a restart, and logs how it ended", async () => {
     const agent = await openAgent([call("post", { text: "ping" }), say("Posted.")]);
@@ -544,6 +731,63 @@ describe("the approval watch", () => {
       const quiet = watch();
       await quiet.observe(graph, ctx);
       expect(told).toHaveLength(1);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("tells at the next open a request nobody was told about, and only once a door can reach the owner", async () => {
+    const agent = await openAgent([call("post", { text: "missed" }), say("Posted.")]);
+    try {
+      const chat = await conversation(agent.harness);
+      await send(agent.harness, chat.id, "post missed");
+      const graph = await pending(agent.harness);
+      const [ref] = approvalsIn(graph);
+
+      // Watched when it was asked: nobody was pinged.
+      const quiet = seen();
+      await approvalWatch(agent.harness, quiet, { watched: () => true }).seed(graph, ctx);
+      expect(quiet.told).toEqual([]);
+
+      // Opened again with nobody watching, and no door that knows where the owner is: not marked told.
+      let reach = false;
+      const later = seen();
+      await approvalWatch(agent.harness, later, { reach: () => reach }).seed(graph, ctx);
+      expect(later.told).toEqual([]);
+      expect((await agent.harness.snapshot(ApprovalNotices, ctx))?.notified ?? []).toEqual([]);
+
+      // A door can reach them now: told once, and the seed logs nothing.
+      reach = true;
+      await approvalWatch(agent.harness, later, { reach: () => reach }).seed(graph, ctx);
+      expect(later.told.map(({ id }) => id)).toEqual([`approval:${ref!.id}`]);
+      expect(later.events).toEqual([]);
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("doesn't announce a request answered before its notice runs, or describe one that ended", async () => {
+    const agent = await openAgent([call("post", { text: "quick" }), say("Posted.")]);
+    try {
+      const chat = await conversation(agent.harness);
+      const submission = await send(agent.harness, chat.id, "post quick");
+      const graph = await pending(agent.harness);
+      const [ref] = approvalsIn(graph);
+      const into = seen();
+      const watch = approvalWatch(agent.harness, into);
+      const noticed = watch.observe(graph, ctx);
+      // Answered in the same tick, before the queued notice reads the list.
+      watch.answered(ref!.id);
+      await noticed;
+      expect(into.told).toEqual([]);
+      expect(into.events.map(({ kind }) => kind)).toEqual(["approval.requested"]);
+
+      await resolveApproval(agent.harness, graph, ref!.id, answer("approve"), agent.clock.now, ctx);
+      await submission.wait(ctx);
+      // The ended task is still kept by `getTask`, but it asks nothing any more.
+      expect(await describeApproval(agent.harness, ref!, new Map([["post", postTool]]), ctx)).toBe(
+        undefined,
+      );
     } finally {
       await agent.close();
     }

@@ -219,7 +219,8 @@ async function callOf(
   context: Context,
 ): Promise<{ readonly name: string; readonly arguments: CallArguments } | undefined> {
   const record = await harness.getTask(taskId, context);
-  if (record === undefined) return undefined;
+  // `getTask` keeps ended tasks: only one still waiting is asking.
+  if (record === undefined || record.state.status !== "sleeping") return undefined;
   // pi-ledger L14: a tool task's input is Pi Durable's `ToolTaskInput`; the graph names the task but not its call.
   const input = record.input as ToolTaskInput;
   switch (input.kind) {
@@ -244,7 +245,11 @@ async function callOf(
   }
 }
 
-/** What the owner is asked about `ref`, worded by its tool's policy; undefined when the task has ended. */
+/**
+ * What the owner is asked about `ref`, worded by its tool's policy; undefined when the task no longer waits. The
+ * arguments are the call as the model (or the calling tool) made it: no MiPi `beforeTool` hook rewrites arguments, so
+ * they are also what the gate approves (pi-ledger L14).
+ */
 export async function describeApproval(
   harness: Harness,
   ref: ApprovalRef,
@@ -327,30 +332,48 @@ export type ApprovalChange =
   | { readonly kind: "ended"; readonly ref: ApprovalRef; readonly how: ApprovalEnd };
 
 /**
- * Follows the pending list across task-graph updates, for diagnostics and owner notices. In memory only: after a
- * restart every pending approval is `requested` again (the notices doc keeps the owner from being told twice), and an
- * approval that left is told apart by whether this object answered it and by its deadline.
+ * Follows the pending list across task-graph updates, for diagnostics and owner notices. In memory only: the Durable
+ * Object seeds it from the graph when it opens (`seed`), so a restart neither loses nor re-announces a request.
+ *
+ * A request that stops sleeping while its task is still live is kept, unless it was answered: a gate checks again on
+ * every wake and reopen (`pending`, `running`, then asleep once more), and that is not the request ending. It ends
+ * when its task leaves the graph (or, once answered, when it stops sleeping), and is told apart by whether this
+ * object answered it and by its deadline.
  */
 export class ApprovalTracker {
   readonly #pending = new Map<string, ApprovalRef>();
   readonly #answered = new Set<string>();
 
-  /** The approvals pending as of the last update. */
+  /** The approvals waiting for an answer as of the last update. */
   get pending(): readonly ApprovalRef[] {
-    return [...this.#pending.values()];
+    return [...this.#pending.values()].filter(({ id }) => !this.#answered.has(id));
   }
 
-  /** Marks `id` answered, so its leaving reads as `resolved`. */
+  /** Marks `id` answered, so it is no longer pending and its leaving reads as `resolved`. */
   answered(id: string): void {
-    this.#answered.add(id);
+    if (this.#pending.has(id)) this.#answered.add(id);
+  }
+
+  /** Takes `graph` as the starting point: what it shows pending is pending, with no change to report. */
+  seed(graph: TaskGraph): void {
+    this.#pending.clear();
+    this.#answered.clear();
+    for (const ref of approvalsIn(graph)) this.#pending.set(ref.id, ref);
   }
 
   update(graph: TaskGraph, now: number): ApprovalChange[] {
     const current = new Map(approvalsIn(graph).map((ref) => [ref.id, ref]));
+    const next = new Map(current);
     const changes: ApprovalChange[] = [];
     for (const [id, ref] of this.#pending) {
       if (current.has(id)) continue;
-      const how: ApprovalEnd = this.#answered.has(id)
+      const answered = this.#answered.has(id);
+      // Still live and not answered: a gate checking again, or an abort under way. Not ended yet.
+      if (!answered && graph.tasks[String(ref.taskId)] !== undefined) {
+        next.set(id, ref);
+        continue;
+      }
+      const how: ApprovalEnd = answered
         ? "resolved"
         : ref.expiresAt !== undefined && ref.expiresAt <= now
           ? "expired"
@@ -362,7 +385,7 @@ export class ApprovalTracker {
       if (!this.#pending.has(id)) changes.push({ kind: "requested", ref });
     }
     this.#pending.clear();
-    for (const [id, ref] of current) this.#pending.set(id, ref);
+    for (const [id, ref] of next) this.#pending.set(id, ref);
     return changes;
   }
 }
@@ -435,7 +458,7 @@ export const noticeText = (approval: Pick<PendingApproval, "summary">): string =
 
 /**
  * Tells the owner about each of `approvals` not told yet, where they can be reached (`Delivery.tellOwner`), and forgets
- * the ones no longer in `pending`. Returns the ids told now.
+ * the ones no longer in `pending`. Returns the ids told now; one with nowhere to go is not marked told.
  */
 export async function noticeApprovals(
   harness: Harness,
@@ -453,11 +476,9 @@ export async function noticeApprovals(
     const told: string[] = [];
     for (const approval of approvals) {
       if (!live.has(approval.id) || state.notified.includes(approval.id)) continue;
-      await delivery.tellOwner(
-        tx,
-        { id: `approval:${approval.id}`, text: noticeText(approval) },
-        now,
-      );
+      // Nobody to tell yet (no door knows where the owner is): left untold, as the cap notice is.
+      const notice = { id: `approval:${approval.id}`, text: noticeText(approval) };
+      if (!(await delivery.tellOwner(tx, notice, now))) continue;
       state.notified.push(approval.id);
       told.push(approval.id);
     }
@@ -478,8 +499,10 @@ export interface ApprovalWatchOptions {
 }
 
 /**
- * What the Durable Object runs on each task-graph update: the diagnostics of the pending list's changes, and a notice
- * to the owner for each new request while nobody watches. The notices run one after another, off the watch callback.
+ * What the Durable Object runs on its task-graph watch: the diagnostics of the pending list's changes, and a notice to
+ * the owner for each request not told yet while nobody watches. `seed` takes the graph as the watch opens (a watch
+ * only delivers later frames); `observe` each frame after. Notices run one after another, off the watch callback, and
+ * read the pending list again when their turn comes, so a request answered or ended meanwhile isn't announced.
  */
 export class ApprovalWatch {
   readonly #options: ApprovalWatchOptions;
@@ -498,24 +521,44 @@ export class ApprovalWatch {
     this.#tracker.answered(id);
   }
 
+  /**
+   * Takes the graph as the watch opens: what it shows pending is pending, with no diagnostic, and the owner is told
+   * about any request a crash kept from being told. The promise settles when that is done. Never rejects.
+   */
+  seed(graph: TaskGraph, context: Context): Promise<void> {
+    this.#tracker.seed(graph);
+    return this.#notice(this.#tracker.pending, context);
+  }
+
   /** Takes one graph update; the promise settles when its notices are sent (for `waitUntil`). Never rejects. */
   observe(graph: TaskGraph, context: Context): Promise<void> {
-    const { harness, delivery, tools, diag, watched, now, report } = this.#options;
+    const { diag, now } = this.#options;
     const at = now();
     const changes = this.#tracker.update(graph, at);
+    if (changes.length === 0) return this.#queue;
     for (const change of changes) emitApprovalChange(diag, change, at);
-    const requested = changes.flatMap((change) =>
-      change.kind === "requested" ? [change.ref] : [],
+    return this.#notice(
+      changes.flatMap((change) => (change.kind === "requested" ? [change.ref] : [])),
+      context,
     );
-    const left = changes.some((change) => change.kind === "ended");
-    if (requested.length === 0 && !left) return this.#queue;
-    const pending = this.#tracker.pending;
+  }
+
+  /** Settles when every queued notice has: awaited before the harness closes. */
+  settled(): Promise<void> {
+    return this.#queue;
+  }
+
+  #notice(requested: readonly ApprovalRef[], context: Context): Promise<void> {
+    const { harness, delivery, tools, watched, now, report } = this.#options;
     const tell = !watched();
     this.#queue = this.#queue
       .then(async () => {
+        // As of now, not as of the frame: a request answered or ended since isn't announced.
+        const pending = this.#tracker.pending;
         const described: PendingApproval[] = [];
         if (tell) {
           for (const ref of requested) {
+            if (!pending.some(({ id }) => id === ref.id)) continue;
             const approval = await describeApproval(harness, ref, tools, context);
             if (approval !== undefined) described.push(approval);
           }

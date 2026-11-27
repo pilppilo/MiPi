@@ -368,6 +368,8 @@ export class MipiAgent extends DurableObject<Env> {
   /** The data's fingerprint when the current export began; a different one at the end means something wrote. */
   #exportFingerprint: string | undefined;
   #activity!: WatchHandle<TaskGraph>;
+  /** The pending approvals (COD-173), read off the task graph: made with each harness. */
+  #approvals: ApprovalWatch | undefined;
   readonly #views = new Map<WebSocket, WatchHandle<ConversationView>>();
   readonly #typingConnections = new Set<WebSocket>();
   readonly #connectionOperations = new KeyedSerialQueue<WebSocket>();
@@ -549,6 +551,9 @@ export class MipiAgent extends DurableObject<Env> {
     this.#relay?.close();
     this.#relay = undefined;
     await this.#activity.stop();
+    // No frame comes after the stop; the notices already queued finish before the harness closes.
+    await this.#approvals?.settled();
+    this.#approvals = undefined;
     await this.#harness.close(BACKGROUND_CONTEXT);
     await this.#alarm.settled();
   }
@@ -1036,10 +1041,18 @@ export class MipiAgent extends DurableObject<Env> {
         diag: this.#diag,
         watched: () => this.#connections().length > 0,
         now: Date.now,
-        report: (error) => reportError("Telling the owner about an approval failed", error),
+        // A notice cut off by a close for maintenance is told again from the graph at the next open.
+        report: (error) => {
+          if (this.#harness === harness && this.#closing === undefined) {
+            reportError("Telling the owner about an approval failed", error);
+          }
+        },
       });
+      this.#approvals = approvals;
       activity = await harness.watchTaskGraph(BACKGROUND_CONTEXT);
       this.#activity = activity;
+      // A watch delivers only later frames: what is pending at open comes from its value.
+      this.ctx.waitUntil(approvals.seed(activity.value, BACKGROUND_CONTEXT));
       activity.start(async (call) => {
         if (call.kind !== "value") return;
         this.#broadcast({ type: "session.activity", activity: call.value });

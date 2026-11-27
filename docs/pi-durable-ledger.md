@@ -127,7 +127,7 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Kind:** internals
 - **Since:** 0.2.0-alpha.1
 - **Upstream:** Pi Durable 1.6.1's task graph names a sleeping tool task, its conversation, deadline and signal keys, but not the call it runs. A model-issued call's name and arguments are only in its assistant entry, which the task's input (`ToolTaskInput`, read through `harness.getTask`) points to; `getTask` types the input as plain JSON.
-- **MiPi:** `describeApproval` (`src/agent/approvals.ts`, COD-173) casts a pending approval's task input to `ToolTaskInput` and reads the call from the assistant entry it names (or from the input, for a nested call), to show the owner what they are asked. The pending list itself comes from the task graph's public fields. `test/contract.test.ts` checks the input's `kind` on a real harness.
+- **MiPi:** `describeApproval` (`src/agent/approvals.ts`, COD-173) casts a pending approval's task input to `ToolTaskInput` and reads the call from the assistant entry it names (or from the input, for a nested call), to show the owner what they are asked. The pending list itself comes from the task graph's public fields. `test/contract.test.ts` checks the input's `kind` on a real harness. These are the arguments as the model sent them, before `prepareArguments` and any `beforeTool` rewrite: no MiPi hook rewrites arguments today, so they are what the gate approves. An extension that starts rewriting them must also have the gate keep the arguments it saw (a memo) and show those.
 - **Remove when:** the task graph or a tool slot carries a parked call's name and arguments, or `getTask` returns a typed tool task input.
 
 ## Closed
