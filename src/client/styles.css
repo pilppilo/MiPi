@@ -876,3 +876,151 @@ body:has(.session-workspace) {
   font-style: italic;
   opacity: 0.6;
 }
+
+/* Settings → Diagnostics (COD-236): a summary strip, a banner, filters and a full-width event table. */
+.diagnostics {
+  display: grid;
+  gap: 0.75rem;
+  min-inline-size: 0;
+}
+
+.diagnostics h3,
+.diagnostics .settings-note {
+  margin-block: 0;
+}
+
+.diag-summary,
+.diag-filters,
+.diag-filters [role="group"] {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.diag-filters {
+  gap: 0.75rem;
+}
+
+.diag-count,
+.diag-alarm,
+.diag-hold,
+.diag-live,
+.diag-pending {
+  padding: 0.125rem 0.5rem;
+  border: 1px solid color-mix(in srgb, currentColor 24%, transparent);
+  border-radius: 999px;
+  font-size: 0.875rem;
+  white-space: nowrap;
+}
+
+.diag-count--error {
+  border-color: var(--diag-error);
+}
+
+.diag-count--warn,
+.diag-hold {
+  border-color: var(--diag-warn);
+}
+
+/* An outline, not a see-through fill: the button keeps its own background, so the text reads on any page. */
+.diag-chip[aria-pressed="true"] {
+  font-weight: 700;
+  outline: 2px solid currentColor;
+  outline-offset: -2px;
+}
+
+.diag-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid;
+  border-inline-start: 4px solid var(--diag-warn);
+}
+
+.diag-banner:has(
+  .diag-banner-item--errors,
+  .diag-banner-item--alarm-lost,
+  .diag-banner-item--state
+) {
+  border-inline-start-color: var(--diag-error);
+}
+
+.diag-banner ul {
+  flex: 1 1 18rem;
+  margin: 0;
+  padding-inline-start: 1.25rem;
+}
+
+.diag-error {
+  margin: 0;
+}
+
+.diag-table {
+  inline-size: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+}
+
+.diag-table th {
+  text-align: start;
+  font-weight: 600;
+  border-block-end: 1px solid;
+}
+
+.diag-table th,
+.diag-table td {
+  padding: 0.25rem 0.5rem;
+  vertical-align: top;
+}
+
+.diag-row td {
+  border-block-end: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.diag-row td:first-child {
+  border-inline-start: 3px solid transparent;
+}
+
+.diag-row--error td:first-child {
+  border-inline-start-color: var(--diag-error);
+}
+
+.diag-row--warn td:first-child {
+  border-inline-start-color: var(--diag-warn);
+}
+
+.diag-row--debug {
+  opacity: 0.75;
+}
+
+.diag-time {
+  font-family: ui-monospace, monospace;
+  white-space: nowrap;
+}
+
+.diag-kind {
+  font-family: ui-monospace, monospace;
+}
+
+.diag-summary-text {
+  display: block;
+  overflow-wrap: anywhere;
+  opacity: 0.85;
+}
+
+.diag-detail-row pre {
+  margin: 0;
+  padding: 0.5rem;
+  overflow-x: auto;
+  background: color-mix(in srgb, currentColor 5%, transparent);
+  font-size: 0.8125rem;
+}
+
+/* Mid tones that read on light and dark backgrounds; only borders use them, never text. */
+.diagnostics {
+  --diag-error: #d0342c;
+  --diag-warn: #c98a00;
+}
