@@ -12,6 +12,7 @@ const state = vi.hoisted(() => ({
   cleanup: undefined as (() => void) | undefined,
   message: undefined as ((event: { data: string }) => void) | undefined,
   open: undefined as (() => void) | undefined,
+  closed: undefined as ((event: { code: number; reason: string }) => void) | undefined,
   send: vi.fn(),
   close: vi.fn(),
   /** Each `useReducer`'s dispatch, by its reducer. */
@@ -42,6 +43,9 @@ vi.mock("partysocket", () => ({
     addEventListener(type: string, listener: (event: { data: string }) => void) {
       if (type === "message") state.message = listener;
       if (type === "open") state.open = listener as () => void;
+      if (type === "close") {
+        state.closed = listener as unknown as (event: { code: number; reason: string }) => void;
+      }
     }
   },
 }));
@@ -256,6 +260,37 @@ it("ignores frames it doesn't know, and sends no optional request the agent didn
     expect(state.close).toHaveBeenCalledWith(1002, "Invalid protocol frame");
   } finally {
     consoleError.mockRestore();
+    state.cleanup?.();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("forgets the agent's capabilities when the socket closes, until the next snapshot (COD-246)", () => {
+  state.send.mockClear();
+  state.dispatches.clear();
+  vi.stubGlobal("window", { location: { host: "localhost" }, setTimeout: vi.fn() });
+  const document = new EventTarget() as EventTarget & { visibilityState: string };
+  document.visibilityState = "visible";
+  vi.stubGlobal("document", document);
+  try {
+    const session = usePiSession("test");
+    const receive = (frame: object) => state.message!({ data: JSON.stringify(frame) });
+    const sent = () => state.send.mock.calls.map(([message]) => JSON.parse(message as string));
+    receive({
+      type: "session.snapshot",
+      session: { conversations: [{ id: 1, kind: "main" }], capabilities: ["diagnostics", "usage"] },
+    });
+    // A dropped connection: the next agent may be a rolled-back build.
+    state.closed!({ code: 1006, reason: "" });
+    state.open!();
+    state.send.mockClear();
+    session.subscribeDiag();
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(sent()).toEqual([]);
+    // The new agent's snapshot decides: it has neither.
+    receive({ type: "session.snapshot", session: { conversations: [{ id: 1, kind: "main" }] } });
+    expect(sent().map(({ type }) => type)).toEqual(["options.list"]);
+  } finally {
     state.cleanup?.();
     vi.unstubAllGlobals();
   }

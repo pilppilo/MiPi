@@ -12,7 +12,7 @@ COD-246: frontend slice 0 (COD-243). The web client depends on the wire contract
 **Changed**
 
 - The client ignores frames it doesn't know. `parseServerEventEnvelope` reads an unknown event type, or a `command.result` for a command the client never sends, as `{ type: "unknown", rawType }` instead of throwing, so a newer or rolled-back agent no longer closes the socket with a 1002 protocol error. A malformed frame of a known type still does.
-- A snapshot without `capabilities` (an older agent) turns every optional panel off, and the client sends that agent no usage or diagnostics request.
+- A snapshot without `capabilities` (an older agent) turns every optional panel off, and the client sends that agent no usage or diagnostics request. While reconnecting, the client sends no optional request until the new agent's snapshot arrives, and Settings left open on Diagnostics falls back to Archived if the new agent has none.
 - `src/client/` imports only `src/protocol.ts`, `src/lib/`, npm packages and itself. The Pi types and helpers it needs (`ConversationTranscript`, `applyImmutable`, `BACKGROUND_CONTEXT`, the transcript entry kinds, the task graph and view types) are re-exported from `src/protocol.ts`. Lint enforces it, and core (`src/agent/`) may no longer import the client, nor (outside the composition root) the Worker.
 
 **Pi Durable**

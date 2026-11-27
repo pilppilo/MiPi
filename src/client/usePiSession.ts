@@ -405,6 +405,8 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
       pagesRef.current.clear();
       // The new socket subscribes again (`resubscribeDiag`); until then nothing streams.
       diagLiveRef.current = false;
+      // The next agent may be another build (a rollback): nothing optional is sent until its snapshot says so.
+      capabilitiesRef.current = initialSessionState.capabilities;
       dispatchDiag({ type: "stopped" });
       if (disposed) return;
       if (terminalProtocolClose(event.code)) {

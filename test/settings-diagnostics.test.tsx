@@ -165,6 +165,20 @@ describe("Settings → Diagnostics", () => {
       }),
     );
     expect(bare).not.toContain("Diagnostics");
+    // Shown when the agent lost diagnostics (a rollback, COD-246): Archived, not a blank pane.
+    const lost = renderToStaticMarkup(
+      createElement(SettingsPanel, {
+        conversations: [],
+        disabled: false,
+        onOpen: () => {},
+        onRestore: () => {},
+        onClose: () => {},
+        initialSection: "diagnostics",
+      }),
+    );
+    expect(lost).not.toContain("Diagnostics");
+    expect(lost).toMatch(/aria-current="page"[^>]*>Archived</);
+    expect(lost).toContain('id="archived-heading"');
   });
 
   it("shows the summary strip, the banner and every event, without secrets or message text", () => {

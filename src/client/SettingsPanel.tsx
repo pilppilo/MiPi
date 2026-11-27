@@ -44,8 +44,10 @@ export function SettingsPanel({
   readonly diagnostics?: DiagnosticsProps;
   readonly initialSection?: SettingsSection;
 }) {
-  const [section, setSection] = useState<SettingsSection>(initialSection);
+  const [chosen, setSection] = useState<SettingsSection>(initialSection);
   const sections = SECTIONS.filter(({ id }) => id !== "diagnostics" || diagnostics !== undefined);
+  // A section that went away while shown (an agent without diagnostics, COD-246) falls back to the first one.
+  const section = sections.some(({ id }) => id === chosen) ? chosen : sections[0]!.id;
   return (
     <section id="settings-panel" className="settings-panel" aria-labelledby="settings-heading">
       <header className="settings-header">
