@@ -36,12 +36,17 @@ const graph = {
     "3": task(3, "pi.generation", 7, { status: "running", phase: "generate" }),
     "4": task(4, "pi.generation", 8, { status: "pending", phase: "start" }),
     "5": task(5, "pi.generation", 9, { status: "running", phase: "generate" }),
+    "6": task(6, "app.reminder", 7, {
+      status: "sleeping",
+      phase: "wait",
+      until: Date.UTC(2026, 10, 29),
+    }),
   },
 } as unknown as TaskGraph;
 
 describe("a bot's tasks", () => {
   it("are its own, its cobots' and its subagents', never another bot's", () => {
-    expect(tasksOfBot(conversations, graph, 6).map(({ id }) => id)).toEqual([1, 2, 3, 4]);
+    expect(tasksOfBot(conversations, graph, 6).map(({ id }) => id)).toEqual([1, 2, 3, 4, 6]);
     expect(tasksOfBot(conversations, graph, 9).map(({ id }) => id)).toEqual([5]);
     expect(tasksOfBot(conversations, graph, 4)).toEqual([]);
     expect(tasksOfBot(conversations, undefined, 6)).toEqual([]);
@@ -84,8 +89,9 @@ describe("Workbench", () => {
     expect(running).toMatch(
       /workbench-step--running.*Web pages<span class="visually-hidden"> · Running</,
     );
-    // A side chat's or subagent's run is noted, and has no steps of the open conversation.
-    expect(running.match(/for a side chat/g)).toHaveLength(2);
+    // A side chat's or a helper's run says which, and has no steps of the open conversation.
+    expect(running.match(/for a side chat/g)).toHaveLength(1);
+    expect(running.match(/for a helper/g)).toHaveLength(1);
     expect(running.match(/aria-label="Steps"/g)).toHaveLength(1);
     expect(running).not.toMatch(/search_history|web_fetch|pi\.generation/);
   });
@@ -96,6 +102,9 @@ describe("Workbench", () => {
     expect(waiting).toContain(">Reminder<");
     expect(waiting).toMatch(/Wakes /);
     expect(waiting).not.toContain("app.reminder");
+    // Waiting work in a side chat says so too; the bot's own doesn't.
+    expect(waiting.match(/class="workbench-card"/g)).toHaveLength(2);
+    expect(waiting.match(/for a side chat/g)).toHaveLength(1);
   });
 
   it("lists the other bots with their state, and links each to its own Workbench", () => {

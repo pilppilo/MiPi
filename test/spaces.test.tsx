@@ -1,6 +1,11 @@
 /** Spaces (COD-249): which spaces show, and the one a page link or a lost capability lands on. */
 import { describe, expect, it } from "vitest";
-import { availableSpaces, shownSpace, spaceFromSearch } from "../src/client/spaces.ts";
+import {
+  availableSpaces,
+  shownSpace,
+  spaceFromSearch,
+  conversationHref,
+} from "../src/client/spaces.ts";
 
 describe("spaces", () => {
   it("always has Chat, and Workbench only when the agent advertises activity", () => {
@@ -27,5 +32,12 @@ describe("spaces", () => {
     expect(spaceFromSearch("?conversation=4&space=workbench")).toBe("workbench");
     expect(spaceFromSearch("?space=plan")).toBe("chat");
     expect(spaceFromSearch("")).toBe("chat");
+    expect(spaceFromSearch("?space=chat")).toBe("chat");
+  });
+
+  it("builds a conversation's link in a space, bare for Chat", () => {
+    expect(conversationHref(6, "chat")).toBe("?conversation=6");
+    expect(conversationHref(6, "workbench")).toBe("?conversation=6&space=workbench");
+    expect(spaceFromSearch(conversationHref(6, "workbench"))).toBe("workbench");
   });
 });

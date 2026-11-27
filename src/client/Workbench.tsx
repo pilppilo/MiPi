@@ -87,6 +87,15 @@ export function Workbench({
   const others = bots.filter(({ id }) => id !== bot.id);
   const name = label(bot);
 
+  /** A task run in a conversation of this bot other than its own: says which kind. */
+  const taskWhere = (task: TaskGraphNode) => {
+    if (task.conversationId === undefined || task.conversationId === bot.id) return null;
+    const where = conversations.find(({ id }) => id === task.conversationId);
+    // A subagent is made by a tool call; a cobot is a side chat with this bot.
+    const note = where?.owner !== undefined ? "for a helper" : "for a side chat";
+    return <span className="workbench-card-note">{note}</span>;
+  };
+
   const open = (event: MouseEvent<HTMLAnchorElement>, conversationId: number): void => {
     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
       return;
@@ -118,9 +127,7 @@ export function Workbench({
                   <p className="workbench-card-title">
                     <span className="workbench-pulse" aria-hidden="true" />
                     {taskName(task.kind)}
-                    {task.conversationId === bot.id ? null : (
-                      <span className="workbench-card-note">for a side chat</span>
-                    )}
+                    {taskWhere(task)}
                   </p>
                   {steps.length === 0 ? null : (
                     <ol className="workbench-steps" aria-label="Steps">
@@ -151,7 +158,10 @@ export function Workbench({
           <ul className="workbench-cards">
             {waiting.map((task) => (
               <li key={task.id} className="workbench-card">
-                <p className="workbench-card-title">{taskName(task.kind)}</p>
+                <p className="workbench-card-title">
+                  {taskName(task.kind)}
+                  {taskWhere(task)}
+                </p>
                 <p className="workbench-card-note">{wakeText(task)}</p>
               </li>
             ))}

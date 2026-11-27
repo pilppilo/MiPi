@@ -34,6 +34,14 @@ export function availableSpaces(capabilities: ReadonlySet<string>): readonly Spa
 export const shownSpace = (chosen: SpaceId, spaces: readonly Space[]): SpaceId =>
   spaces.some(({ id }) => id === chosen) ? chosen : "chat";
 
-/** `?space=workbench` on the page: a link straight into a space. Anything else is Chat. */
-export const spaceFromSearch = (search: string): SpaceId =>
-  new URLSearchParams(search).get("space") === "workbench" ? "workbench" : "chat";
+/** `?space=<id>` on the page: a link straight into a space. Anything unknown, or nothing, is Chat. */
+export function spaceFromSearch(search: string): SpaceId {
+  const named = new URLSearchParams(search).get("space");
+  return SPACES.find(({ id }) => id === named)?.id ?? "chat";
+}
+
+/** The link to a conversation in a space. Chat is the default, so its links stay bare. */
+export const conversationHref = (conversationId: number, space: SpaceId): string =>
+  space === "chat"
+    ? `?conversation=${conversationId}`
+    : `?conversation=${conversationId}&space=${space}`;

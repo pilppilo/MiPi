@@ -38,7 +38,13 @@ import { ActivityPanel } from "./ActivityPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { askMiPi } from "./diagnostics.ts";
 import { DRAWER_CLOSED, drawerReducer } from "./drawer.ts";
-import { availableSpaces, shownSpace, type SpaceId, spaceFromSearch } from "./spaces.ts";
+import {
+  availableSpaces,
+  conversationHref,
+  shownSpace,
+  type SpaceId,
+  spaceFromSearch,
+} from "./spaces.ts";
 import { Workbench } from "./Workbench.tsx";
 import {
   modelName,
@@ -236,7 +242,12 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     (bot): bot is ConversationSummary => bot !== undefined,
   );
   const activity = activityByBot(session.conversations, activityGraph);
-  const ownUnread = useUnread(sessionId, session.conversations, activeConversationId);
+  const ownUnread = useUnread(
+    sessionId,
+    session.conversations,
+    // Only the Chat space reads a bot's messages; looking at its Workbench leaves them unread.
+    space === "chat" ? activeConversationId : undefined,
+  );
   const unread = unreadByBot(session.conversations, ownUnread);
   const activityCount = Object.keys(activityGraph?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
@@ -314,7 +325,14 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
-    if (transcript === null) return;
+    if (transcript === null) {
+      // Another space shows instead of the transcript: forget its scroll state, so coming back
+      // lands on the latest message like opening the conversation fresh.
+      renderedConversationRef.current = undefined;
+      transcriptHeightRef.current = 0;
+      stopAutoScroll();
+      return;
+    }
 
     const conversationChanged = renderedConversationRef.current !== activeConversationId;
     const previousHeight = transcriptHeightRef.current;
@@ -349,7 +367,8 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     ) {
       session.openConversation(conversationId);
     }
-    // Back or forward lands on a conversation: Settings would hide it.
+    // Back or forward lands on a conversation, in the space its link names: Settings would hide it.
+    setChosenSpace(spaceFromSearch(window.location.search));
     setSettingsOpen(false);
   });
 
@@ -366,7 +385,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
       left?.archivedAt !== undefined &&
       activeConversationId === mainConversationId(session.conversations)
     ) {
-      window.history.replaceState(null, "", `?conversation=${activeConversationId}`);
+      window.history.replaceState(null, "", conversationHref(activeConversationId, space));
     }
   }, [activeConversationId]);
 
@@ -460,7 +479,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   const renderConversationLink = (summary: ConversationSummary) => (
     <a
-      href={`?conversation=${summary.id}`}
+      href={conversationHref(summary.id, space)}
       className={summary.kind === "main" ? "bot-link bot-link--main" : "bot-link"}
       aria-current={summary.id === activeConversationId ? "page" : undefined}
       onClick={(event) => followConversationLink(event, summary.id)}
@@ -545,7 +564,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   /** Workbench's Other bots: the bot opens, still in Workbench. */
   const openInWorkbench = (conversationId: number): void => {
     if (conversationId === session.activeConversationId) return;
-    window.history.pushState(null, "", `?conversation=${conversationId}&space=workbench`);
+    window.history.pushState(null, "", conversationHref(conversationId, "workbench"));
     session.openConversation(conversationId);
   };
 
@@ -564,7 +583,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
   const openFromSettings = (conversationId: number): void => {
     if (conversationId !== session.activeConversationId) {
-      window.history.pushState(null, "", `?conversation=${conversationId}`);
+      window.history.pushState(null, "", conversationHref(conversationId, space));
       session.openConversation(conversationId);
     }
     setSettingsOpen(false);
@@ -576,9 +595,13 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     askMiPi(prompt, {
       conversations: session.conversations,
       open: (conversationId) => {
+        // The prepared draft is for reading and sending: Chat, whichever space was open.
+        setChosenSpace("chat");
         if (conversationId !== session.activeConversationId) {
-          window.history.pushState(null, "", `?conversation=${conversationId}`);
+          window.history.pushState(null, "", conversationHref(conversationId, "chat"));
           session.openConversation(conversationId);
+        } else {
+          window.history.replaceState(null, "", conversationHref(conversationId, "chat"));
         }
       },
       // Not `updateDraft`: a prepared draft isn't the owner typing, so no typing presence goes out.
@@ -1121,7 +1144,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             closeButtonRef={activityCloseRef}
             onOpenConversation={(conversationId) => {
               if (conversationId !== session.activeConversationId) {
-                window.history.pushState(null, "", `?conversation=${conversationId}`);
+                window.history.pushState(null, "", conversationHref(conversationId, space));
                 session.openConversation(conversationId);
               }
               if (compactActivityLayout()) {

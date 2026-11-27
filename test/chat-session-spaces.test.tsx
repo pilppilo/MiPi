@@ -20,7 +20,7 @@ vi.mock("../src/client/usePiSession.ts", () => ({
     status: "connected",
     capabilities: mocked.capabilities,
     conversations: [
-      { id: 4, kind: "main", name: "MiPi" },
+      { id: 4, kind: "main", name: "MiPi", latestEntryId: 12 },
       { id: 6, kind: "bot", name: "Planner" },
     ],
     activeConversationId: 4,
@@ -39,9 +39,16 @@ vi.mock("../src/client/usePiSession.ts", () => ({
   }),
 }));
 
-const render = (capabilities: readonly string[], search = ""): string => {
+const render = (
+  capabilities: readonly string[],
+  search = "",
+  stored: Record<string, string> = {},
+): string => {
   mocked.capabilities = new Set(capabilities);
-  vi.stubGlobal("window", { location: { search } });
+  vi.stubGlobal("window", {
+    location: { search },
+    localStorage: { getItem: (key: string) => stored[key] ?? null, setItem: () => {} },
+  });
   return renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
 };
 
@@ -79,5 +86,23 @@ describe("spaces on the page (COD-249)", () => {
     expect(html).toContain("Nothing running. MiPi is asleep.");
     expect(html).toMatch(/<strong>Planner<\/strong>/);
     expect(html).toMatch(/aria-current="page"[^>]*>.*Workbench<\/span><\/button><\/nav>/);
+  });
+
+  it("keeps the space in the drawer's bot links, so opening a bot stays in Workbench", () => {
+    expect(render(["activity"], "?space=workbench")).toContain(
+      'href="?conversation=6&amp;space=workbench"',
+    );
+    const chat = render(["activity"]);
+    expect(chat).toContain('href="?conversation=6"');
+    expect(chat).not.toContain('space=workbench"');
+  });
+
+  it("leaves the open bot's new messages unread while its Workbench shows", () => {
+    // MiPi was read up to entry 10 on this device, and has 12.
+    const stored = {
+      "mipi:last-read:test": JSON.stringify({ seeded: true, entries: { "4": 10 } }),
+    };
+    expect(render(["activity"], "?space=workbench", stored)).toContain("bot-dot--unread");
+    expect(render(["activity"], "", stored)).not.toContain("bot-dot--unread");
   });
 });
