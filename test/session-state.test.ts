@@ -750,4 +750,62 @@ describe("session state", () => {
       }),
     ).toThrow("Entries page is invalid");
   });
+
+  // COD-246: a frame this client doesn't know is ignorable, never a protocol error.
+  it("reads an unknown event type, or a result for an unknown command, as an ignorable event", () => {
+    expect(event({ type: "approvals.pending", items: [] })).toEqual({
+      type: "unknown",
+      rawType: "approvals.pending",
+    });
+    expect(
+      event({ type: "command.result", command: "approval.resolve", requestId: "r", ok: true }),
+    ).toEqual({ type: "unknown", rawType: "command.result:approval.resolve" });
+    // The reducer leaves the state as it was.
+    const before = sessionReducer(initialSessionState, {
+      type: "event",
+      event: event({ type: "session.snapshot", session: { conversations: [{ id: 1 }] } }),
+    });
+    expect(sessionReducer(before, { type: "event", event: event({ type: "something.new" }) })).toBe(
+      before,
+    );
+    // A known event that is malformed still is one.
+    expect(() => event({ type: "conversation.head", conversationId: 0 })).toThrow();
+    expect(() => event({ type: 7 })).toThrow("Server message is not an event object");
+  });
+
+  it("keeps the advertised capabilities, sorted, and none from an older agent (COD-246)", () => {
+    const snapshot = (capabilities?: unknown) =>
+      event({
+        type: "session.snapshot",
+        session: {
+          conversations: [{ id: 1 }],
+          ...(capabilities === undefined ? {} : { capabilities }),
+        },
+      });
+    const parsed = snapshot(["usage", "activity", "usage", "future.thing"]);
+    expect(parsed).toMatchObject({
+      session: { capabilities: ["activity", "future.thing", "usage"] },
+    });
+    // An older agent sends none: no field, and every optional panel off.
+    expect(snapshot()).toEqual({
+      type: "session.snapshot",
+      session: { conversations: [{ id: 1 }] },
+    });
+    expect(() => snapshot("usage")).toThrow("Session snapshot capabilities are invalid");
+    expect(() => snapshot([1])).toThrow("Session snapshot capabilities are invalid");
+
+    expect(initialSessionState.capabilities.size).toBe(0);
+    let state = sessionReducer(initialSessionState, { type: "event", event: parsed });
+    expect([...state.capabilities]).toEqual(["activity", "future.thing", "usage"]);
+    // The same set again keeps the same object, so nothing that reads it re-renders.
+    const same = state.capabilities;
+    state = sessionReducer(state, {
+      type: "event",
+      event: snapshot(["activity", "future.thing", "usage"]),
+    });
+    expect(state.capabilities).toBe(same);
+    // A rolled-back agent: the panels go.
+    state = sessionReducer(state, { type: "event", event: snapshot() });
+    expect(state.capabilities.size).toBe(0);
+  });
 });

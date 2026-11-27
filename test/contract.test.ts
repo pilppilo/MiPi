@@ -669,6 +669,8 @@ describe("Pi seam contract", () => {
       const snapshot = parseServerEventEnvelope(String((await message).data));
       expect(snapshot.type).toBe("session.snapshot");
       if (snapshot.type !== "session.snapshot") throw new Error("Expected a session snapshot");
+      // COD-246: core's capabilities, sorted, in every snapshot (no built-in extension adds one yet).
+      expect(snapshot.session.capabilities).toEqual(["activity", "diagnostics", "usage"]);
       expect(snapshot.session.conversations.find(({ id }) => id === child)).toEqual({
         id: child,
         owner: { conversationId: cobot },

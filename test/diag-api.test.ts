@@ -9,6 +9,7 @@ import {
   type DiagSnapshot,
   parseDiagSnapshot,
   parseServerEventEnvelope,
+  type ReceivedServerEvent,
   type ServerEvent,
 } from "../src/protocol.ts";
 import { eventLine, HEARTBEAT_EVENTS_PATH, recentFaultLines } from "../scripts/heartbeat-events.ts";
@@ -236,13 +237,13 @@ describe("Worker-only refusals", () => {
 
 /** A socket's frames, parsed and checked as a client would. */
 const frames = (socket: WebSocket) => {
-  const seen: ServerEvent[] = [];
+  const seen: ReceivedServerEvent[] = [];
   const waiting: Array<() => void> = [];
   socket.addEventListener("message", (message) => {
     seen.push(parseServerEventEnvelope(String(message.data)));
     for (const wake of waiting.splice(0)) wake();
   });
-  const until = async <T extends ServerEvent>(match: (frame: ServerEvent) => boolean) => {
+  const until = async <T extends ServerEvent>(match: (frame: ReceivedServerEvent) => boolean) => {
     for (;;) {
       const found = seen.find(match);
       if (found !== undefined) return found as T;

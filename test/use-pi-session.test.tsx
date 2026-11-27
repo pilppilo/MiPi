@@ -11,7 +11,10 @@ import type { DiagEvent, DiagHealth } from "../src/protocol.ts";
 const state = vi.hoisted(() => ({
   cleanup: undefined as (() => void) | undefined,
   message: undefined as ((event: { data: string }) => void) | undefined,
+  open: undefined as (() => void) | undefined,
+  closed: undefined as ((event: { code: number; reason: string }) => void) | undefined,
   send: vi.fn(),
+  close: vi.fn(),
   /** Each `useReducer`'s dispatch, by its reducer. */
   dispatches: new Map<unknown, ReturnType<typeof vi.fn>>(),
 }));
@@ -36,9 +39,13 @@ vi.mock("partysocket", () => ({
     readonly OPEN = 1;
     readonly readyState = this.OPEN;
     readonly send = state.send;
-    readonly close = vi.fn();
+    readonly close = state.close;
     addEventListener(type: string, listener: (event: { data: string }) => void) {
       if (type === "message") state.message = listener;
+      if (type === "open") state.open = listener as () => void;
+      if (type === "close") {
+        state.closed = listener as unknown as (event: { code: number; reason: string }) => void;
+      }
     }
   },
 }));
@@ -51,6 +58,12 @@ it("forces usage.read only when a live update changes the run failure", () => {
     usePiSession("test");
     expect(state.message).toBeDefined();
     const receive = (frame: object) => state.message!({ data: JSON.stringify(frame) });
+    // The agent advertises usage (COD-246); the snapshot's own reads are not what this test counts.
+    receive({
+      type: "session.snapshot",
+      session: { conversations: [{ id: 1, kind: "main" }], capabilities: ["usage"] },
+    });
+    state.send.mockClear();
     const failure = { taskId: 9, inputs: [3], reason: "model_error", detail: "401 Unauthorized" };
     const view = {
       type: "conversation.view",
@@ -141,7 +154,14 @@ it("subscribes, takes the tail, catches up after a reconnect, and unsubscribes",
       ([reducer]) => reducer !== diagReducer,
     )![1];
 
+    // Before a snapshot says the agent has diagnostics (COD-246), nothing is sent: the snapshot subscribes.
     session.subscribeDiag();
+    expect(sent().filter(({ type }) => type === "diag.subscribe")).toEqual([]);
+    receive({
+      type: "session.snapshot",
+      session: { conversations: [{ id: 1, kind: "main" }], capabilities: ["diagnostics"] },
+    });
+    dispatchSession.mockClear();
     expect(sent().at(-1)).toMatchObject({ type: "diag.subscribe", limit: 200 });
     const subscribeId = sent().at(-1).requestId as string;
 
@@ -168,7 +188,11 @@ it("subscribes, takes the tail, catches up after a reconnect, and unsubscribes",
 
     // A new socket's session: it asks again from the newest event held.
     state.send.mockClear();
-    receive({ type: "session.snapshot", session: { conversations: [{ id: 1, kind: "main" }] } });
+    state.open!();
+    receive({
+      type: "session.snapshot",
+      session: { conversations: [{ id: 1, kind: "main" }], capabilities: ["diagnostics"] },
+    });
     expect(sent().filter(({ type }) => type === "diag.subscribe")).toEqual([
       expect.objectContaining({ type: "diag.subscribe", after: 6 }),
     ]);
@@ -191,6 +215,81 @@ it("subscribes, takes the tail, catches up after a reconnect, and unsubscribes",
     dispatchDiag.mockClear();
     receive({ type: "diag.event", event: diagEvent(7) });
     expect(dispatchDiag).not.toHaveBeenCalled();
+  } finally {
+    state.cleanup?.();
+    vi.unstubAllGlobals();
+  }
+});
+
+// COD-246: version skew never breaks the session.
+it("ignores frames it doesn't know, and sends no optional request the agent didn't advertise", () => {
+  state.send.mockClear();
+  state.close.mockClear();
+  state.dispatches.clear();
+  const setTimeout = vi.fn();
+  vi.stubGlobal("window", { location: { host: "localhost" }, setTimeout });
+  vi.stubGlobal("document", new EventTarget());
+  const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+  try {
+    const session = usePiSession("test");
+    const receive = (frame: object) => state.message!({ data: JSON.stringify(frame) });
+    const sent = () => state.send.mock.calls.map(([message]) => JSON.parse(message as string));
+    const dispatchSession = [...state.dispatches.entries()].find(
+      ([reducer]) => reducer !== diagReducer,
+    )![1];
+
+    // An older agent: no capabilities. Chat opens; usage and diagnostics are never asked for.
+    receive({ type: "session.snapshot", session: { conversations: [{ id: 1, kind: "main" }] } });
+    expect(sent().map(({ type }) => type)).toEqual(["options.list"]);
+    receive({ type: "session.activity", activity: { tasks: {} } });
+    session.subscribeDiag();
+    session.unsubscribeDiag();
+    expect(sent().map(({ type }) => type)).toEqual(["options.list"]);
+    expect(setTimeout).not.toHaveBeenCalled();
+
+    // A newer agent's frames: an event type and a command result this client has never heard of.
+    dispatchSession.mockClear();
+    receive({ type: "approvals.pending", items: [{ id: 1 }] });
+    receive({ type: "command.result", command: "approval.resolve", requestId: "x", ok: true });
+    expect(state.close).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(dispatchSession).not.toHaveBeenCalled();
+
+    // A malformed known frame still closes it, as before.
+    receive({ type: "conversation.head", conversationId: 0 });
+    expect(state.close).toHaveBeenCalledWith(1002, "Invalid protocol frame");
+  } finally {
+    consoleError.mockRestore();
+    state.cleanup?.();
+    vi.unstubAllGlobals();
+  }
+});
+
+it("forgets the agent's capabilities when the socket closes, until the next snapshot (COD-246)", () => {
+  state.send.mockClear();
+  state.dispatches.clear();
+  vi.stubGlobal("window", { location: { host: "localhost" }, setTimeout: vi.fn() });
+  const document = new EventTarget() as EventTarget & { visibilityState: string };
+  document.visibilityState = "visible";
+  vi.stubGlobal("document", document);
+  try {
+    const session = usePiSession("test");
+    const receive = (frame: object) => state.message!({ data: JSON.stringify(frame) });
+    const sent = () => state.send.mock.calls.map(([message]) => JSON.parse(message as string));
+    receive({
+      type: "session.snapshot",
+      session: { conversations: [{ id: 1, kind: "main" }], capabilities: ["diagnostics", "usage"] },
+    });
+    // A dropped connection: the next agent may be a rolled-back build.
+    state.closed!({ code: 1006, reason: "" });
+    state.open!();
+    state.send.mockClear();
+    session.subscribeDiag();
+    document.dispatchEvent(new Event("visibilitychange"));
+    expect(sent()).toEqual([]);
+    // The new agent's snapshot decides: it has neither.
+    receive({ type: "session.snapshot", session: { conversations: [{ id: 1, kind: "main" }] } });
+    expect(sent().map(({ type }) => type)).toEqual(["options.list"]);
   } finally {
     state.cleanup?.();
     vi.unstubAllGlobals();

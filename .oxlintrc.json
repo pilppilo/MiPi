@@ -33,6 +33,10 @@
               {
                 "group": ["**/extensions/**", "**/doors/**"],
                 "message": "Core imports no door or extension (COD-208, COD-210): only the composition root (agent-do.ts, composition.ts) names them. Reach a feature through a connector."
+              },
+              {
+                "group": ["**/client/**", "**/worker/**"],
+                "message": "Core never depends on the web client or the Worker (COD-246): they depend on core and the protocol, not the other way round."
               }
             ]
           }
@@ -53,6 +57,10 @@
               {
                 "group": ["**/doors/telegram/state*", "**/doors/telegram/outbox*"],
                 "message": "Only the Telegram door reads or writes its documents (COD-210). Core reaches its inputs and chats through the door's registrations (src/doors/telegram/index.ts); the composition root may name the door's runtime and sender."
+              },
+              {
+                "group": ["**/client/**"],
+                "message": "Core never depends on the web client (COD-246): the client depends on the protocol (src/protocol.ts), not the other way round."
               }
             ]
           }
@@ -169,6 +177,26 @@
                   "**/worker/**"
                 ],
                 "message": "A door imports only core (COD-210): never an extension, the composition root, the client or the Worker. Reach a feature through a connector."
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "files": ["src/client/**"],
+      "rules": {
+        "no-restricted-imports": [
+          "error",
+          {
+            "patterns": [
+              {
+                "group": ["@earendil-works/*", "@earendil-works/**"],
+                "message": "The web client reaches Pi Durable, pi-ai and chord only through the wire contract (src/protocol.ts, COD-246)."
+              },
+              {
+                "group": ["**/agent/**", "**/doors/**", "**/extensions/**", "**/worker/**"],
+                "message": "The web client imports only the wire contract (src/protocol.ts), src/lib/, npm packages and itself (COD-246), so an extension switched off or an agent rolled back never breaks it. Re-export what it needs through src/protocol.ts."
               }
             ]
           }

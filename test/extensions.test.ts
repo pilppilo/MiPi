@@ -76,6 +76,27 @@ describe("resolveExtensions", () => {
     expect(resolved.replacements).toEqual([]);
   });
 
+  it("advertises the active extensions' capabilities, deduplicated and sorted, never a replaced one's (COD-246)", () => {
+    const resolved = resolveExtensions(coreExtensions(), [
+      extension("notes", ["note"], { capabilities: ["notes", "memory.search"] }),
+      extension("search", ["find"], { capabilities: ["memory.search"] }),
+      // Replaced by `notes` (both register `note`): it stays installed but advertises nothing.
+      extension("old-notes", ["note"], { replaceable: true, capabilities: ["notes.legacy"] }),
+    ]);
+    expect(resolved.replacements.map(({ replaced }) => replaced)).toEqual(["old-notes"]);
+    expect(resolved.capabilities).toEqual(["memory.search", "notes"]);
+    // No built-in extension adds one yet: core's own (`CORE_CAPABILITIES`) are added by the agent.
+    expect(resolveExtensions(coreExtensions(), BUILT_IN_EXTENSIONS).capabilities).toEqual([]);
+  });
+
+  it("refuses to compose an extension with a malformed capability id (COD-246)", () => {
+    for (const id of ["", "Usage", "usage panel", "-usage", "usage.", "a".repeat(65)]) {
+      expect(() =>
+        resolveExtensions(coreExtensions(), [extension("x", ["x"], { capabilities: [id] })]),
+      ).toThrow(`Extension "x" declares an invalid capability id`);
+    }
+  });
+
   it("puts core's gates after every other extension, and refuses a gate with tools or sections", () => {
     const gate = defineExtension({ name: "gate" });
     const resolved = resolveExtensions(coreExtensions(), BUILT_IN_EXTENSIONS, [gate]);
