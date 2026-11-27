@@ -6,6 +6,7 @@ import {
   useEffect,
   useEffectEvent,
   useLayoutEffect,
+  useReducer,
   useRef,
   useState,
 } from "react";
@@ -36,6 +37,15 @@ import {
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { askMiPi } from "./diagnostics.ts";
+import { DRAWER_CLOSED, drawerReducer } from "./drawer.ts";
+import {
+  BotMark,
+  botStatusLabel,
+  MenuIcon,
+  SendIcon,
+  SettingsIcon,
+  WIDE_LAYOUT,
+} from "./marks.tsx";
 import { webPlatform } from "./platform/web.ts";
 import { Markdown } from "./Markdown.tsx";
 import { MessageText, TranscriptList } from "./Transcript.tsx";
@@ -172,6 +182,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [renamingCobot, setRenamingCobot] = useState<number>();
   const [confirmingArchive, setConfirmingArchive] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The spaces drawer on narrow screens (COD-244); on wide ones it is the sidebar, always shown.
+  const [drawer, dispatchDrawer] = useReducer(drawerReducer, DRAWER_CLOSED);
+  const drawerToggleRef = useRef<HTMLButtonElement | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
   const settingsToggleRef = useRef<HTMLButtonElement | null>(null);
   const settingsCloseRef = useRef<HTMLButtonElement | null>(null);
   const activityToggleRef = useRef<HTMLButtonElement | null>(null);
@@ -340,6 +354,25 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
+  // The drawer's focus: into it as it opens, back to its toggle as it closes.
+  useEffect(() => {
+    if (drawer.focus === "drawer") {
+      requestAnimationFrame(() => drawerRef.current?.focus());
+    } else if (drawer.focus === "toggle") {
+      requestAnimationFrame(() => drawerToggleRef.current?.focus());
+    }
+  }, [drawer]);
+
+  // Grown wide while open: the drawer is the sidebar now, and nothing is left inert.
+  useEffect(() => {
+    const wide = window.matchMedia(WIDE_LAYOUT);
+    const onChange = (): void => {
+      if (wide.matches) dispatchDrawer({ type: "wide" });
+    };
+    wide.addEventListener("change", onChange);
+    return () => wide.removeEventListener("change", onChange);
+  }, []);
+
   const submit = async (event: SubmitEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const content = draft.trim();
@@ -396,6 +429,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     event.preventDefault();
     // Settings covers the conversation: picking one from the sidebar shows it.
     setSettingsOpen(false);
+    pickedFromDrawer();
     if (conversationId !== session.activeConversationId) {
       window.history.pushState(null, "", event.currentTarget.href);
       session.openConversation(conversationId);
@@ -409,13 +443,16 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
       aria-current={summary.id === activeConversationId ? "page" : undefined}
       onClick={(event) => followConversationLink(event, summary.id)}
     >
-      <span className="bot-name">
-        {conversationLabel(summary)}
-        <BotDots activity={activity.get(summary.id)} unread={unread.has(summary.id)} />
-      </span>
-      {summary.kind !== "bot" || summary.purpose === undefined ? null : (
-        <span className="bot-purpose">{summary.purpose}</span>
+      {summary.kind === "cobot" || summary.owner !== undefined ? null : (
+        <BotMark summary={summary} activity={activity.get(summary.id)} />
       )}
+      <span className="bot-text">
+        <span className="bot-name">
+          {conversationLabel(summary)}
+          <BotDots activity={activity.get(summary.id)} unread={unread.has(summary.id)} />
+        </span>
+        <span className="bot-status">{botStatusLabel(activity.get(summary.id))}</span>
+      </span>
     </a>
   );
 
@@ -452,12 +489,26 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const toggleSettings = (): void => {
     const opening = !settingsOpen;
     setSettingsOpen(opening);
+    if (opening) dispatchDrawer({ type: "settings" });
     requestAnimationFrame(() => (opening ? settingsCloseRef : settingsToggleRef).current?.focus());
   };
 
   const closeSettings = (): void => {
     setSettingsOpen(false);
-    requestAnimationFrame(() => settingsToggleRef.current?.focus());
+    // Settings was opened from the drawer: on a narrow screen its toggle is hidden with it, so the drawer's goes.
+    requestAnimationFrame(() =>
+      (window.matchMedia(WIDE_LAYOUT).matches
+        ? settingsToggleRef
+        : drawerToggleRef
+      ).current?.focus(),
+    );
+  };
+
+  /** A bot picked in the drawer: it closes, and the conversation takes focus. */
+  const pickedFromDrawer = (): void => {
+    if (!drawer.open) return;
+    dispatchDrawer({ type: "picked" });
+    requestAnimationFrame(() => conversationHeadingRef.current?.focus());
   };
 
   const openFromSettings = (conversationId: number): void => {
@@ -487,30 +538,42 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     });
   };
 
+  const workspaceClass = [
+    "session-workspace",
+    hasActivity && activityOpen ? "session-workspace--activity-open" : "",
+    settingsOpen ? "session-workspace--settings-open" : "",
+    drawer.open ? "session-workspace--drawer-open" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return (
-    <div
-      className={`session-workspace${hasActivity && activityOpen ? " session-workspace--activity-open" : ""}${settingsOpen ? " session-workspace--settings-open" : ""}`}
-    >
-      <aside className="session-sidebar">
+    <div className={workspaceClass}>
+      {/* The spaces drawer on narrow screens, the sidebar on wide ones (COD-244, D · Spaces). */}
+      <aside
+        ref={drawerRef}
+        id="spaces-drawer"
+        className="session-sidebar"
+        aria-label="Bots and settings"
+        tabIndex={-1}
+        onKeyDown={(event) => {
+          if (event.key === "Escape" && drawer.open) {
+            event.stopPropagation();
+            dispatchDrawer({ type: "close" });
+          }
+        }}
+      >
         <header className="session-header">
-          <div className="session-title">
-            <h1>
-              <a className="product-link" href="/">
-                MiPi
-              </a>
-            </h1>
-            <button
-              ref={settingsToggleRef}
-              className="settings-toggle"
-              type="button"
-              aria-controls="settings-panel"
-              aria-expanded={settingsOpen}
-              onClick={toggleSettings}
-            >
-              <span aria-hidden="true">⚙</span> Settings
-            </button>
-          </div>
+          <h1>
+            <a className="product-link" href="/">
+              MiPi
+            </a>
+          </h1>
           <p className="connection-status" role="status">
+            <span
+              className={`connection-dot connection-dot--${session.status}`}
+              aria-hidden="true"
+            />
             {statusLabel[session.status]}
           </p>
           {usage === undefined ? null : <UsageLine usage={usage} />}
@@ -529,33 +592,9 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
         <nav className="conversation-navigation" aria-labelledby="conversations-heading">
           <div className="conversation-navigation-header">
-            <h2 id="conversations-heading">Bots</h2>
-            <button
-              type="button"
-              aria-expanded={newBotOpen}
-              aria-controls="new-bot-form"
-              onClick={() => setNewBotOpen((open) => !open)}
-              disabled={!isConnected}
-            >
-              New bot
-            </button>
-            {newBotOpen ? (
-              <NewBotForm
-                profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
-                  ({ id }) => id,
-                )}
-                disabled={!isConnected}
-                onCreate={async (bot) => {
-                  const created = await session.createBot(bot);
-                  if (created) {
-                    setNewBotOpen(false);
-                    setSettingsOpen(false);
-                  }
-                  return created;
-                }}
-                onCancel={() => setNewBotOpen(false)}
-              />
-            ) : null}
+            <h2 id="conversations-heading" className="section-label">
+              Bots
+            </h2>
           </div>
           <div className="conversation-list" tabIndex={0}>
             {listed.main === undefined && listed.bots.length === 0 ? (
@@ -572,32 +611,6 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                           {renderChildren(bot.id)}
                         </details>
                       ) : null}
-                      <button
-                        className="text-button bot-tree"
-                        type="button"
-                        aria-expanded={newCobotUnder === bot.id}
-                        onClick={() =>
-                          setNewCobotUnder(newCobotUnder === bot.id ? undefined : bot.id)
-                        }
-                        disabled={!isConnected}
-                      >
-                        New cobot
-                      </button>
-                      {newCobotUnder === bot.id ? (
-                        <CobotNameForm
-                          label="New cobot"
-                          disabled={!isConnected}
-                          onSave={async (name) => {
-                            if (await session.createCobot(bot.id, name)) {
-                              setNewCobotUnder((current) =>
-                                current === bot.id ? undefined : current,
-                              );
-                              setSettingsOpen(false);
-                            }
-                          }}
-                          onCancel={() => setNewCobotUnder(undefined)}
-                        />
-                      ) : null}
                     </li>
                   ),
                 )}
@@ -605,245 +618,369 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             )}
           </div>
         </nav>
+
+        <div className="drawer-footer">
+          <button
+            ref={settingsToggleRef}
+            className="round-button settings-toggle"
+            type="button"
+            aria-label="Settings"
+            aria-controls="settings-panel"
+            aria-expanded={settingsOpen}
+            onClick={toggleSettings}
+          >
+            <SettingsIcon />
+          </button>
+          <button
+            className="pill-button new-bot-toggle"
+            type="button"
+            aria-expanded={newBotOpen}
+            aria-controls="new-bot-form"
+            onClick={() => setNewBotOpen((open) => !open)}
+            disabled={!isConnected}
+          >
+            New bot
+          </button>
+          {newBotOpen ? (
+            <NewBotForm
+              profiles={(session.options?.profiles ?? [{ id: "default", name: "" }]).map(
+                ({ id }) => id,
+              )}
+              disabled={!isConnected}
+              onCreate={async (bot) => {
+                const created = await session.createBot(bot);
+                if (created) {
+                  setNewBotOpen(false);
+                  setSettingsOpen(false);
+                  pickedFromDrawer();
+                }
+                return created;
+              }}
+              onCancel={() => setNewBotOpen(false)}
+            />
+          ) : null}
+        </div>
       </aside>
 
-      <main className="conversation-view">
-        <header className="conversation-header">
-          <div className="conversation-titlebar">
-            <h2 ref={conversationHeadingRef} id="transcript-heading" tabIndex={-1}>
-              {activeSummary === undefined ? "Conversation" : conversationLabel(activeSummary)}
-            </h2>
-            {hasActivity ? (
+      <div className="session-main">
+        {/* Behind the open drawer, only the scrim takes a tap: the conversation is inert. */}
+        <main className="conversation-view" inert={drawer.open}>
+          <header className="conversation-header">
+            <div className="conversation-titlebar">
               <button
-                ref={activityToggleRef}
-                className="activity-toggle"
+                ref={drawerToggleRef}
+                className="round-button drawer-toggle"
                 type="button"
-                aria-controls="activity-panel"
-                aria-expanded={activityOpen}
-                onClick={toggleActivity}
+                aria-label="Bots and settings"
+                aria-controls="spaces-drawer"
+                aria-expanded={drawer.open}
+                onClick={() => dispatchDrawer({ type: "toggle" })}
               >
-                Activity <span aria-hidden="true">{activityCount}</span>
+                <MenuIcon />
               </button>
-            ) : null}
-          </div>
-          {!readOnly ? null : (
-            <div className="read-only-banner" role="status">
-              <p>
-                {restoreHint === undefined
-                  ? "Archived: read-only. Restore it to talk to it again."
-                  : "Archived: read-only."}
-              </p>
-              <button
-                type="button"
-                disabled={!isConnected || restoreHint !== undefined}
-                title={restoreHint}
-                onClick={() => session.restoreBot(activeSummary.id)}
-              >
-                Restore
-              </button>
-              {restoreHint === undefined ? null : (
-                <span className="archived-entry-hint">{restoreHint}</span>
-              )}
-            </div>
-          )}
-          {activeSummary?.kind !== "cobot" ||
-          activeSummary.archivedAt !== undefined ? null : renamingCobot === activeSummary.id ? (
-            <CobotNameForm
-              key={activeSummary.id}
-              label="Rename cobot"
-              name={activeSummary.name ?? ""}
-              disabled={!isConnected}
-              onSave={(name) => {
-                session.renameBot(activeSummary.id, name);
-                setRenamingCobot(undefined);
-              }}
-              onCancel={() => setRenamingCobot(undefined)}
-            />
-          ) : (
-            <button
-              className="text-button"
-              type="button"
-              disabled={!isConnected}
-              onClick={() => setRenamingCobot(activeSummary.id)}
-            >
-              Rename cobot
-            </button>
-          )}
-          {archiveQuestion === undefined ||
-          activeSummary === undefined ? null : confirmingArchive === activeSummary.id ? (
-            <div className="archive-confirm" role="group" aria-label="Archive">
-              <p>{archiveQuestion}</p>
-              <button
-                type="button"
-                disabled={!isConnected}
-                onClick={() => {
-                  session.archiveBot(activeSummary.id);
-                  setConfirmingArchive(undefined);
-                }}
-              >
-                Archive
-              </button>
-              <button type="button" onClick={() => setConfirmingArchive(undefined)}>
-                Cancel
-              </button>
-            </div>
-          ) : (
-            <button
-              className="text-button"
-              type="button"
-              disabled={!isConnected}
-              onClick={() => setConfirmingArchive(activeSummary.id)}
-            >
-              {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
-            </button>
-          )}
-          {activeConversation === undefined ? null : (
-            <ConversationDetails
-              conversation={activeConversation}
-              profile={activeSummary?.profile}
-              fixedProfile={activeSummary?.kind === "main"}
-              options={session.options}
-              disabled={!isConnected || readOnly}
-              onConfigure={(change) => session.configureConversation(activeConversation.id, change)}
-            />
-          )}
-          <label className="system-toggle">
-            <input
-              type="checkbox"
-              checked={showSystem}
-              onChange={(event) => setShowSystem(event.currentTarget.checked)}
-            />{" "}
-            Show system entries
-          </label>
-        </header>
-
-        <section
-          ref={transcriptRef}
-          className="transcript"
-          aria-labelledby="transcript-heading"
-          role="log"
-          tabIndex={0}
-          onScroll={trackTranscriptPosition}
-          onWheel={interruptAutoScroll}
-          onTouchStart={interruptAutoScroll}
-          onPointerDown={interruptAutoScroll}
-        >
-          {activeConversation === undefined ? (
-            <p className="transcript-empty">Loading conversation…</p>
-          ) : activeConversation.entries.length === 0 && activeConversation.live === null ? (
-            <p className="transcript-empty">Send a message to begin.</p>
-          ) : (
-            <>
-              {activeConversation.earlier ? (
-                <button
-                  className="text-button transcript-load"
-                  type="button"
-                  onClick={() => session.loadEarlier(activeConversation.id)}
-                >
-                  Load earlier messages
-                </button>
-              ) : null}
-              <TranscriptList
-                hideSystem={!showSystem}
-                entries={activeConversation.entries}
-                gaps={activeConversation.gaps}
-                tools={activeConversation.tools}
-                runActive={activeConversation.live !== null}
-                // No forking from the web until forks are cobots (COD-200): a fork is a plain chat, which the bots
-                // list doesn't show, so it would strand the owner in a chat they can't find again.
-                onFork={undefined}
-                onFillGap={(gap) => session.fillGap(activeConversation.id, gap)}
-              />
-            </>
-          )}
-
-          {activeConversation?.live === null || activeConversation?.live === undefined ? null : (
-            <article
-              className="transcript-message transcript-message--assistant transcript-message--live"
-              aria-busy={activeConversation.live.active}
-            >
-              <header>
-                <div className="transcript-message-title">
-                  <strong>Assistant</strong>
+              <details className="bot-profile">
+                <summary aria-label="Bot details">
+                  {activeSummary === undefined ? null : (
+                    <BotMark
+                      summary={activeSummary}
+                      activity={activity.get(activeSummary.id)}
+                      size="large"
+                    />
+                  )}
+                  <h2 ref={conversationHeadingRef} id="transcript-heading" tabIndex={-1}>
+                    {activeSummary === undefined
+                      ? "Conversation"
+                      : conversationLabel(activeSummary)}
+                  </h2>
+                </summary>
+                <div className="bot-profile-panel">
+                  {activeSummary?.kind !== "bot" || activeSummary.purpose === undefined ? null : (
+                    <p className="bot-purpose">{activeSummary.purpose}</p>
+                  )}
+                  {/* A side chat under this bot (COD-200): here, beside its other actions, not under every bot in the list. */}
+                  {activeSummary === undefined ||
+                  activeSummary.archivedAt !== undefined ||
+                  (activeSummary.kind !== "main" &&
+                    activeSummary.kind !== "bot") ? null : newCobotUnder === activeSummary.id ? (
+                    <CobotNameForm
+                      key={`cobot-${activeSummary.id}`}
+                      label="New cobot"
+                      disabled={!isConnected}
+                      onSave={async (name) => {
+                        const bot = activeSummary.id;
+                        if (await session.createCobot(bot, name)) {
+                          setNewCobotUnder((current) => (current === bot ? undefined : current));
+                          setSettingsOpen(false);
+                        }
+                      }}
+                      onCancel={() => setNewCobotUnder(undefined)}
+                    />
+                  ) : (
+                    <button
+                      className="text-button"
+                      type="button"
+                      aria-expanded={false}
+                      onClick={() => setNewCobotUnder(activeSummary.id)}
+                      disabled={!isConnected}
+                    >
+                      New cobot
+                    </button>
+                  )}
+                  {activeSummary?.kind !== "cobot" ||
+                  activeSummary.archivedAt !== undefined ? null : renamingCobot ===
+                    activeSummary.id ? (
+                    <CobotNameForm
+                      key={activeSummary.id}
+                      label="Rename cobot"
+                      name={activeSummary.name ?? ""}
+                      disabled={!isConnected}
+                      onSave={(name) => {
+                        session.renameBot(activeSummary.id, name);
+                        setRenamingCobot(undefined);
+                      }}
+                      onCancel={() => setRenamingCobot(undefined)}
+                    />
+                  ) : (
+                    <button
+                      className="text-button"
+                      type="button"
+                      disabled={!isConnected}
+                      onClick={() => setRenamingCobot(activeSummary.id)}
+                    >
+                      Rename cobot
+                    </button>
+                  )}
+                  {archiveQuestion === undefined ||
+                  activeSummary === undefined ? null : confirmingArchive === activeSummary.id ? (
+                    <div className="archive-confirm" role="group" aria-label="Archive">
+                      <p>{archiveQuestion}</p>
+                      <button
+                        type="button"
+                        disabled={!isConnected}
+                        onClick={() => {
+                          session.archiveBot(activeSummary.id);
+                          setConfirmingArchive(undefined);
+                        }}
+                      >
+                        Archive
+                      </button>
+                      <button type="button" onClick={() => setConfirmingArchive(undefined)}>
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      className="text-button"
+                      type="button"
+                      disabled={!isConnected}
+                      onClick={() => setConfirmingArchive(activeSummary.id)}
+                    >
+                      {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
+                    </button>
+                  )}
+                  {activeConversation === undefined ? null : (
+                    <ConversationDetails
+                      conversation={activeConversation}
+                      profile={activeSummary?.profile}
+                      fixedProfile={activeSummary?.kind === "main"}
+                      options={session.options}
+                      disabled={!isConnected || readOnly}
+                      onConfigure={(change) =>
+                        session.configureConversation(activeConversation.id, change)
+                      }
+                    />
+                  )}
+                  <div className="bot-profile-actions">
+                    <label className="system-toggle">
+                      <input
+                        type="checkbox"
+                        checked={showSystem}
+                        onChange={(event) => setShowSystem(event.currentTarget.checked)}
+                      />{" "}
+                      Show system entries
+                    </label>
+                    {hasActivity ? (
+                      <button
+                        ref={activityToggleRef}
+                        className="pill-button activity-toggle"
+                        type="button"
+                        aria-controls="activity-panel"
+                        aria-expanded={activityOpen}
+                        onClick={toggleActivity}
+                      >
+                        Activity <span aria-hidden="true">{activityCount}</span>
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
+              </details>
+              {/* Reserved for voice (D · Spaces): empty until the agent advertises it. */}
+              <span className="titlebar-slot" aria-hidden="true" />
+            </div>
+            {!readOnly ? null : (
+              <div className="read-only-banner" role="status">
+                <p>
+                  {restoreHint === undefined
+                    ? "Archived: read-only. Restore it to talk to it again."
+                    : "Archived: read-only."}
+                </p>
                 <button
-                  className="text-button transcript-fork transcript-fork--placeholder"
                   type="button"
-                  aria-hidden="true"
-                  tabIndex={-1}
-                  disabled
+                  disabled={!isConnected || restoreHint !== undefined}
+                  title={restoreHint}
+                  onClick={() => session.restoreBot(activeSummary.id)}
                 >
-                  Fork
+                  Restore
                 </button>
-              </header>
-              {activeConversation.live.text.length === 0 ? (
-                <p className="responding">Responding…</p>
-              ) : (
-                <Markdown text={activeConversation.live.text} />
-              )}
-              {activeConversation.live.retry === undefined ? null : (
-                <p role="status">Retrying: {activeConversation.live.retry.error}</p>
-              )}
-            </article>
-          )}
+                {restoreHint === undefined ? null : (
+                  <span className="archived-entry-hint">{restoreHint}</span>
+                )}
+              </div>
+            )}
+          </header>
 
-          {activeConversation === undefined ||
-          activeConversation.compactions.length === 0 ? null : (
-            <p className="compaction-status" role="status">
-              {compactionStatusText(activeConversation.compactions)}
+          <section
+            ref={transcriptRef}
+            className="transcript"
+            aria-labelledby="transcript-heading"
+            role="log"
+            tabIndex={0}
+            onScroll={trackTranscriptPosition}
+            onWheel={interruptAutoScroll}
+            onTouchStart={interruptAutoScroll}
+            onPointerDown={interruptAutoScroll}
+          >
+            {activeConversation === undefined ? (
+              <p className="transcript-empty">Loading conversation…</p>
+            ) : activeConversation.entries.length === 0 && activeConversation.live === null ? (
+              <p className="transcript-empty">Send a message to begin.</p>
+            ) : (
+              <>
+                {activeConversation.earlier ? (
+                  <button
+                    className="text-button transcript-load"
+                    type="button"
+                    onClick={() => session.loadEarlier(activeConversation.id)}
+                  >
+                    Load earlier messages
+                  </button>
+                ) : null}
+                <TranscriptList
+                  hideSystem={!showSystem}
+                  entries={activeConversation.entries}
+                  gaps={activeConversation.gaps}
+                  tools={activeConversation.tools}
+                  runActive={activeConversation.live !== null}
+                  // No forking from the web until forks are cobots (COD-200): a fork is a plain chat, which the bots
+                  // list doesn't show, so it would strand the owner in a chat they can't find again.
+                  onFork={undefined}
+                  onFillGap={(gap) => session.fillGap(activeConversation.id, gap)}
+                />
+              </>
+            )}
+
+            {activeConversation?.live === null || activeConversation?.live === undefined ? null : (
+              <article
+                className="transcript-message transcript-message--assistant transcript-message--live"
+                aria-busy={activeConversation.live.active}
+              >
+                <header>
+                  <div className="transcript-message-title">
+                    <strong>Assistant</strong>
+                  </div>
+                  <button
+                    className="text-button transcript-fork transcript-fork--placeholder"
+                    type="button"
+                    aria-hidden="true"
+                    tabIndex={-1}
+                    disabled
+                  >
+                    Fork
+                  </button>
+                </header>
+                {activeConversation.live.text.length === 0 ? (
+                  <p className="responding">Responding…</p>
+                ) : (
+                  <Markdown text={activeConversation.live.text} />
+                )}
+                {activeConversation.live.retry === undefined ? null : (
+                  <p role="status">Retrying: {activeConversation.live.retry.error}</p>
+                )}
+              </article>
+            )}
+
+            {activeConversation === undefined ||
+            activeConversation.compactions.length === 0 ? null : (
+              <p className="compaction-status" role="status">
+                {compactionStatusText(activeConversation.compactions)}
+              </p>
+            )}
+
+            {activeConversation?.failure === undefined ? null : (
+              <p className="transcript-error" role="alert">
+                {activeConversation.failure.kind} failed: {activeConversation.failure.message}
+              </p>
+            )}
+
+            {activeConversation === undefined || activeConversation.queued.length === 0 ? null : (
+              <ol className="transcript-list queued-inputs" aria-label="Queued messages">
+                {activeConversation.queued.map((input) => (
+                  <li key={input.submissionId}>
+                    <article className="transcript-message transcript-message--user transcript-message--queued">
+                      <header>
+                        <div className="transcript-message-title">
+                          <strong>User</strong>
+                          <span>Queued</span>
+                        </div>
+                      </header>
+                      <MessageText text={input.text} />
+                    </article>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+
+          <form className="prompt-bar" onSubmit={submit}>
+            <label className="visually-hidden" htmlFor="prompt">
+              Message
+            </label>
+            <textarea
+              ref={promptRef}
+              id="prompt"
+              name="prompt"
+              rows={1}
+              maxLength={MAX_PROMPT_CHARACTERS}
+              value={draft}
+              placeholder={readOnly ? "Archived: restore it to send a message." : "Message"}
+              onChange={(event) => updateDraft(event.currentTarget.value)}
+              onKeyDown={submitWithKeyboardShortcut}
+              aria-keyshortcuts="Meta+Enter Control+Enter"
+              disabled={!isConnected || activeConversationId === undefined || readOnly}
+            />
+            <button
+              className="send-button"
+              type="submit"
+              disabled={!canSubmit}
+              aria-label={submitting ? "Sending" : "Send"}
+            >
+              <SendIcon />
+            </button>
+            <p className="typing-indicator" aria-live="polite">
+              {typingLabel(activeConversation?.typing ?? [])}
             </p>
-          )}
+          </form>
+        </main>
 
-          {activeConversation?.failure === undefined ? null : (
-            <p className="transcript-error" role="alert">
-              {activeConversation.failure.kind} failed: {activeConversation.failure.message}
-            </p>
-          )}
-
-          {activeConversation === undefined || activeConversation.queued.length === 0 ? null : (
-            <ol className="transcript-list queued-inputs" aria-label="Queued messages">
-              {activeConversation.queued.map((input) => (
-                <li key={input.submissionId}>
-                  <article className="transcript-message transcript-message--user transcript-message--queued">
-                    <header>
-                      <div className="transcript-message-title">
-                        <strong>User</strong>
-                        <span>Queued</span>
-                      </div>
-                    </header>
-                    <MessageText text={input.text} />
-                  </article>
-                </li>
-              ))}
-            </ol>
-          )}
-        </section>
-
-        <form className="prompt-bar" onSubmit={submit}>
-          <label className="visually-hidden" htmlFor="prompt">
-            Message
-          </label>
-          <textarea
-            ref={promptRef}
-            id="prompt"
-            name="prompt"
-            rows={3}
-            maxLength={MAX_PROMPT_CHARACTERS}
-            value={draft}
-            placeholder={readOnly ? "Archived: restore it to send a message." : "Send a message…"}
-            onChange={(event) => updateDraft(event.currentTarget.value)}
-            onKeyDown={submitWithKeyboardShortcut}
-            aria-keyshortcuts="Meta+Enter Control+Enter"
-            disabled={!isConnected || activeConversationId === undefined || readOnly}
-          />
-          <button type="submit" disabled={!canSubmit}>
-            {submitting ? "Sending…" : "Send"}
-          </button>
-          <p className="typing-indicator" aria-live="polite">
-            {typingLabel(activeConversation?.typing ?? [])}
-          </p>
-        </form>
-      </main>
+        {/* Over the main screen while the drawer is open: a tap anywhere on it closes the drawer. */}
+        <button
+          className="drawer-scrim"
+          type="button"
+          tabIndex={-1}
+          aria-hidden="true"
+          onClick={() => dispatchDrawer({ type: "close" })}
+        />
+      </div>
 
       {hasActivity ? (
         <ActivityPanel

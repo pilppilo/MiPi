@@ -208,28 +208,31 @@ export function DiagnosticsView({
           {events.length === 0 ? "No events yet." : "No events match these filters."}
         </p>
       ) : (
-        <table className="diag-table">
-          <thead>
-            <tr>
-              <th scope="col">Time</th>
-              <th scope="col">Severity</th>
-              <th scope="col">Source</th>
-              <th scope="col">Event</th>
-              <th scope="col">Outcome</th>
-            </tr>
-          </thead>
-          <tbody>
-            {/* Newest first: the latest faults are at the top, and new rows arrive there, not off-screen. */}
-            {rows.toReversed().map((event) => (
-              <DiagRow
-                key={event.id}
-                event={event}
-                open={expanded.has(event.id)}
-                onToggle={() => onToggle(event.id)}
-              />
-            ))}
-          </tbody>
-        </table>
+        // Scrolls on its own on a narrow screen (COD-244), so five columns never widen the page.
+        <div className="diag-table-scroll" tabIndex={0} role="region" aria-label="Events">
+          <table className="diag-table">
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">Severity</th>
+                <th scope="col">Source</th>
+                <th scope="col">Event</th>
+                <th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* Newest first: the latest faults are at the top, and new rows arrive there, not off-screen. */}
+              {rows.toReversed().map((event) => (
+                <DiagRow
+                  key={event.id}
+                  event={event}
+                  open={expanded.has(event.id)}
+                  onToggle={() => onToggle(event.id)}
+                />
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

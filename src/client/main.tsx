@@ -11,3 +11,12 @@ createRoot(root).render(
     <App />
   </SpikeGate>,
 );
+
+// Installable as an app (COD-244). The worker caches nothing (`public/sw.js`): without it the app still runs.
+if ("serviceWorker" in navigator && window.isSecureContext) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((error: unknown) => {
+      console.error("Service worker registration failed", error);
+    });
+  });
+}

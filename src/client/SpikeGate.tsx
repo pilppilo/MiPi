@@ -30,7 +30,7 @@ export function SpikeGate({ children }: { readonly children: ReactNode }) {
   if (state === "checking") return <main aria-busy="true" />;
   if (state === "unreachable") {
     return (
-      <main>
+      <main className="page">
         <h1>MiPi</h1>
         <p role="alert">The server can't be reached. Reload to try again.</p>
       </main>
@@ -63,7 +63,7 @@ export function SpikeGate({ children }: { readonly children: ReactNode }) {
   };
 
   return (
-    <main>
+    <main className="page">
       <header>
         <h1>MiPi</h1>
         <p>Enter the access token to continue. This browser remembers it for 30 days.</p>
