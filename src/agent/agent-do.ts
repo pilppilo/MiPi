@@ -395,6 +395,8 @@ export class MipiAgent extends DurableObject<Env> {
     const sql = this.ctx.storage.sql;
     let meta = readMeta(sql);
     const staleExport = isStaleExport(meta);
+    // Read before the flag is cleared below; reported once the agent is out of maintenance.
+    const staleStartedAt = staleExport ? Number(meta.maintenance_started_at) : undefined;
     if (staleExport) {
       // The script that began this export died; nothing is half-written by an export, so the agent opens again.
       reportError("Abandoned a stale export", new Error("The export never ended"), {
@@ -402,16 +404,6 @@ export class MipiAgent extends DurableObject<Env> {
       });
       writeMeta(sql, { maintenance: undefined, maintenance_started_at: undefined });
       meta = readMeta(sql);
-      // No longer in maintenance: the event is stored (an object that stayed in memory still says `maintenance`).
-      this.#state = { kind: "refused", reason: "Starting" };
-      this.#diag.emit({
-        level: "warn",
-        source: "do",
-        kind: "maintenance.stale_export",
-        outcome: "fault",
-        summary: "Abandoned an export whose script never ended it",
-        detail: { startedAt: Number(meta.maintenance_started_at ?? Number.NaN) },
-      });
     }
     if (meta.maintenance === "export" || meta.maintenance === "restore") {
       this.#state = { kind: "maintenance", mode: meta.maintenance };
@@ -428,6 +420,18 @@ export class MipiAgent extends DurableObject<Env> {
         detail: { mode: meta.maintenance, build: MIPI_VERSION },
       });
       return;
+    }
+    // Out of maintenance from here (after `exportEnd`, `restoreEnd`, a stale export): what opening reports is stored.
+    this.#state = { kind: "refused", reason: "Starting" };
+    if (staleStartedAt !== undefined) {
+      this.#diag.emit({
+        level: "warn",
+        source: "do",
+        kind: "maintenance.stale_export",
+        outcome: "fault",
+        summary: "Abandoned an export whose script never ended it",
+        ...(Number.isFinite(staleStartedAt) ? { detail: { startedAt: staleStartedAt } } : {}),
+      });
     }
     // A composition from an earlier start must not show beside a refusal of this one.
     this.#composition = undefined;

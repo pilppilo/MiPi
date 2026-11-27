@@ -507,6 +507,11 @@ describe("abandoned maintenance", () => {
       );
     });
 
+  const staleEvents = async (owner: string) =>
+    (
+      await runInDurableObject(env.AGENT.getByName(owner), (instance) => instance.diagEvents())
+    ).filter(({ kind }) => kind === "maintenance.stale_export" || kind === "startup.open");
+
   it("opens again after an export whose script died, once the flag is 10 minutes old", async () => {
     const owner = "export-abandoned";
     const { call, stub } = forOwner(owner);
@@ -526,6 +531,16 @@ describe("abandoned maintenance", () => {
     expect(status.state).toEqual({ kind: "open" });
     expect(status.meta.maintenance).toBeUndefined();
     expect(status.meta.maintenance_started_at).toBeUndefined();
+    // Recorded with when the export began (read before the flag is cleared), then the reopen.
+    const events = await staleEvents(owner);
+    expect(events.slice(-2).map(({ kind }) => kind)).toEqual([
+      "maintenance.stale_export",
+      "startup.open",
+    ]);
+    expect(events.at(-2)!.detail).toEqual({ startedAt: expect.any(Number) });
+    expect(Date.now() - (events.at(-2)!.detail!.startedAt as number)).toBeGreaterThanOrEqual(
+      STALE_EXPORT_MS,
+    );
   });
 
   it("opens again on the next request when the object stayed in memory", async () => {
@@ -542,6 +557,13 @@ describe("abandoned maintenance", () => {
     expect(socket.status).toBe(101);
     socket.webSocket!.accept();
     socket.webSocket!.close(1000, "done");
+    // Still in memory, so it was in maintenance when it noticed: both events are stored all the same.
+    const events = await staleEvents(owner);
+    expect(events.slice(-2).map(({ kind }) => kind)).toEqual([
+      "maintenance.stale_export",
+      "startup.open",
+    ]);
+    expect(events.at(-2)!.detail).toEqual({ startedAt: expect.any(Number) });
     // A new export starts normally afterwards.
     expect((await exportAll(call)).consistent).toBe(true);
   });

@@ -218,6 +218,7 @@ describe("diagnostic guardrail", () => {
         summary: [
           "POST https://api.telegram.org/bot123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw/sendMessage failed",
           "Authorization: Bearer abc.def-ghi",
+          "proxy: basic dXNlcjpwYXNzd29yZA==",
           "key sk-live_0123456789abcdef and jwt eyJhbGciOi.eyJzdWIiOi.SflKxwRJSM",
           "GET /api/x?token=s3cr3t&ok=1",
         ].join("\n"),
@@ -227,6 +228,7 @@ describe("diagnostic guardrail", () => {
     expect(clean.summary).not.toMatch(/\n/);
     expect(clean.summary).not.toContain("AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw");
     expect(clean.summary).not.toContain("abc.def-ghi");
+    expect(clean.summary).not.toContain("dXNlcjpwYXNzd29yZA");
     expect(clean.summary).not.toContain("0123456789abcdef");
     expect(clean.summary).not.toContain("eyJzdWIiOi");
     expect(clean.summary).not.toContain("s3cr3t");

@@ -252,12 +252,13 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
         const requestId = `bot:${api.conversationId}:${api.callId}`;
         const now = api.now();
         await api.commit((tx) => measureToday(tx, now), context);
-        await api.commit(async (tx) => {
+        // A hold ends the commit without a write; it is recorded and refused after the commit returns.
+        const held = await api.commit(async (tx) => {
           const receipt = await tx.doc(BotToolReceipt, api.taskId);
-          if (receipt.id !== undefined) return;
+          if (receipt.id !== undefined) return undefined;
           if ((await tx.submissionByRequest(to.id, requestId)) !== undefined) {
             receipt.id = to.id;
-            return;
+            return undefined;
           }
           const sender = await mainName(tx, api.conversationId);
           const receiver = await tx.doc(ConversationMeta, to.id);
@@ -269,18 +270,7 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
           if (hop > BOT_HOP_LIMIT)
             throw new Error(`The bot message hop limit is ${BOT_HOP_LIMIT}.`);
           const hold = await proactiveHold(tx, now);
-          if (hold !== undefined) {
-            diag.emit({
-              level: "info",
-              source: "gate",
-              kind: "gate.held",
-              outcome: "held",
-              summary: `A bot message is held by the ${hold} gate`,
-              convId: api.conversationId,
-              detail: { gate: hold, at: "message_bot" },
-            });
-            throw new Error(`Bot work is on hold (${hold}).`);
-          }
+          if (hold !== undefined) return hold;
           await admitBotInput(
             tx,
             to,
@@ -302,7 +292,20 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
             now,
           );
           receipt.id = to.id;
+          return undefined;
         }, context);
+        if (held !== undefined) {
+          diag.emit({
+            level: "info",
+            source: "gate",
+            kind: "gate.held",
+            outcome: "held",
+            summary: `A bot message is held by the ${held} gate`,
+            convId: api.conversationId,
+            detail: { gate: held, at: "message_bot" },
+          });
+          throw new Error(`Bot work is on hold (${held}).`);
+        }
         return result(`Sent work to ${name}. Its reply will follow.`);
       },
     },

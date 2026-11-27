@@ -59,7 +59,7 @@ export interface DiagQuery {
 
 const SECRET_PATTERNS: readonly (readonly [RegExp, string])[] = [
   [/\bBearer\s+\S+/gi, "Bearer [redacted]"],
-  [/\bBasic\s+[A-Za-z0-9+/=]{8,}/g, "Basic [redacted]"],
+  [/\bBasic\s+[A-Za-z0-9+/=]{8,}/gi, "Basic [redacted]"],
   // Telegram bot tokens, alone or in a Bot API path (`/bot<id>:<token>/sendMessage`).
   [/\bbot\d{3,}:[A-Za-z0-9_-]{10,}/gi, "bot[redacted]"],
   [/\b\d{6,}:[A-Za-z0-9_-]{30,}/g, "[redacted]"],
