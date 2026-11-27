@@ -2,6 +2,7 @@ import {
   CompactionEntry,
   mainConversationId,
   parseScheduledInstruction,
+  parseStamp,
   queuedInputs,
   ResetEntry,
   ToolResultEntry,
@@ -17,6 +18,7 @@ import {
   type Message,
   type NestedToolCalls,
   type QueuedInput,
+  type Stamp,
   type RunFailure,
   type ReceivedServerEvent,
   type TaskGraph,
@@ -59,6 +61,8 @@ export interface TranscriptEntry {
   readonly diagnostics?: readonly ToolDiagnostic[];
   readonly toolCalls?: readonly TranscriptToolCall[];
   readonly toolResult?: TranscriptToolResult;
+  /** Who sent a user message and when, as the model read it (COD-248): shown only with the system entries. */
+  readonly stamp?: Stamp;
 }
 
 /** Entries the client has not loaded, between two it has: `after` and `upTo` are exclusive. */
@@ -412,9 +416,11 @@ function transcriptEntry(entry: EntryRecord): TranscriptEntry {
       : entry.data === undefined
         ? entry.kind
         : JSON.stringify(entry.data));
-  const scheduled = first?.role === "user" ? parseScheduledInstruction(rawText) : undefined;
+  // A user message starts with its stamp (`[speaker · time]`): the owner reads the message, not the stamp.
+  const stamped = first?.role === "user" ? parseStamp(rawText) : { text: rawText };
+  const scheduled = first?.role === "user" ? parseScheduledInstruction(stamped.text) : undefined;
   const role = scheduled === undefined ? messageRole(first) : "scheduled";
-  const text = scheduled ?? rawText;
+  const text = scheduled ?? stamped.text;
   const toolCalls =
     first?.role === "assistant"
       ? first.content.flatMap((part) =>
@@ -429,6 +435,7 @@ function transcriptEntry(entry: EntryRecord): TranscriptEntry {
     text,
     canFork: role === "user" || role === "assistant",
     ...(toolCalls.length === 0 ? {} : { toolCalls }),
+    ...(stamped.stamp === undefined ? {} : { stamp: stamped.stamp }),
   };
 }
 

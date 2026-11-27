@@ -1,5 +1,5 @@
 import { Markdown } from "./Markdown.tsx";
-import type { ToolDiagnostic } from "../protocol.ts";
+import type { Stamp, ToolDiagnostic } from "../protocol.ts";
 import { isNoSend } from "../lib/proactive-text.ts";
 import type {
   TranscriptEntry,
@@ -68,6 +68,7 @@ export function TranscriptList({
           {entry.text.length > 0 ? (
             <TranscriptMessage
               entry={entry}
+              showStamp={!hideSystem}
               onFork={onFork === undefined ? undefined : () => onFork(entry.id)}
             />
           ) : (
@@ -123,6 +124,7 @@ export function TranscriptList({
       <li key={entry.id}>
         <TranscriptMessage
           entry={entry}
+          showStamp={!hideSystem}
           onFork={onFork === undefined ? undefined : () => onFork(entry.id)}
         />
       </li>
@@ -375,9 +377,12 @@ function ToolRequest({
 export function TranscriptMessage({
   entry,
   onFork,
+  showStamp = false,
 }: {
   readonly entry: TranscriptEntry;
   readonly onFork?: () => void;
+  /** With the system entries shown: who sent a user message and when, as the model read it (COD-248). */
+  readonly showStamp?: boolean;
 }) {
   const timestamp = entry.timestamp === undefined ? undefined : new Date(entry.timestamp);
 
@@ -387,6 +392,7 @@ export function TranscriptMessage({
         <EntryTitle entryId={entry.id} label={roleLabel[entry.role]} timestamp={timestamp} />
         {!entry.canFork || onFork === undefined ? null : <ForkAction onFork={onFork} />}
       </header>
+      {showStamp && entry.stamp !== undefined ? <MessageStamp stamp={entry.stamp} /> : null}
       {formattedRoles.has(entry.role) ? (
         <Markdown text={entry.text} />
       ) : (
@@ -447,6 +453,15 @@ export function Diagnostics({ diagnostics }: { readonly diagnostics: readonly To
         </li>
       ))}
     </ul>
+  );
+}
+
+/** `jerome · Fri, Nov 27, 2026, 16:32 CST`: the stamp the model read, shown as a quiet line above the message. */
+export function MessageStamp({ stamp }: { readonly stamp: Stamp }) {
+  return (
+    <p className="message-stamp">
+      {stamp.speaker} · {stamp.time}
+    </p>
   );
 }
 

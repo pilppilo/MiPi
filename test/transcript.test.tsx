@@ -293,3 +293,35 @@ describe("tool output (COD-190)", () => {
     expect(failed).toContain("Error: xxx");
   });
 });
+
+// COD-248: the stamp the model read is the system's, not the owner's message.
+describe("message stamps", () => {
+  const stamped: TranscriptEntry = {
+    id: 5,
+    conversationId: 1,
+    kind: "pi.user",
+    role: "user",
+    text: "Test",
+    canFork: true,
+    stamp: { speaker: "jerome", time: "Fri, Nov 27, 2026, 16:32 CST" },
+  };
+  const render = (hideSystem: boolean) =>
+    renderToStaticMarkup(
+      createElement(TranscriptList, {
+        entries: [stamped],
+        tools: [],
+        runActive: false,
+        hideSystem,
+      }),
+    );
+
+  it("hides the stamp by default and shows it with the system entries", () => {
+    const hidden = render(true);
+    expect(hidden).toContain("<p>Test</p>");
+    expect(hidden).not.toContain("16:32 CST");
+    expect(hidden).not.toContain("message-stamp");
+    expect(render(false)).toContain(
+      '<p class="message-stamp">jerome · Fri, Nov 27, 2026, 16:32 CST</p><p>Test</p>',
+    );
+  });
+});

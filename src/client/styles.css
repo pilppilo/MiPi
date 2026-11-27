@@ -2147,3 +2147,10 @@ ul.diagnostics {
 .session-panels {
   display: contents;
 }
+
+/* The stamp the model read on a message (COD-248), shown only with the system entries. */
+.message-stamp {
+  margin: 0 0 0.25rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
