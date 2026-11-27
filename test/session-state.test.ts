@@ -2,6 +2,7 @@ import { applyImmutable } from "@earendil-works/chord/delta";
 import { ConversationTranscript, type ConversationView } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
+  conversationAfterSnapshot,
   initialSessionState,
   sessionReducer,
   type SessionState,
@@ -12,6 +13,7 @@ import {
   MAX_BOT_PURPOSE_CHARACTERS,
   parseClientCommand,
   parseServerEventEnvelope,
+  type ConversationSummary,
 } from "../src/protocol.ts";
 
 const usage = {
@@ -554,6 +556,38 @@ describe("session state", () => {
         session: { conversations: [{ id: 7, owner: { conversationId: "1" } }] },
       }),
     ).toThrow("conversation.owner.conversationId must be a positive integer");
+  });
+
+  it("follows the agent to MiPi when the open bot is archived, but keeps an archived one opened read-only (COD-233)", () => {
+    const main = { id: 4, kind: "main", name: "MiPi", profile: "main" } as const;
+    const garden = { id: 6, kind: "bot", name: "Garden", profile: "default" } as const;
+    const seedlings = { id: 7, kind: "cobot", bot: 6, name: "Seedlings" } as const;
+    const snapshot = (conversations: ConversationSummary[]) =>
+      event({ type: "session.snapshot", session: { conversations } });
+    let state = sessionReducer(initialSessionState, {
+      type: "event",
+      event: snapshot([main, garden, seedlings]),
+    });
+    state = sessionReducer(state, { type: "select", conversationId: 7 });
+    // The cobot archived alone, from this tab or another: the tab leaves it, as the agent moved its watch.
+    state = sessionReducer(state, {
+      type: "event",
+      event: snapshot([main, garden, { ...seedlings, archivedAt: 9 }]),
+    });
+    expect(state.activeConversationId).toBe(4);
+    // Opened from Settings → Archived while archived: read-only, and it stays.
+    state = sessionReducer(state, { type: "select", conversationId: 7 });
+    state = sessionReducer(state, {
+      type: "event",
+      event: snapshot([main, { ...garden, profile: "empty" }, { ...seedlings, archivedAt: 9 }]),
+    });
+    expect(state.activeConversationId).toBe(7);
+    // A live bot that stays live stays; one that's gone goes to MiPi.
+    expect(conversationAfterSnapshot([main, garden], [main, garden], 6)).toBe(6);
+    expect(conversationAfterSnapshot([main, garden], [main], 6)).toBe(4);
+    expect(conversationAfterSnapshot([main, garden], [main, { ...garden, archivedAt: 3 }], 6)).toBe(
+      4,
+    );
   });
 
   it("opens MiPi first and keeps each bot's newest entry from head events (COD-197)", () => {

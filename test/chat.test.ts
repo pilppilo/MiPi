@@ -731,11 +731,38 @@ describe("chat application", () => {
       ok: false,
       error: { message: "No rebindable door named web. The doors are: relay:pidu." },
     });
-    // Archiving the parent moves the tab from its cobot to MiPi and updates both archive timestamps.
     type Snapshot = {
       type: string;
       session?: { conversations: ConversationSummary[] };
     };
+    // A cobot archived alone (COD-233): the tab on it moves to MiPi, and its bot and sibling stay live.
+    const solo = (await run({ type: "cobot.create", bot: garden, name: "Solo" })).conversationId!;
+    expect(messages.views.has(solo)).toBe(true);
+    socket.send(
+      JSON.stringify({ type: "bot.archive", requestId: "archive-solo", conversationId: solo }),
+    );
+    await messages.nextMatching<{ type: string; conversationId?: number }>(
+      (message) => message.type === "conversation.view" && message.conversationId === main,
+    );
+    const soloArchived = await messages.nextMatching<Snapshot>(
+      (message) =>
+        message.type === "session.snapshot" &&
+        message.session?.conversations.find(({ id }) => id === solo)?.archivedAt !== undefined,
+    );
+    for (const live of [garden, cobot]) {
+      expect(
+        soloArchived.session!.conversations.find(({ id }) => id === live)?.archivedAt,
+      ).toBeUndefined();
+    }
+    expect(
+      await messages.nextMatching<Result>(
+        (message) => message.type === "command.result" && message.requestId === "archive-solo",
+      ),
+    ).toMatchObject({ ok: true, conversationId: solo });
+    expect(await run({ type: "conversation.open", conversationId: cobot })).toMatchObject({
+      ok: true,
+    });
+    // Archiving the parent moves the tab from its cobot to MiPi and updates both archive timestamps.
     socket.send(
       JSON.stringify({ type: "bot.archive", requestId: "archive", conversationId: garden }),
     );
@@ -797,6 +824,10 @@ describe("chat application", () => {
     const restoredCobot = restored.session!.conversations.find(({ id }) => id === cobot);
     expect(restoredCobot).toMatchObject({ kind: "cobot", bot: garden, name: "Garden" });
     expect(restoredCobot?.archivedAt).toBeUndefined();
+    // The cobot archived alone before stays archived: it didn't go with its bot.
+    expect(restored.session!.conversations.find(({ id }) => id === solo)?.archivedAt).toBe(
+      soloArchived.session!.conversations.find(({ id }) => id === solo)?.archivedAt,
+    );
     expect(
       await messages.nextMatching<Result>(
         (message) => message.type === "command.result" && message.requestId === "restore",

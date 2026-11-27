@@ -14,6 +14,7 @@ import {
   syncProfileTools,
 } from "../src/agent/conversations.ts";
 import { composeMipi, createHarnessOptions } from "../src/agent/composition.ts";
+import { createBot, createCobot } from "../src/agent/bots.ts";
 import { PROFILES } from "./mipi.ts";
 import { AgentSettings } from "../src/agent/settings.ts";
 import { PROFILE_NAMES, profileOrDefault, type ProfileName } from "../src/agent/profiles.ts";
@@ -126,9 +127,7 @@ describe("tool profiles", () => {
       const root = await harness.root(ctx);
       await (await root.submit({ type: "input", content: "one" }, ctx)).wait(ctx);
       expect(offered(requests[0]!).tools).toEqual([
-        "archive_cobot",
         "forget",
-        "list_cobots",
         "remember",
         "schedule",
         "search_history",
@@ -175,6 +174,62 @@ describe("tool profiles", () => {
 });
 
 describe("profile tools at startup", () => {
+  it("offers a purpose bot its bot tools on default, never its cobot, and syncs them back (COD-233)", async () => {
+    const faux = fauxProvider();
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const harness = await Harness.open(
+      new MemoryStorage(),
+      createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+      ctx,
+    );
+    const toolsOf = async (id: number) =>
+      (await (await harness.conversation(id as never, ctx))!.agent(ctx)).tools
+        .map(({ name }) => name)
+        .sort();
+    const everyday = [...PROFILE_TABLE.default.tools].sort();
+    const withBotTools = [...everyday, "archive_cobot", "list_cobots"].sort();
+    try {
+      expect(PROFILES.toolsFor("default").map(({ name }) => name)).not.toContain("list_cobots");
+      const bot = await harness.commit(
+        (tx) =>
+          createBot(
+            tx,
+            {
+              kind: "bot",
+              name: "Writer",
+              purpose: "Write",
+              profile: "default",
+              createdBy: "owner",
+            },
+            PROFILES,
+          ),
+        ctx,
+      );
+      const cobot = await harness.commit((tx) => createCobot(tx, bot, "Draft", PROFILES), ctx);
+      expect(await toolsOf(bot)).toEqual(withBotTools);
+      expect(await toolsOf(cobot)).toEqual(everyday);
+      // Switched to empty, the bot loses them with the rest; back on default, it has them again.
+      await harness.commit((tx) => setProfile(tx, bot, "empty", PROFILES), ctx);
+      expect(await toolsOf(bot)).toEqual([]);
+      await harness.commit((tx) => setProfile(tx, bot, "default", PROFILES), ctx);
+      expect(await toolsOf(bot)).toEqual(withBotTools);
+      // As a build before bot tools left it: the startup sync gives the bot them, and leaves its cobot.
+      await harness.commit(
+        (tx) => configure(tx, bot, { tools: PROFILES.toolsFor("default") }),
+        ctx,
+      );
+      await harness.commit(async (tx) => {
+        delete (await tx.doc(AgentSettings)).profileTools;
+      }, ctx);
+      expect(await syncProfileTools(harness, PROFILES)).toEqual([bot]);
+      expect(await toolsOf(bot)).toEqual(withBotTools);
+      expect(await toolsOf(cobot)).toEqual(everyday);
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+
   it("gives a conversation older than profiles its profile's tools, keeps its model, and then writes nothing", async () => {
     const faux = fauxProvider();
     const models = createModels();
@@ -201,9 +256,7 @@ describe("profile tools at startup", () => {
       expect(await syncProfileTools(harness, PROFILES)).toEqual([old]);
       const agent = await (await harness.conversation(old, ctx))!.agent(ctx);
       expect(agent.tools.map(({ name }) => name).sort()).toEqual([
-        "archive_cobot",
         "forget",
-        "list_cobots",
         "remember",
         "schedule",
         "search_history",

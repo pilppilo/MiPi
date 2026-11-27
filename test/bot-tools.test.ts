@@ -928,12 +928,17 @@ describe("main bot tools", () => {
       expect(
         (await harness.snapshot(ConversationMeta, ids.draft, ctx))?.archivedAt,
       ).toBeUndefined();
-      // A cobot on default sees the tool too, and is refused: only its bot manages the family.
-      await send((await harness.conversation(ids.draft, ctx))!, "web:cobot-list", "cobot-list");
-      expect(toolResults[3]).toContain("Only a purpose bot can manage its cobots.");
+      // Only the bot is offered them: its cobot, on the same profile, isn't (COD-233).
+      const offered = async (id: ConversationId) =>
+        (await (await harness.conversation(id, ctx))!.agent(ctx)).tools.map(({ name }) => name);
+      expect(await offered(ids.bot)).toEqual(
+        expect.arrayContaining(["list_cobots", "archive_cobot"]),
+      );
+      expect(await offered(ids.draft)).not.toContain("list_cobots");
+      expect(await offered(ids.draft)).not.toContain("archive_cobot");
 
       await send(writer, "web:archive", "archive");
-      expect(toolResults[4]).toContain("Archived the cobot Draft.");
+      expect(toolResults[3]).toContain("Archived the cobot Draft.");
       expect((await harness.snapshot(ConversationMeta, ids.draft, ctx))?.archivedAt).toBeTypeOf(
         "number",
       );
@@ -943,7 +948,7 @@ describe("main bot tools", () => {
       ).toBeUndefined();
       expect((await harness.snapshot(ConversationMeta, ids.bot, ctx))?.archivedAt).toBeUndefined();
       await send(writer, "web:list-again", "list");
-      expect(JSON.parse(toolResults[5]!)[0].text).toBe("No active cobots.");
+      expect(JSON.parse(toolResults[4]!)[0].text).toBe("No active cobots.");
     } finally {
       await harness.close(ctx);
     }

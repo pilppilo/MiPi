@@ -313,6 +313,23 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     setSettingsOpen(false);
   });
 
+  // Moved off a conversation archived under this tab (COD-233): its link goes too, so a reload doesn't reopen it.
+  const shownConversationRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const shown = shownConversationRef.current;
+    shownConversationRef.current = activeConversationId;
+    const linked = conversationIdFromLocation();
+    if (shown === undefined || linked !== shown || activeConversationId === undefined) return;
+    if (activeConversationId === shown) return;
+    const left = session.conversations.find(({ id }) => id === shown);
+    if (
+      left?.archivedAt !== undefined &&
+      activeConversationId === mainConversationId(session.conversations)
+    ) {
+      window.history.replaceState(null, "", `?conversation=${activeConversationId}`);
+    }
+  }, [activeConversationId]);
+
   useEffect(() => {
     const handlePopState = (): void => openLinkedConversation();
     window.addEventListener("popstate", handlePopState);

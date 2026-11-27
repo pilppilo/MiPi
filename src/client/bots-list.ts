@@ -244,7 +244,7 @@ export function archivedEntries(
       listed.add(cobot.id);
     }
   }
-  // A cobot archived on its own (COD-233), under a live bot or one archived after it.
+  // A cobot archived on its own (COD-233) under a live bot, MiPi's included. One under an archived bot is listed above.
   for (const cobot of archived
     .filter(({ kind, id }) => kind === "cobot" && !listed.has(id))
     .sort(newest)) {
@@ -282,9 +282,9 @@ export function archivePrompt(
   if (summary === undefined || summary.archivedAt !== undefined || summary.owner !== undefined) {
     return undefined;
   }
-  const name = summary.name ?? "this bot";
   switch (summary.kind) {
     case "bot": {
+      const name = summary.name ?? "this bot";
       const cobots = conversations.filter(
         ({ kind, bot, archivedAt }) =>
           kind === "cobot" && bot === summary.id && archivedAt === undefined,
@@ -294,7 +294,7 @@ export function archivePrompt(
       return `Archive ${name}${withCobots}? It stops working and keeps everything; restore it from Settings → Archived.`;
     }
     case "cobot":
-      return `Archive the cobot ${name}? Its bot keeps working; restore it from Settings → Archived.`;
+      return `Archive ${summary.name === undefined ? "this cobot" : `the cobot ${summary.name}`}? Its bot keeps working; restore it from Settings → Archived.`;
     case "main":
     case undefined:
       return undefined;

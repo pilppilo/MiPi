@@ -112,7 +112,7 @@ export async function setProfile(
   const meta = await tx.doc(ConversationMeta, conversationId);
   const refused = profileRefusal(meta, profile);
   if (refused !== undefined) throw new Error(refused);
-  await configure(tx, conversationId, { tools: profiles.toolsFor(profile) });
+  await configure(tx, conversationId, { tools: profiles.toolsFor(profile, meta.kind) });
   meta.profile = profile;
 }
 
@@ -285,15 +285,17 @@ export async function syncProfileTools(
   );
   if (synced) return [];
   const conversations = await harness.commit(async (tx) => {
-    const found: Array<{ id: ConversationId; profile: ProfileName }> = [];
+    const found: Array<{ id: ConversationId; profile: ProfileName; kind?: BotKind }> = [];
     let cursor: Cursor | undefined;
     do {
       const page = await tx.scanConversations({}, 100, cursor);
       for (const record of page.items) {
         if (record.owner !== undefined) continue;
+        const meta = await tx.doc(ConversationMeta, record.id);
         found.push({
           id: record.id,
-          profile: profileOf(await tx.doc(ConversationMeta, record.id)),
+          profile: profileOf(meta),
+          ...(meta.kind === undefined ? {} : { kind: meta.kind }),
         });
       }
       cursor = page.next;
@@ -301,7 +303,7 @@ export async function syncProfileTools(
     return found;
   }, context);
   const changed: ConversationId[] = [];
-  for (const { id, profile } of conversations) {
+  for (const { id, profile, kind } of conversations) {
     const conversation = await harness.conversation(id, context);
     if (conversation === undefined) continue;
     const agent = await conversation.agent(context);
@@ -311,7 +313,7 @@ export async function syncProfileTools(
       agent.extensions.flatMap(({ tools }) => (tools ?? []).map(({ name }) => name)),
     );
     const expected = profiles
-      .toolsFor(profile)
+      .toolsFor(profile, kind)
       .map(({ name }) => name)
       .filter((name) => provided.has(name))
       .sort();
