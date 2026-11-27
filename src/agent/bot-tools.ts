@@ -2,7 +2,15 @@ import { MAX_BOT_PURPOSE_CHARACTERS, MAX_PROMPT_CHARACTERS } from "../protocol.t
 import { archiveBot, isArchived } from "./archive.ts";
 import { BOT_HOP_LIMIT, BOT_REPLY_KIND, maxBotHop } from "./bot-hops.ts";
 import { admitBotInput, inheritedBotReply } from "./bot-messages.ts";
-import { BOT_NAME_MAX, createBot, findLiveBot, liveBots } from "./bots.ts";
+import {
+  BOT_NAME_MAX,
+  type CobotLookup,
+  createBot,
+  findLiveBot,
+  findLiveCobot,
+  liveBots,
+  liveCobots,
+} from "./bots.ts";
 import { connectorsOf } from "./connectors.ts";
 import { bindChannel, ConversationMeta } from "./conversations.ts";
 import { measureToday, proactiveHold } from "./gates.ts";
@@ -14,7 +22,8 @@ import {
   type ToolRegistration,
   type Tx,
 } from "./pi/durable.ts";
-import { obj, str } from "./pi/schema.ts";
+import { type Context } from "./pi/context.ts";
+import { obj, opt, str } from "./pi/schema.ts";
 import { isProfileName, PICKABLE_PROFILES, type Profiles } from "./profiles.ts";
 import { runTouched, untrustedToolNames } from "./untrusted.ts";
 
@@ -56,13 +65,79 @@ async function mainName(tx: Tx, id: ConversationId): Promise<string> {
   return meta.name;
 }
 
+/** The caller's name, when it is a purpose bot: only one manages its own cobots (COD-233). */
+async function purposeBotName(tx: Tx, id: ConversationId): Promise<string> {
+  const meta = await tx.doc(ConversationMeta, id);
+  if (meta.kind !== "bot" || meta.name === undefined) {
+    throw new Error(
+      meta.kind === "main"
+        ? "MiPi manages cobots with list_bots and stop_bot."
+        : "Only a purpose bot can manage its cobots.",
+    );
+  }
+  return meta.name;
+}
+
+/** The cobot a lookup found, or a refusal naming why: never the bot itself in its place. */
+function foundCobot(lookup: CobotLookup, botName: string, name: string): ConversationId {
+  switch (lookup.kind) {
+    case "found":
+      return lookup.cobot.id;
+    case "missing":
+      throw new Error(`${botName} has no live cobot named ${name}.`);
+    case "ambiguous":
+      throw new Error(
+        `${botName} has ${lookup.count} live cobots named ${name}. Rename one in the web app first.`,
+      );
+    default: {
+      const _: never = lookup;
+      throw new Error(`${botName} has no live cobot named ${name}.`);
+    }
+  }
+}
+
+/**
+ * Archives what `pick` names, once per task (a replay returns what the first run archived), then stops what each
+ * archived conversation was doing. `guard` runs first in the commit: the caller and the turn's authority.
+ */
+async function archiveAndStop(
+  api: ToolExecutionApi,
+  context: Context,
+  guard: (tx: Tx) => Promise<void>,
+  pick: (tx: Tx) => Promise<ConversationId>,
+): Promise<void> {
+  const { archived, at } = await api.commit(async (tx) => {
+    await guard(tx);
+    const receipt = await tx.doc(BotToolReceipt, api.taskId);
+    if (receipt.archived !== undefined) return { archived: [...receipt.archived], at: receipt.at };
+    const id = await pick(tx);
+    const at = api.now();
+    const archived = await archiveBot(tx, id, at);
+    if (archived.length > 0) (await tx.doc(BotListChange)).revision++;
+    receipt.archived = archived;
+    receipt.at = at;
+    return { archived, at };
+  }, context);
+  for (const id of archived as ConversationId[]) {
+    const meta = await api.snapshot(ConversationMeta, id, context);
+    if (meta?.archivedAt !== at) continue;
+    const conversation = await api.conversation(id, context);
+    if (conversation !== undefined) await abortConversation(conversation, context);
+  }
+}
+
 export async function bindBotDoor(
   tx: Tx,
   keys: ReadonlySet<string>,
   key: string,
   id: ConversationId,
 ): Promise<void> {
-  if (!keys.has(key)) throw new Error(`No rebindable door named ${key}.`);
+  if (!keys.has(key)) {
+    const doors = [...keys].sort().join(", ");
+    throw new Error(
+      `No rebindable door named ${key}.${doors.length === 0 ? "" : ` The doors are: ${doors}.`}`,
+    );
+  }
   const meta = await tx.doc(ConversationMeta, id);
   if ((meta.kind !== "bot" && meta.kind !== "main") || meta.archivedAt !== undefined) {
     throw new Error("A door can only be bound to a live bot.");
@@ -113,7 +188,7 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
     {
       name: "bind_door",
       description:
-        "Bind an owner-configurable door such as relay:pidu to a live bot during an owner-only turn.",
+        "Bind an owner-configurable door such as relay:pidu to a live bot during an owner-only turn. Name MiPi to bind the door back to MiPi.",
       parameters: obj({ name: nameField, channel: str({ minLength: 1, maxLength: 128 }) }),
       replay: "safe",
       execute: async (args, api, context) => {
@@ -134,15 +209,20 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
     },
     {
       name: "list_bots",
-      description: "List active bots with their names and purposes.",
+      description:
+        "List active bots with their names and purposes, each with its active cobots indented under it.",
       parameters: obj({}),
       replay: "safe",
       execute: async (_args, api, context) =>
         api.commit(async (tx) => {
           await mainName(tx, api.conversationId);
+          const cobots = await liveCobots(tx);
           return result(
             (await liveBots(tx))
-              .map(({ name, purpose }) => (purpose === undefined ? name : `${name} — ${purpose}`))
+              .flatMap(({ id, name, purpose }) => [
+                purpose === undefined ? name : `${name} — ${purpose}`,
+                ...cobots.filter(({ bot }) => bot === id).map((cobot) => `  cobot: ${cobot.name}`),
+              ])
               .join("\n"),
           );
         }, context),
@@ -218,33 +298,73 @@ export function botTools(profiles: () => Profiles): readonly ToolRegistration[] 
     {
       name: "stop_bot",
       description:
-        "Archive a purpose bot and stop its current work. The owner can restore it later.",
+        "Archive a purpose bot, with its cobots, and stop their current work. With cobot, archive only that cobot of the named bot (MiPi's included) and leave the bot running. The owner can restore either later.",
+      parameters: obj({
+        name: nameField,
+        cobot: opt(
+          str({
+            minLength: 1,
+            maxLength: BOT_NAME_MAX,
+            description: "The cobot's name, as list_bots shows it, to archive only that cobot",
+          }),
+        ),
+      }),
+      replay: "safe",
+      execute: async (args, api, context) => {
+        const { name, cobot } = args as { name: string; cobot?: string };
+        await archiveAndStop(
+          api,
+          context,
+          async (tx) => {
+            await mainName(tx, api.conversationId);
+            await requireOwner(tx, api);
+          },
+          async (tx) => {
+            const bot = await findLiveBot(tx, name);
+            if (bot === undefined) throw new Error(`There is no live bot named ${name}.`);
+            if (cobot === undefined) return bot.id;
+            return foundCobot(await findLiveCobot(tx, bot.id, cobot), bot.name, cobot);
+          },
+        );
+        return result(
+          cobot === undefined ? `Archived ${name}.` : `Archived ${name}'s cobot ${cobot}.`,
+        );
+      },
+    },
+    {
+      name: "list_cobots",
+      description: "For a purpose bot: list your active cobots (your side chats) by name.",
+      parameters: obj({}),
+      replay: "safe",
+      execute: async (_args, api, context) =>
+        api.commit(async (tx) => {
+          await purposeBotName(tx, api.conversationId);
+          const cobots = await liveCobots(tx, api.conversationId);
+          return result(
+            cobots.length === 0 ? "No active cobots." : cobots.map(({ name }) => name).join("\n"),
+          );
+        }, context),
+    },
+    {
+      name: "archive_cobot",
+      description:
+        "For a purpose bot: archive one of your cobots and stop its work, during an owner-only turn. The owner can restore it later.",
       parameters: obj({ name: nameField }),
       replay: "safe",
       execute: async (args, api, context) => {
         const { name } = args as { name: string };
-        const { archived, at } = await api.commit(async (tx) => {
-          await mainName(tx, api.conversationId);
-          await requireOwner(tx, api);
-          const receipt = await tx.doc(BotToolReceipt, api.taskId);
-          if (receipt.archived !== undefined)
-            return { archived: [...receipt.archived], at: receipt.at };
-          const bot = await findLiveBot(tx, name);
-          if (bot === undefined) throw new Error(`There is no live bot named ${name}.`);
-          const at = api.now();
-          const archived = await archiveBot(tx, bot.id, at);
-          if (archived.length > 0) (await tx.doc(BotListChange)).revision++;
-          receipt.archived = archived;
-          receipt.at = at;
-          return { archived, at };
-        }, context);
-        for (const id of archived as ConversationId[]) {
-          const meta = await api.snapshot(ConversationMeta, id, context);
-          if (meta?.archivedAt !== at) continue;
-          const conversation = await api.conversation(id, context);
-          if (conversation !== undefined) await abortConversation(conversation, context);
-        }
-        return result(`Archived ${name}.`);
+        let botName = "";
+        await archiveAndStop(
+          api,
+          context,
+          async (tx) => {
+            botName = await purposeBotName(tx, api.conversationId);
+            await requireOwner(tx, api);
+          },
+          async (tx) =>
+            foundCobot(await findLiveCobot(tx, api.conversationId, name), botName, name),
+        );
+        return result(`Archived the cobot ${name}.`);
       },
     },
   ];

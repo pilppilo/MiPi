@@ -11,6 +11,8 @@ export const PROFILE_TABLE: ProfileTable = {
   default: {
     description: "Everyday tools: scheduling, history search, memory and web pages",
     tools: EVERYDAY,
+    // A purpose bot on default manages its own cobots (COD-233); its cobots and plain chats don't get these.
+    botTools: ["list_cobots", "archive_cobot"],
   },
   empty: {
     description: "Plain chat, no tools",

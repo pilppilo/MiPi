@@ -19,8 +19,21 @@ import { describe, expect, it } from "vitest";
 import { AnswerSettlement } from "../src/agent/answers.ts";
 import { BOT_HOP_LIMIT, BotHops } from "../src/agent/bot-hops.ts";
 import { BotReplies, admitBotInput } from "../src/agent/bot-messages.ts";
-import { holdReminder, replayHeld, restoreBot, routeSchedule } from "../src/agent/archive.ts";
-import { ACTIVE_BOT_LIMIT, createBot, ensureBots, liveBots } from "../src/agent/bots.ts";
+import {
+  archiveBot,
+  holdReminder,
+  replayHeld,
+  restoreBot,
+  routeSchedule,
+} from "../src/agent/archive.ts";
+import {
+  ACTIVE_BOT_LIMIT,
+  createBot,
+  createCobot,
+  ensureBots,
+  liveBots,
+  liveCobots,
+} from "../src/agent/bots.ts";
 import { composeMipi } from "../src/agent/composition.ts";
 import type { MipiExtension } from "../src/agent/extensions.ts";
 import {
@@ -779,6 +792,210 @@ describe("main bot tools", () => {
       expect((await harness.snapshot(BotReplies, ctx))?.pending ?? []).toEqual([]);
     } finally {
       answers.close();
+      await harness.close(ctx);
+    }
+  });
+  it("lists cobots under their bots and archives one cobot alone, refusing unknown or shared names", async () => {
+    const toolResults: string[] = [];
+    const { harness, main, profiles } = await open(({ messages }) => {
+      const last = messages.at(-1)!;
+      const text = JSON.stringify(last.content);
+      if (last.role === "toolResult") {
+        toolResults.push(text);
+        return say("Done.");
+      }
+      if (text === '"list"') return tool("list_bots");
+      if (text === '"stop-draft"') return tool("stop_bot", { name: "PiDu", cobot: "draft" });
+      if (text === '"stop-twin"') return tool("stop_bot", { name: "PiDu", cobot: "Twin" });
+      if (text === '"stop-missing"') return tool("stop_bot", { name: "PiDu", cobot: "Nope" });
+      if (text === '"stop-mine"') return tool("stop_bot", { name: "MiPi", cobot: "Notes" });
+      return tool("stop_bot", { name: "Nobody", cobot: "Draft" });
+    }, true);
+    try {
+      const bot = await harness.commit(
+        (tx) =>
+          createBot(
+            tx,
+            {
+              kind: "bot",
+              name: "PiDu",
+              purpose: "Relay work",
+              profile: "empty",
+              createdBy: "owner",
+            },
+            profiles,
+          ),
+        ctx,
+      );
+      const cobot = (parent: ConversationId, name: string) =>
+        harness.commit((tx) => createCobot(tx, parent, name, profiles), ctx);
+      const ids = {
+        bot,
+        draft: await cobot(bot, "Draft"),
+        twins: [await cobot(bot, "Twin"), await cobot(bot, "twin")],
+        notes: await cobot(main.id, "Notes"),
+      };
+      await send(main, "web:list", "list");
+      expect(JSON.parse(toolResults[0]!)[0].text).toBe(
+        "MiPi\n  cobot: Notes\nPiDu — Relay work\n  cobot: Draft\n  cobot: Twin\n  cobot: twin",
+      );
+      for (const action of ["stop-twin", "stop-missing", "stop-nobody"]) {
+        await send(main, `web:${action}`, action);
+      }
+      expect(toolResults[1]).toContain("PiDu has 2 live cobots named Twin");
+      expect(toolResults[2]).toContain("PiDu has no live cobot named Nope");
+      expect(toolResults[3]).toContain("There is no live bot named Nobody");
+      // Nothing fell back to the bot: every cobot and the bot are still live.
+      expect((await harness.commit((tx) => liveCobots(tx), ctx)).map(({ id }) => id)).toEqual(
+        [ids.notes, ids.draft, ...ids.twins].sort((left, right) => left - right),
+      );
+
+      await send(main, "web:stop-draft", "stop-draft");
+      await send(main, "web:stop-mine", "stop-mine");
+      expect(toolResults[4]).toContain("Archived PiDu's cobot draft.");
+      expect(toolResults[5]).toContain("Archived MiPi's cobot Notes.");
+      expect((await harness.snapshot(ConversationMeta, ids.draft, ctx))?.archivedAt).toBeTypeOf(
+        "number",
+      );
+      expect((await harness.snapshot(ConversationMeta, ids.notes, ctx))?.archivedAt).toBeTypeOf(
+        "number",
+      );
+      expect((await harness.snapshot(ConversationMeta, ids.bot, ctx))?.archivedAt).toBeUndefined();
+      expect((await harness.commit(liveBots, ctx)).map(({ name }) => name)).toEqual([
+        "MiPi",
+        "PiDu",
+      ]);
+      expect((await harness.commit((tx) => liveCobots(tx), ctx)).map(({ id }) => id)).toEqual(
+        ids.twins,
+      );
+
+      // Restoring the cobot alone brings back only it; archiving its bot later leaves it as it was.
+      await harness.commit((tx) => restoreBot(tx, ids.draft, profiles), ctx);
+      expect(
+        (await harness.snapshot(ConversationMeta, ids.draft, ctx))?.archivedAt,
+      ).toBeUndefined();
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+
+  it("lets a purpose bot list and archive its own cobots on an owner turn only", async () => {
+    const toolResults: string[] = [];
+    const { harness, profiles } = await open(({ messages }) => {
+      const last = messages.at(-1)!;
+      const text = JSON.stringify(last.content);
+      if (last.role === "toolResult") {
+        toolResults.push(text);
+        return say("Done.");
+      }
+      if (text.endsWith('list"')) return tool("list_cobots");
+      return tool("archive_cobot", { name: "Draft" });
+    }, true);
+    try {
+      const purposeBot = (name: string) =>
+        harness.commit(
+          (tx) =>
+            createBot(
+              tx,
+              {
+                kind: "bot",
+                name,
+                purpose: `${name} work`,
+                profile: "default",
+                createdBy: "owner",
+              },
+              profiles,
+            ),
+          ctx,
+        );
+      const cobot = (parent: ConversationId, name: string) =>
+        harness.commit((tx) => createCobot(tx, parent, name, profiles), ctx);
+      const bot = await purposeBot("Writer");
+      const other = await purposeBot("Other");
+      const ids = {
+        bot,
+        draft: await cobot(bot, "Draft"),
+        othersDraft: await cobot(other, "Draft"),
+      };
+      const writer = (await harness.conversation(ids.bot, ctx))!;
+      await send(writer, "web:list", "list");
+      expect(JSON.parse(toolResults[0]!)[0].text).toBe("Draft");
+      // A relay or bot message in the turn can't archive one.
+      await send(writer, "relay:archive", "archive");
+      await send(writer, "bot:archive", "archive");
+      expect(toolResults[1]).toContain("owner-only turn");
+      expect(toolResults[2]).toContain("owner-only turn");
+      expect(
+        (await harness.snapshot(ConversationMeta, ids.draft, ctx))?.archivedAt,
+      ).toBeUndefined();
+      // Only the bot is offered them: its cobot, on the same profile, isn't (COD-233).
+      const offered = async (id: ConversationId) =>
+        (await (await harness.conversation(id, ctx))!.agent(ctx)).tools.map(({ name }) => name);
+      expect(await offered(ids.bot)).toEqual(
+        expect.arrayContaining(["list_cobots", "archive_cobot"]),
+      );
+      expect(await offered(ids.draft)).not.toContain("list_cobots");
+      expect(await offered(ids.draft)).not.toContain("archive_cobot");
+
+      await send(writer, "web:archive", "archive");
+      expect(toolResults[3]).toContain("Archived the cobot Draft.");
+      expect((await harness.snapshot(ConversationMeta, ids.draft, ctx))?.archivedAt).toBeTypeOf(
+        "number",
+      );
+      // Only its own: another bot's cobot of the same name stays live, and so does the bot.
+      expect(
+        (await harness.snapshot(ConversationMeta, ids.othersDraft, ctx))?.archivedAt,
+      ).toBeUndefined();
+      expect((await harness.snapshot(ConversationMeta, ids.bot, ctx))?.archivedAt).toBeUndefined();
+      await send(writer, "web:list-again", "list");
+      expect(JSON.parse(toolResults[4]!)[0].text).toBe("No active cobots.");
+    } finally {
+      await harness.close(ctx);
+    }
+  });
+
+  it("binds the relay back to MiPi by name, so a later restore of its old bot leaves it there", async () => {
+    const toolResults: string[] = [];
+    const { harness, main, profiles } = await open(({ messages }) => {
+      const last = messages.at(-1)!;
+      const text = JSON.stringify(last.content);
+      if (last.role === "toolResult") {
+        toolResults.push(text);
+        return say("Done.");
+      }
+      if (text === '"typo"') return tool("bind_door", { name: "MiPi", channel: "relay" });
+      return tool("bind_door", { name: "MiPi", channel: "relay:pidu" });
+    }, true);
+    try {
+      const botId = await harness.commit(async (tx) => {
+        const id = await createBot(
+          tx,
+          {
+            kind: "bot",
+            name: "PiDu",
+            purpose: "Relay work",
+            profile: "empty",
+            createdBy: "owner",
+          },
+          profiles,
+        );
+        await bindChannel(tx, "relay:pidu", id);
+        return id;
+      }, ctx);
+      await send(main, "web:typo", "typo");
+      expect(toolResults[0]).toContain(
+        "No rebindable door named relay. The doors are: relay:pidu.",
+      );
+      await send(main, "web:back", "back");
+      expect(toolResults[1]).toContain("Bound relay:pidu to MiPi.");
+      const bound = () =>
+        harness.commit((tx) => boundConversation(tx, "relay:pidu", "default", profiles), ctx);
+      expect(await bound()).toBe(main.id);
+      // Archived and restored afterwards, PiDu doesn't take the relay back: the owner moved it.
+      await harness.commit((tx) => archiveBot(tx, botId, Date.now()), ctx);
+      await harness.commit((tx) => restoreBot(tx, botId, profiles), ctx);
+      expect(await bound()).toBe(main.id);
+    } finally {
       await harness.close(ctx);
     }
   });

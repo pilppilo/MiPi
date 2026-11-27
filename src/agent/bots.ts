@@ -276,3 +276,54 @@ export async function findLiveBot(tx: Tx, name: string): Promise<LiveBot | undef
   const id = (await tx.doc(Bots)).names?.[botNameKey(name)];
   return id === undefined ? undefined : (await liveBots(tx)).find((bot) => bot.id === id);
 }
+
+/** A live cobot, as the bot tools list it. */
+export type LiveCobot = {
+  readonly id: ConversationId;
+  readonly bot: ConversationId;
+  readonly name: string;
+};
+
+/**
+ * The live cobots (COD-233), oldest first, each bot's or only `bot`'s: by scanning, since cobots aren't indexed. Only the
+ * bot tools ask, on a turn of their own, so a scan per call is fine. A cobot of an archived bot is archived with it.
+ */
+export async function liveCobots(tx: Tx, bot?: ConversationId): Promise<LiveCobot[]> {
+  const bots = await tx.doc(Bots);
+  const found: LiveCobot[] = [];
+  let cursor: Cursor | undefined;
+  do {
+    const page = await tx.scanConversations({}, 100, cursor);
+    for (const record of page.items) {
+      if (record.owner !== undefined) continue;
+      const meta = await tx.doc(ConversationMeta, record.id);
+      if (meta.kind !== "cobot" || meta.bot === undefined || meta.name === undefined) continue;
+      if (bot !== undefined && meta.bot !== bot) continue;
+      if (meta.archivedAt !== undefined || archivedIn(bots, record.id)) continue;
+      found.push({ id: record.id, bot: meta.bot as ConversationId, name: meta.name });
+    }
+    cursor = page.next;
+  } while (cursor !== undefined);
+  return found.sort((left, right) => left.id - right.id);
+}
+
+/** What looking up a cobot by name found: cobot names aren't unique, so two live ones of a bot can share one. */
+export type CobotLookup =
+  | { readonly kind: "found"; readonly cobot: LiveCobot }
+  | { readonly kind: "missing" }
+  | { readonly kind: "ambiguous"; readonly count: number };
+
+/** `bot`'s live cobot named `name` (the whole name, ignoring case and surrounding space). Never falls back to the bot. */
+export async function findLiveCobot(
+  tx: Tx,
+  bot: ConversationId,
+  name: string,
+): Promise<CobotLookup> {
+  const key = botNameKey(name);
+  const matches = (await liveCobots(tx, bot)).filter((cobot) => botNameKey(cobot.name) === key);
+  const [cobot] = matches;
+  if (cobot === undefined) return { kind: "missing" };
+  return matches.length === 1
+    ? { kind: "found", cobot }
+    : { kind: "ambiguous", count: matches.length };
+}

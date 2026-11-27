@@ -322,7 +322,7 @@ describe("archive and restore (COD-198)", () => {
         const chat = await harness.createConversation({ ownership: { kind: "ownerless" } }, ctx);
         await expect(
           harness.commit((tx) => archiveBot(tx, chat.id, clock.now), ctx),
-        ).rejects.toThrow("Only a bot can be archived.");
+        ).rejects.toThrow("Only a bot or a cobot can be archived.");
         // A live chat isn't archived, so there's nothing to restore.
         await expect(
           harness.commit((tx) => restoreBot(tx, chat.id, PROFILES), ctx),
@@ -401,6 +401,35 @@ describe("archive and restore (COD-198)", () => {
           restored: [],
           conversations: [cobot],
         });
+      } finally {
+        await agent.close();
+      }
+    }));
+
+  it("archives a cobot alone, and keeps it archived through its bot's later archive and restore (COD-233)", () =>
+    inObject(async (storage) => {
+      const agent = await openAgent(storage);
+      try {
+        const { harness } = agent;
+        const { bot, cobot } = await gardenBot(harness);
+        // Alone: its bot stays live, and still reaches the chat bound to it.
+        expect(await archive(harness, cobot)).toEqual([cobot]);
+        expect(await harness.commit((tx) => isArchived(tx, bot), ctx)).toBe(false);
+        expect(await bound(harness)).toBe(bot);
+        // Archived already: nothing more.
+        expect(await archive(harness, cobot)).toEqual([]);
+        // Later, the bot: only the bot, since the cobot isn't live. Restoring the bot leaves the cobot as it was.
+        await agent.advance(1000);
+        expect(await archive(harness, bot)).toEqual([bot]);
+        await restore(harness, bot);
+        expect(await harness.commit((tx) => isArchived(tx, bot), ctx)).toBe(false);
+        expect(await harness.commit((tx) => isArchived(tx, cobot), ctx)).toBe(true);
+        // Then restored on its own, under its live bot.
+        expect(await harness.commit((tx) => restoreBot(tx, cobot, PROFILES), ctx)).toEqual({
+          restored: [cobot],
+          conversations: [cobot],
+        });
+        expect(await harness.commit((tx) => isArchived(tx, cobot), ctx)).toBe(false);
       } finally {
         await agent.close();
       }

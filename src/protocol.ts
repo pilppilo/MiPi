@@ -293,7 +293,10 @@ export type ClientCommand =
       readonly channel: string;
     }
   | {
-      /** Archives a bot and its cobots (COD-198): it stops working and keeps all its data. Never MiPi. */
+      /**
+       * Archives a bot and its cobots (COD-198), or one cobot alone (COD-233): it stops working and keeps all its data.
+       * Never MiPi.
+       */
       readonly type: "bot.archive";
       readonly requestId: string;
       readonly conversationId: number;

@@ -8,6 +8,7 @@
  *
  * Never add Pi Durable's coding tools (read, write, edit, bash), codemode or tool search.
  */
+import type { BotKind } from "./conversations.ts";
 import type { ToolRegistration } from "./pi/durable.ts";
 
 export const PROFILE_NAMES = ["default", "empty", "pidu", "main"] as const;
@@ -18,6 +19,11 @@ export interface ProfileEntry {
   readonly description: string;
   /** Tool names, in the order they are offered. */
   readonly tools: readonly string[];
+  /**
+   * More tool names, offered after `tools` only to a purpose bot (kind `bot`) on this profile (COD-233): tools about the
+   * bot itself, such as its cobots, that its cobots and plain chats on the same profile would only see refused.
+   */
+  readonly botTools?: readonly string[];
 }
 
 /** Every profile's description and tool names: plain data, supplied by the composition root. */
@@ -62,9 +68,14 @@ export class Profiles {
     return this.#table[profile].description;
   }
 
-  /** The tools a conversation on `profile` is offered: the only place profiles become tool registrations. */
-  toolsFor(profile: ProfileName): ToolRegistration[] {
-    return this.#table[profile].tools.flatMap((name) => {
+  /**
+   * The tools a conversation on `profile` is offered, a purpose bot's (`kind`) with its bot tools: the only place
+   * profiles become tool registrations.
+   */
+  toolsFor(profile: ProfileName, kind?: BotKind): ToolRegistration[] {
+    const entry = this.#table[profile];
+    const names = kind === "bot" ? [...entry.tools, ...(entry.botTools ?? [])] : entry.tools;
+    return names.flatMap((name) => {
       const tool = this.#tools.get(name);
       return tool === undefined ? [] : [tool];
     });
@@ -72,8 +83,13 @@ export class Profiles {
 
   /** Every profile's tool names, in one string: a different one means some conversation may need new tools. */
   digest(): string {
+    const names = (tools: readonly ToolRegistration[]) => tools.map((tool) => tool.name);
     return JSON.stringify(
-      PROFILE_NAMES.map((name) => [name, this.toolsFor(name).map((tool) => tool.name)]),
+      PROFILE_NAMES.map((name) => [
+        name,
+        names(this.toolsFor(name)),
+        names(this.toolsFor(name, "bot")),
+      ]),
     );
   }
 }

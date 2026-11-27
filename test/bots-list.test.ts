@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  archivePrompt,
   activityByBot,
   advanceLastRead,
   archivedEntries,
@@ -228,5 +229,31 @@ describe("Settings → Archived (COD-201)", () => {
     expect(restoreHintFor({ id: 30, kind: "cobot", bot: 99, archivedAt: 1 }, conversations)).toBe(
       "Its bot is missing.",
     );
+  });
+
+  it("asks before archiving a bot with its live cobots, or a cobot alone, and never MiPi (COD-233)", () => {
+    const conversations: ConversationSummary[] = [
+      { id: 4, kind: "main", name: "MiPi" },
+      { id: 6, kind: "bot", name: "Garden" },
+      { id: 7, kind: "cobot", bot: 6, name: "Seedlings" },
+      { id: 8, kind: "cobot", bot: 6, name: "Old", archivedAt: 3 },
+      { id: 9, kind: "bot", name: "Solo" },
+      { id: 10, kind: "bot", name: "Gone", archivedAt: 5 },
+      { id: 11, title: "Earlier" },
+      { id: 12, owner: { conversationId: 6 } },
+    ];
+    const ask = (id: number) =>
+      archivePrompt(
+        conversations.find((summary) => summary.id === id),
+        conversations,
+      );
+    expect(ask(6)).toBe(
+      "Archive Garden and its cobot? It stops working and keeps everything; restore it from Settings → Archived.",
+    );
+    expect(ask(9)).toMatch(/^Archive Solo\? /);
+    expect(ask(7)).toBe(
+      "Archive the cobot Seedlings? Its bot keeps working; restore it from Settings → Archived.",
+    );
+    for (const id of [4, 10, 11, 12]) expect(ask(id)).toBeUndefined();
   });
 });

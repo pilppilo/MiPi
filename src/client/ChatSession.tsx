@@ -23,6 +23,7 @@ import type { ConversationSnapshot } from "./session-state.ts";
 import {
   activityByBot,
   advanceLastRead,
+  archivePrompt,
   type BotActivity,
   type LastRead,
   listedBots,
@@ -172,6 +173,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const [newBotOpen, setNewBotOpen] = useState(false);
   const [newCobotUnder, setNewCobotUnder] = useState<number>();
   const [renamingCobot, setRenamingCobot] = useState<number>();
+  const [confirmingArchive, setConfirmingArchive] = useState<number>();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsToggleRef = useRef<HTMLButtonElement | null>(null);
   const settingsCloseRef = useRef<HTMLButtonElement | null>(null);
@@ -201,6 +203,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   // An archived conversation opens read-only (COD-201): the agent refuses its messages too.
   const readOnly = activeSummary?.archivedAt !== undefined;
   const restoreHint = restoreHintFor(activeSummary, session.conversations);
+  const archiveQuestion = archivePrompt(activeSummary, session.conversations);
   const canSubmit =
     isConnected &&
     activeConversationId !== undefined &&
@@ -309,6 +312,23 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     // Back or forward lands on a conversation: Settings would hide it.
     setSettingsOpen(false);
   });
+
+  // Moved off a conversation archived under this tab (COD-233): its link goes too, so a reload doesn't reopen it.
+  const shownConversationRef = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const shown = shownConversationRef.current;
+    shownConversationRef.current = activeConversationId;
+    const linked = conversationIdFromLocation();
+    if (shown === undefined || linked !== shown || activeConversationId === undefined) return;
+    if (activeConversationId === shown) return;
+    const left = session.conversations.find(({ id }) => id === shown);
+    if (
+      left?.archivedAt !== undefined &&
+      activeConversationId === mainConversationId(session.conversations)
+    ) {
+      window.history.replaceState(null, "", `?conversation=${activeConversationId}`);
+    }
+  }, [activeConversationId]);
 
   useEffect(() => {
     const handlePopState = (): void => openLinkedConversation();
@@ -623,6 +643,34 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               onClick={() => setRenamingCobot(activeSummary.id)}
             >
               Rename cobot
+            </button>
+          )}
+          {archiveQuestion === undefined ||
+          activeSummary === undefined ? null : confirmingArchive === activeSummary.id ? (
+            <div className="archive-confirm" role="group" aria-label="Archive">
+              <p>{archiveQuestion}</p>
+              <button
+                type="button"
+                disabled={!isConnected}
+                onClick={() => {
+                  session.archiveBot(activeSummary.id);
+                  setConfirmingArchive(undefined);
+                }}
+              >
+                Archive
+              </button>
+              <button type="button" onClick={() => setConfirmingArchive(undefined)}>
+                Cancel
+              </button>
+            </div>
+          ) : (
+            <button
+              className="text-button"
+              type="button"
+              disabled={!isConnected}
+              onClick={() => setConfirmingArchive(activeSummary.id)}
+            >
+              {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
             </button>
           )}
           {activeConversation === undefined ? null : (

@@ -161,14 +161,33 @@ export function sessionReducer(state: SessionState, action: SessionAction): Sess
   }
 }
 
+/**
+ * The conversation a tab shows after a session snapshot: the one it had, unless that is gone, or was live and is
+ * archived now (COD-233). Then MiPi, as the agent moves the tab's watch there (`#leaveArchived`): one opened while
+ * archived, read-only on purpose, stays.
+ */
+export function conversationAfterSnapshot(
+  before: readonly ConversationSummary[],
+  after: readonly ConversationSummary[],
+  selected: number | undefined,
+): number | undefined {
+  const now = after.find(({ id }) => id === selected);
+  if (now === undefined) return mainConversationId(after);
+  const was = before.find(({ id }) => id === selected);
+  return was !== undefined && was.archivedAt === undefined && now.archivedAt !== undefined
+    ? mainConversationId(after)
+    : selected;
+}
+
 function reduceServerEvent(state: SessionState, event: ServerEvent): SessionState {
   switch (event.type) {
     case "session.snapshot": {
       const conversations = event.session.conversations;
-      const selectedStillExists = conversations.some(({ id }) => id === state.activeConversationId);
-      const activeConversationId = selectedStillExists
-        ? state.activeConversationId
-        : mainConversationId(conversations);
+      const activeConversationId = conversationAfterSnapshot(
+        state.conversations,
+        conversations,
+        state.activeConversationId,
+      );
       return {
         ...state,
         conversations,

@@ -23,6 +23,7 @@ import {
 } from "../protocol.ts";
 import { CommandOutbox, type RetriableCommand } from "./command-outbox.ts";
 import {
+  conversationAfterSnapshot,
   initialSessionState,
   sessionReducer,
   type ConversationSnapshot,
@@ -71,6 +72,8 @@ export interface PiSession {
   }): Promise<boolean>;
   createCobot(bot: number, name: string): Promise<boolean>;
   renameBot(conversationId: number, name: string): void;
+  /** Archives a purpose bot with its cobots, or one cobot alone (COD-233). Never MiPi. */
+  archiveBot(conversationId: number): void;
   /** Restores an archived bot (with its cobots), a cobot under a live bot, or a chat from before bots (COD-201). */
   restoreBot(conversationId: number): void;
   forkConversation(conversationId: number, entryId: number): void;
@@ -91,6 +94,8 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
   outboxRef.current ??= new CommandOutbox();
   const outbox = outboxRef.current;
   const selectedConversationRef = useRef<number | undefined>(initialConversationId);
+  // The summaries as last received, so the selection follows the agent off a conversation archived under it.
+  const conversationsRef = useRef<readonly ConversationSummary[]>([]);
   // A conversation's view as last received, to apply operations to, and the transcript the client holds, which keeps
   // entries that left the view's window and pages in older ones.
   const viewsRef = useRef(new Map<number, ConversationView>());
@@ -267,6 +272,17 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
         terminal = true;
         failureMessage = parsed.error.message;
       }
+      if (parsed.type === "session.snapshot") {
+        // Archived under this tab: the agent moved its watch to MiPi, so the selection (and a reconnect) goes there too.
+        if (conversationOpened) {
+          selectedConversationRef.current = conversationAfterSnapshot(
+            conversationsRef.current,
+            parsed.session.conversations,
+            selectedConversationRef.current,
+          );
+        }
+        conversationsRef.current = parsed.session.conversations;
+      }
       dispatch({ type: "event", event: parsed });
       if (parsed.type === "session.snapshot" && !conversationOpened) {
         conversationOpened = true;
@@ -426,6 +442,14 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     [send],
   );
 
+  const archiveBot = useCallback(
+    (conversationId: number) => {
+      // Archiving is idempotent on the agent (an archived one archives nothing), so a plain send is enough.
+      send({ type: "bot.archive", requestId: crypto.randomUUID(), conversationId });
+    },
+    [send],
+  );
+
   const restoreBot = useCallback(
     (conversationId: number) => {
       // Restoring is idempotent on the agent (a live one restores nothing), so a plain send is enough.
@@ -520,6 +544,7 @@ export function usePiSession(sessionId: string, initialConversationId?: number):
     createBot,
     createCobot,
     renameBot,
+    archiveBot,
     restoreBot,
     forkConversation,
     setTyping,
