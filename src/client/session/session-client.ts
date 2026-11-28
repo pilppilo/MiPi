@@ -13,6 +13,8 @@ import {
   MAX_PROMPT_CHARACTERS,
   mainConversationId,
   parseServerEventEnvelope,
+  type ApprovalDecision,
+  type ApprovalSummary,
   type ClientCommand,
   type ConversationSummary,
   type ConversationView,
@@ -40,6 +42,14 @@ import {
   type TranscriptGap,
 } from "./session-state.ts";
 import type { ConnectTransport, Transport, TransportEvent } from "./transport.ts";
+
+export type DecisionResult =
+  | { readonly ok: true }
+  | { readonly ok: false; readonly message: string };
+
+const NO_APPROVALS: readonly ApprovalSummary[] = [];
+const APPROVAL_CONNECTION_CLOSED = "The connection closed before the agent answered.";
+const APPROVALS_UNAVAILABLE = "This agent does not support approvals.";
 
 type EntryPage = Page<EntryRecord, Cursor>;
 
@@ -69,6 +79,7 @@ export interface SessionClientState {
   readonly usage: UsageReadout | undefined;
   /** The diagnostic events and health Settings → Diagnostics shows (COD-236), apart from the transcript's state. */
   readonly diag: DiagState;
+  readonly approvals: readonly ApprovalSummary[];
 }
 
 export interface SessionClientOptions {
@@ -103,6 +114,7 @@ export class SessionClient {
     options: undefined,
     usage: undefined,
     diag: initialDiagState,
+    approvals: NO_APPROVALS,
   };
   #connection: Connection | undefined;
   readonly #outbox = new CommandOutbox();
@@ -116,6 +128,7 @@ export class SessionClient {
   readonly #views = new Map<number, ConversationView>();
   readonly #transcripts = new Map<number, ConversationTranscript>();
   readonly #pages = new Map<string, PendingPage>();
+  readonly #decisions = new Map<string, (result: DecisionResult) => void>();
   // Whether Diagnostics wants the tail (asked again after a reconnect), and the newest event id held.
   #diagWanted = false;
   #diagLastId: number | undefined;
@@ -195,13 +208,19 @@ export class SessionClient {
     if (connection.usageLater !== undefined) this.#platform.clearTimeout(connection.usageLater);
     connection.stopVisibility();
     this.#outbox.clear();
+    this.#closePages();
+    this.#capabilities = initialSessionState.capabilities;
+    this.#resetApprovals(APPROVAL_CONNECTION_CLOSED);
+    this.#diagLive = false;
+    this.#dispatchDiag({ type: "stopped" });
     connection.transport.close(1000, "Session view closed");
     if (this.#connection === connection) this.#connection = undefined;
   }
 
   /** The open transport, or `undefined` while connecting, failed or stopped. */
   #open(): Transport | undefined {
-    const transport = this.#connection?.transport;
+    const connection = this.#connection;
+    const transport = connection?.disposed ? undefined : connection?.transport;
     return transport !== undefined && transport.isOpen() ? transport : undefined;
   }
 
@@ -210,6 +229,8 @@ export class SessionClient {
   }
 
   #onEvent(connection: Connection, event: TransportEvent): void {
+    // A stopped transport can report its close after another connection has started.
+    if (connection.disposed) return;
     switch (event.type) {
       case "open":
         connection.conversationOpened = false;
@@ -237,17 +258,21 @@ export class SessionClient {
     }
   }
 
-  #onClose(connection: Connection, code: number, reason: string): void {
+  #closePages(): void {
     for (const pending of this.#pages.values()) {
       pending.reject(new Error("The session connection closed"));
     }
     this.#pages.clear();
+  }
+
+  #onClose(connection: Connection, code: number, reason: string): void {
+    this.#closePages();
     // The new socket subscribes again (`#resubscribeDiag`); until then nothing streams.
     this.#diagLive = false;
     // The next agent may be another build (a rollback): nothing optional is sent until its snapshot says so.
     this.#capabilities = initialSessionState.capabilities;
+    this.#resetApprovals(APPROVAL_CONNECTION_CLOSED);
     this.#dispatchDiag({ type: "stopped" });
-    if (connection.disposed) return;
     if (terminalProtocolClose(code)) {
       connection.terminal = true;
       if (connection.failureMessage === CONNECTION_FAILED && reason.length > 0) {
@@ -264,6 +289,14 @@ export class SessionClient {
       this.#dispatch({ type: "error", message: connection.failureMessage });
     } else {
       this.#dispatch({ type: "connection", status: "connecting" });
+    }
+  }
+
+  #resetApprovals(message: string): void {
+    for (const complete of this.#decisions.values()) complete({ ok: false, message });
+    this.#decisions.clear();
+    if (this.#state.approvals !== NO_APPROVALS) {
+      this.#update({ ...this.#state, approvals: NO_APPROVALS });
     }
   }
 
@@ -339,6 +372,19 @@ export class SessionClient {
       return;
     }
     if (parsed.type === "command.result" && parsed.command === "diag.unsubscribe") return;
+    if (parsed.type === "approvals.list") {
+      if (this.#capabilities.has("approvals")) {
+        const approvals = parsed.approvals.length === 0 ? NO_APPROVALS : parsed.approvals;
+        if (approvals !== this.#state.approvals) this.#update({ ...this.#state, approvals });
+      }
+      return;
+    }
+    if (parsed.type === "command.result" && parsed.command === "approval.decide") {
+      const complete = this.#decisions.get(parsed.requestId);
+      this.#decisions.delete(parsed.requestId);
+      complete?.(parsed.ok ? { ok: true } : { ok: false, message: parsed.error.message });
+      return;
+    }
     if (parsed.type === "conversation.ops") {
       const view = this.#views.get(parsed.conversationId);
       if (view !== undefined) {
@@ -399,6 +445,7 @@ export class SessionClient {
       }
       this.#conversations = parsed.session.conversations;
       this.#capabilities = new Set(parsed.session.capabilities ?? []);
+      if (!this.#capabilities.has("approvals")) this.#resetApprovals(APPROVALS_UNAVAILABLE);
     }
     this.#dispatch({ type: "event", event: parsed });
     if (parsed.type === "session.snapshot" && !connection.conversationOpened) {
@@ -603,6 +650,37 @@ export class SessionClient {
     } satisfies Extract<ClientCommand, { readonly type: "prompt.submit" }>;
     return new Promise((resolve) => {
       this.#sendRetriable(command, resolve);
+    });
+  };
+
+  readonly decideApproval = (
+    approvalId: string,
+    decision: ApprovalDecision,
+    note?: string,
+  ): Promise<DecisionResult> => {
+    const transport = this.#open();
+    if (transport === undefined) {
+      return Promise.resolve({ ok: false, message: "The session is not connected." });
+    }
+    if (!this.#capabilities.has("approvals")) {
+      return Promise.resolve({ ok: false, message: APPROVALS_UNAVAILABLE });
+    }
+    const requestId = this.#platform.randomId();
+    const trimmedNote = note?.trim();
+    return new Promise((resolve) => {
+      this.#decisions.set(requestId, resolve);
+      try {
+        this.#sendOn(transport, {
+          type: "approval.decide",
+          requestId,
+          approvalId,
+          decision,
+          ...(trimmedNote ? { note: trimmedNote } : {}),
+        });
+      } catch {
+        this.#decisions.delete(requestId);
+        resolve({ ok: false, message: APPROVAL_CONNECTION_CLOSED });
+      }
     });
   };
 

@@ -34,12 +34,15 @@ import {
   type ToolRegistration,
   ToolTask,
   type ToolTaskInput,
+  type Tx,
   type WakeReason,
 } from "./pi/durable.ts";
 import type { Context } from "./pi/context.ts";
 import { int, obj, oneOf, opt, str } from "./pi/schema.ts";
 import type { Delivery } from "./delivery.ts";
+import { type ApprovalSummary, MAX_APPROVAL_ARGUMENTS_CHARACTERS } from "../protocol.ts";
 import type { DiagSink } from "./diag.ts";
+import type { Origins } from "./origin.ts";
 
 /** The name of core's approvals extension: the gate. */
 export const APPROVALS_EXTENSION_NAME = "approvals";
@@ -179,6 +182,7 @@ export interface ApprovalRef {
   readonly id: string;
   readonly taskId: TaskId;
   readonly conversationId: ConversationId;
+  readonly background: boolean;
   /** The deadline; absent only for a sleep without one, which MiPi never parks. */
   readonly expiresAt?: number;
 }
@@ -198,6 +202,7 @@ export function approvalsIn(graph: TaskGraph): ApprovalRef[] {
       id,
       taskId: node.id,
       conversationId: node.conversationId,
+      background: node.background,
       ...(node.state.until === undefined ? {} : { expiresAt: node.state.until }),
     });
   }
@@ -467,6 +472,7 @@ export async function noticeApprovals(
   pending: readonly ApprovalRef[],
   now: number,
   context: Context,
+  shouldTell: (tx: Tx, approval: PendingApproval) => boolean | Promise<boolean>,
 ): Promise<string[]> {
   return harness.commit(async (tx) => {
     const state = await tx.doc(ApprovalNotices);
@@ -476,6 +482,7 @@ export async function noticeApprovals(
     const told: string[] = [];
     for (const approval of approvals) {
       if (!live.has(approval.id) || state.notified.includes(approval.id)) continue;
+      if (!(await shouldTell(tx, approval))) continue;
       // Nobody to tell yet (no door knows where the owner is): left untold, as the cap notice is.
       const notice = { id: `approval:${approval.id}`, text: noticeText(approval) };
       if (!(await delivery.tellOwner(tx, notice, now))) continue;
@@ -492,10 +499,30 @@ export interface ApprovalWatchOptions {
   /** The composition's tool table, for wording a request. */
   readonly tools: ReadonlyMap<string, ToolRegistration>;
   readonly diag: DiagSink;
-  /** Whether the owner is looking now (a web socket is open): then nobody is pinged. */
+  /** Whether a web socket is open. Background calls notify the owner even when one is open. */
   readonly watched: () => boolean;
+  readonly origins?: Pick<Origins, "runAutomatedOnly">;
   readonly now: () => number;
   readonly report: (error: unknown) => void;
+  /** The pending approvals as the owner is shown them, each time that list changes. */
+  readonly onList?: (approvals: readonly PendingApproval[]) => void;
+}
+
+/** One pending approval for the web: what it asks, with its arguments as bounded JSON text. */
+export function approvalSummary(approval: PendingApproval): ApprovalSummary {
+  const json = JSON.stringify(approval.arguments, null, 2) ?? "{}";
+  return {
+    id: approval.id,
+    conversationId: approval.conversationId,
+    tool: approval.tool,
+    summary: approval.summary,
+    reason: approval.reason,
+    arguments:
+      json.length <= MAX_APPROVAL_ARGUMENTS_CHARACTERS
+        ? json
+        : `${json.slice(0, MAX_APPROVAL_ARGUMENTS_CHARACTERS - 1)}…`,
+    ...(approval.expiresAt === undefined ? {} : { expiresAt: approval.expiresAt }),
+  };
 }
 
 /**
@@ -507,6 +534,8 @@ export interface ApprovalWatchOptions {
 export class ApprovalWatch {
   readonly #options: ApprovalWatchOptions;
   readonly #tracker = new ApprovalTracker();
+  /** The pending approvals described, by id, in the order they were asked. */
+  readonly #described = new Map<string, PendingApproval>();
   #queue: Promise<void> = Promise.resolve();
 
   constructor(options: ApprovalWatchOptions) {
@@ -517,8 +546,15 @@ export class ApprovalWatch {
     return this.#tracker.pending;
   }
 
+  /** The pending approvals with what each asks, as last described. */
+  get list(): readonly PendingApproval[] {
+    return [...this.#described.values()];
+  }
+
+  /** Marks `id` answered: it leaves the pending list and the owner's list at once. */
   answered(id: string): void {
     this.#tracker.answered(id);
+    if (this.#described.delete(id)) this.#options.onList?.(this.list);
   }
 
   /**
@@ -549,21 +585,41 @@ export class ApprovalWatch {
   }
 
   #notice(requested: readonly ApprovalRef[], context: Context): Promise<void> {
-    const { harness, delivery, tools, watched, now, report } = this.#options;
+    const { harness, delivery, tools, watched, origins, now, report, onList } = this.#options;
     const tell = !watched();
     this.#queue = this.#queue
       .then(async () => {
-        // As of now, not as of the frame: a request answered or ended since isn't announced.
+        // As of now, not as of the frame: a request answered or ended since isn't described or announced.
         const pending = this.#tracker.pending;
-        const described: PendingApproval[] = [];
-        if (tell) {
-          for (const ref of requested) {
-            if (!pending.some(({ id }) => id === ref.id)) continue;
-            const approval = await describeApproval(harness, ref, tools, context);
-            if (approval !== undefined) described.push(approval);
-          }
+        const live = new Set(pending.map(({ id }) => id));
+        let changed = false;
+        for (const id of this.#described.keys()) {
+          if (!live.has(id)) changed = this.#described.delete(id) || changed;
         }
-        await noticeApprovals(harness, delivery, described, pending, now(), context);
+        const asked: PendingApproval[] = [];
+        for (const ref of requested) {
+          if (!live.has(ref.id) || this.#described.has(ref.id)) continue;
+          const approval = await describeApproval(harness, ref, tools, context);
+          if (approval === undefined || !this.#tracker.pending.some(({ id }) => id === ref.id)) {
+            continue;
+          }
+          this.#described.set(ref.id, approval);
+          asked.push(approval);
+          changed = true;
+        }
+        if (changed) onList?.(this.list);
+        await noticeApprovals(
+          harness,
+          delivery,
+          asked,
+          this.#tracker.pending,
+          now(),
+          context,
+          (tx, approval) =>
+            tell ||
+            approval.background ||
+            (origins?.runAutomatedOnly(tx, approval.conversationId) ?? false),
+        );
       })
       .catch(report);
     return this.#queue;

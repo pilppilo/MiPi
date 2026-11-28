@@ -16,7 +16,7 @@ import type {
   TransportEvent,
   TransportRequest,
 } from "../src/client/session/transport.ts";
-import type { DiagEvent, DiagHealth } from "../src/protocol.ts";
+import type { ApprovalSummary, DiagEvent, DiagHealth } from "../src/protocol.ts";
 
 /** One fake connection: what the client sent, and a way to play the agent's side. */
 class FakeTransport implements Transport {
@@ -133,7 +133,7 @@ const snapshot = (
   session: { conversations, ...(capabilities === undefined ? {} : { capabilities }) },
 });
 
-const ALL = ["activity", "diagnostics", "usage"];
+const ALL = ["activity", "approvals", "diagnostics", "usage"];
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -508,5 +508,122 @@ describe("capabilities and version skew", () => {
     transport.receive(snapshot());
     expect(transport.types()).toEqual(["options.list"]);
     expect(client.getState().session.capabilities.size).toBe(0);
+  });
+});
+
+describe("approval decisions", () => {
+  const approval: ApprovalSummary = {
+    id: "23",
+    conversationId: 1,
+    tool: "remember",
+    summary: "Save memory",
+    reason: "This turn read a web page.",
+    arguments: "{}",
+  };
+  const list = { type: "approvals.list", approvals: [approval] };
+
+  it("keeps the same state when an empty list arrives with no pending approvals", () => {
+    const { client, transport } = setup();
+    transport.connected();
+    transport.receive(snapshot(["approvals"]));
+
+    const initial = client.getState();
+    const listener = vi.fn();
+    client.subscribe(listener);
+    const empty = { ...list, approvals: [] };
+
+    transport.receive(empty);
+    expect(client.getState()).toBe(initial);
+    expect(listener).not.toHaveBeenCalled();
+
+    transport.receive(list);
+    transport.receive(empty);
+    expect(client.getState().approvals).toBe(initial.approvals);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("shows the latest list and returns decision results to the card", async () => {
+    const { client, transport } = setup();
+    transport.connected();
+    transport.receive(snapshot(["approvals"]));
+    transport.receive(list);
+    expect(client.getState().approvals).toEqual([approval]);
+
+    const attempt = client.decideApproval(approval.id, "deny", "  Skip this  ");
+    const command = transport.sent.at(-1)!;
+    expect(command).toEqual({
+      type: "approval.decide",
+      requestId: "id-2",
+      approvalId: approval.id,
+      decision: "deny",
+      note: "Skip this",
+    });
+    transport.receive({
+      type: "command.result",
+      command: "approval.decide",
+      requestId: command.requestId,
+      ok: false,
+      error: { code: "invalid_command", message: "Already answered" },
+    });
+    await expect(attempt).resolves.toEqual({ ok: false, message: "Already answered" });
+    expect(client.getState().session.error).toBeUndefined();
+
+    const next = client.decideApproval(approval.id, "approve", " ");
+    expect(transport.sent.at(-1)).not.toHaveProperty("note");
+    transport.receive({
+      type: "command.result",
+      command: "approval.decide",
+      requestId: transport.sent.at(-1)!.requestId,
+      ok: true,
+    });
+    await expect(next).resolves.toEqual({ ok: true });
+    transport.receive({ ...list, approvals: [] });
+    expect(client.getState().approvals).toEqual([]);
+  });
+
+  it.each(["close", "stop", "capability drop"] as const)(
+    "clears the list and resolves pending decisions on %s",
+    async (exit) => {
+      const { client, transport } = setup();
+      transport.connected();
+      transport.receive(snapshot(["approvals"]));
+      transport.receive(list);
+      const pending = client.decideApproval(approval.id, "deny");
+
+      if (exit === "stop") client.stop();
+      else if (exit === "close") transport.drop();
+      else transport.receive(snapshot([]));
+      transport.receive(list);
+
+      await expect(pending).resolves.toEqual({
+        ok: false,
+        message:
+          exit === "capability drop"
+            ? "This agent does not support approvals."
+            : "The connection closed before the agent answered.",
+      });
+      expect(client.getState().approvals).toEqual([]);
+      transport.clear();
+      await expect(client.decideApproval(approval.id, "deny")).resolves.toMatchObject({
+        ok: false,
+      });
+      expect(transport.sent).toEqual([]);
+    },
+  );
+
+  it("ignores approval frames and sends no decisions to older agents", async () => {
+    const { client, transport } = setup();
+    await expect(client.decideApproval(approval.id, "approve")).resolves.toMatchObject({
+      ok: false,
+    });
+    transport.connected();
+    transport.receive(snapshot());
+    transport.clear();
+    transport.receive(list);
+    expect(client.getState().approvals).toEqual([]);
+    await expect(client.decideApproval(approval.id, "approve")).resolves.toMatchObject({
+      ok: false,
+    });
+    expect(transport.sent).toEqual([]);
   });
 });

@@ -5,7 +5,7 @@ import { ChatSession } from "../src/client/ChatSession.tsx";
 import type { PiSession } from "../src/client/usePiSession.ts";
 
 /** Which conversation the mocked session has open. */
-const open = vi.hoisted(() => ({ id: 4 }));
+const open = vi.hoisted(() => ({ id: 4, waiting: false }));
 
 vi.mock("../src/client/usePiSession.ts", () => ({
   usePiSession: (): Pick<
@@ -16,9 +16,11 @@ vi.mock("../src/client/usePiSession.ts", () => ({
     | "activeConversationId"
     | "activeConversation"
     | "activity"
+    | "approvals"
+    | "decideApproval"
   > => ({
     status: "connected",
-    capabilities: new Set(["activity", "diagnostics", "usage"]),
+    capabilities: new Set(["activity", "approvals", "diagnostics", "usage"]),
     conversations: [
       { id: 1, archivedAt: 5, title: "Old chat" },
       { id: 4, kind: "main", name: "Mia", profile: "main", latestEntryId: 3 },
@@ -33,6 +35,19 @@ vi.mock("../src/client/usePiSession.ts", () => ({
       { id: 8, owner: { conversationId: 7 } },
       { id: 10, owner: { conversationId: 1 } },
     ],
+    approvals: open.waiting
+      ? [
+          {
+            id: "21",
+            conversationId: 7,
+            tool: "remember",
+            summary: "Save my dinner preference",
+            reason: "This turn read a web page.",
+            arguments: "{}",
+          },
+        ]
+      : [],
+    decideApproval: async () => ({ ok: true }),
     activeConversationId: open.id,
     activeConversation: {
       id: open.id,
@@ -114,6 +129,24 @@ it.each([
     }
   } finally {
     open.id = 4;
+    vi.unstubAllGlobals();
+  }
+});
+
+it("puts the cobot approval above the composer and marks it and its parent", () => {
+  vi.stubGlobal("window", { location: { search: "" } });
+  open.id = 7;
+  open.waiting = true;
+  try {
+    const html = renderToStaticMarkup(createElement(ChatSession, { sessionId: "test" }));
+    expect(html.match(/aria-label="Needs your approval"/g)).toHaveLength(2);
+    expect(html).toMatch(
+      /<\/section><ol class="approval-cards approval-cards--chat".*?Save my dinner preference.*?<\/ol><form class="prompt-bar"/,
+    );
+    expect(html).not.toContain("drawer-approval-dot");
+  } finally {
+    open.id = 4;
+    open.waiting = false;
     vi.unstubAllGlobals();
   }
 });

@@ -54,6 +54,11 @@ export const MAX_PROMPT_CHARACTERS = 100_000;
 export const MAX_BOT_NAME_CHARACTERS = 40;
 export const MAX_BOT_PURPOSE_CHARACTERS = 2_000;
 export const MAX_REQUEST_ID_CHARACTERS = 256;
+/** The owner's note on an approval (COD-173), as `approval.decide` takes it. */
+export const MAX_APPROVAL_NOTE_CHARACTERS = 500;
+/** An approval's arguments, as JSON text, are cut to this many characters for the card. */
+export const MAX_APPROVAL_ARGUMENTS_CHARACTERS = 2_000;
+const MAX_APPROVAL_ID_CHARACTERS = 20;
 /** Entries one `conversation.entries` command may ask for. */
 export const MAX_ENTRY_PAGE = 100;
 // JSON may escape each prompt code unit as six characters.
@@ -390,7 +395,7 @@ export interface DiagSnapshot {
  * list, reconnecting) is the door contract and has no capability. A capability the snapshot doesn't list is off, so
  * an older agent (no `capabilities` at all) turns every optional panel off rather than breaking the client.
  */
-export const CORE_CAPABILITIES = ["activity", "diagnostics", "usage"] as const;
+export const CORE_CAPABILITIES = ["activity", "approvals", "diagnostics", "usage"] as const;
 export type CoreCapability = (typeof CORE_CAPABILITIES)[number];
 
 /** A capability id: lower-case words joined by `-` or `.`, such as `usage` or `memory.search`. */
@@ -403,6 +408,25 @@ export const isCapabilityId = (value: string): boolean =>
 /** Capabilities as the snapshot sends them: deduplicated and sorted, so the same set is always the same frame. */
 export const capabilityList = (ids: Iterable<string>): readonly string[] =>
   [...new Set(ids)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
+/** One tool call waiting for the owner's approval (COD-173), as the web shows it. */
+export interface ApprovalSummary {
+  /** What `approval.decide` names. */
+  readonly id: string;
+  readonly conversationId: number;
+  readonly tool: string;
+  /** One line: what the call will do. */
+  readonly summary: string;
+  /** Why it needs a yes. */
+  readonly reason: string;
+  /** The call's arguments as JSON text, cut to `MAX_APPROVAL_ARGUMENTS_CHARACTERS`. */
+  readonly arguments: string;
+  /** When it times out (milliseconds since the epoch): then it counts as denied. */
+  readonly expiresAt?: number;
+}
+
+export const APPROVAL_DECISIONS = ["approve", "deny"] as const;
+export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
 
 export type ClientCommand =
   | {
@@ -513,6 +537,14 @@ export type ClientCommand =
       /** Stops the live tail on this socket. */
       readonly type: "diag.unsubscribe";
       readonly requestId: string;
+    }
+  | {
+      /** The owner's answer to a pending approval (COD-173): the call runs, or the model is told it was denied. */
+      readonly type: "approval.decide";
+      readonly requestId: string;
+      readonly approvalId: string;
+      readonly decision: ApprovalDecision;
+      readonly note?: string;
     };
 export type ClientCommandType = Exclude<ClientCommand["type"], "presence.typing">;
 
@@ -589,6 +621,11 @@ export type ServerEvent =
       /** One new diagnostic event, sent only to sockets that subscribed (`diag.subscribe`). */
       readonly type: "diag.event";
       readonly event: DiagEvent;
+    }
+  | {
+      /** Every tool call waiting for the owner's approval, in every bot (COD-173): on connect, then on each change. */
+      readonly type: "approvals.list";
+      readonly approvals: readonly ApprovalSummary[];
     }
   | CommandResult
   | {
@@ -794,6 +831,7 @@ const commandTypes = new Set<ClientCommandType>([
   "conversation.configure",
   "diag.subscribe",
   "diag.unsubscribe",
+  "approval.decide",
 ]);
 
 const isCommandType = (value: string): value is ClientCommandType =>
@@ -1045,6 +1083,33 @@ export const parseDiagSnapshot = (value: unknown): DiagSnapshot => {
   return { events: value.events.map(parseDiagEvent), health: parseDiagHealth(value.health) };
 };
 
+const isApprovalId = (value: unknown): value is string =>
+  typeof value === "string" && value.length <= MAX_APPROVAL_ID_CHARACTERS && /^\d+$/.test(value);
+
+const parseApprovalSummary = (value: unknown): ApprovalSummary => {
+  if (
+    !isRecord(value) ||
+    !isApprovalId(value.id) ||
+    typeof value.tool !== "string" ||
+    typeof value.summary !== "string" ||
+    typeof value.reason !== "string" ||
+    typeof value.arguments !== "string" ||
+    value.arguments.length > MAX_APPROVAL_ARGUMENTS_CHARACTERS ||
+    (value.expiresAt !== undefined && !Number.isFinite(value.expiresAt))
+  ) {
+    throw new Error("Approval summary is invalid");
+  }
+  return {
+    id: value.id,
+    conversationId: requireId(value.conversationId, "approval.conversationId"),
+    tool: value.tool,
+    summary: value.summary,
+    reason: value.reason,
+    arguments: value.arguments,
+    ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt as number }),
+  };
+};
+
 export function parseClientCommand(message: string): ClientCommand {
   let value: unknown;
   try {
@@ -1170,6 +1235,32 @@ export function parseClientCommand(message: string): ClientCommand {
         conversationId: requireId(value.conversationId, "conversationId"),
         ...(model === undefined ? {} : { model }),
         ...(profile === undefined ? {} : { profile }),
+      };
+    }
+    case "approval.decide": {
+      const approvalId = value.approvalId;
+      if (!isApprovalId(approvalId)) {
+        throw new InvalidClientCommand("approvalId must be an approval's id");
+      }
+      if (value.decision !== "approve" && value.decision !== "deny") {
+        throw new InvalidClientCommand("decision must be approve or deny");
+      }
+      let note: string | undefined;
+      if (value.note !== undefined) {
+        if (typeof value.note !== "string") throw new InvalidClientCommand("note must be text");
+        if ([...value.note].length > MAX_APPROVAL_NOTE_CHARACTERS) {
+          throw new InvalidClientCommand(
+            `note cannot exceed ${MAX_APPROVAL_NOTE_CHARACTERS} characters`,
+          );
+        }
+        if (value.note.trim().length > 0) note = value.note.trim();
+      }
+      return {
+        type: value.type,
+        requestId,
+        approvalId,
+        decision: value.decision,
+        ...(note === undefined ? {} : { note }),
       };
     }
     case "conversation.entries": {
@@ -1325,6 +1416,10 @@ export function parseServerEventEnvelope(message: string): ReceivedServerEvent {
     }
     case "diag.event":
       return { type: value.type, event: parseDiagEvent(value.event) };
+    case "approvals.list": {
+      if (!Array.isArray(value.approvals)) throw new Error("Approvals payload is invalid");
+      return { type: value.type, approvals: value.approvals.map(parseApprovalSummary) };
+    }
     case "error":
       return { type: value.type, error: requireError(value.error) };
     default:

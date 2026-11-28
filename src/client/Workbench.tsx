@@ -1,12 +1,18 @@
 /**
  * Workbench (COD-249, D · Spaces): the deep view of one bot. What it is doing now, step by step; what it waits on;
  * and how the other bots are. Plain names throughout (`names.ts`). Built from what the session already has: the
- * activity graph, the open conversation's live tools, the bots list. Stopping and steering a run are COD-250, and
- * the approvals waiting on the owner come with COD-238.
+ * activity graph, pending approvals, the open conversation's live tools, and the bots list.
  */
 import type { MouseEvent } from "react";
-import type { ConversationSummary, TaskGraph, TaskGraphNode } from "../protocol.ts";
-import { type BotActivity, tasksOfBot } from "./session/bots-list.ts";
+import type {
+  ApprovalSummary,
+  ConversationSummary,
+  TaskGraph,
+  TaskGraphNode,
+} from "../protocol.ts";
+import { ApprovalCard } from "./ApprovalCard.tsx";
+import { approvalsForBot, type BotActivity, tasksOfBot } from "./session/bots-list.ts";
+import type { SessionClient } from "./session/session-client.ts";
 import type { ToolProgress } from "./session/session-state.ts";
 import { BotMark, botStatusLabel } from "./marks.tsx";
 import { taskName, toolName } from "./names.ts";
@@ -22,6 +28,10 @@ export interface WorkbenchProps {
   readonly tools: readonly ToolProgress[];
   readonly activity: ReadonlyMap<number, BotActivity>;
   readonly unread: ReadonlySet<number>;
+  readonly approvals: readonly ApprovalSummary[];
+  readonly needsApproval: ReadonlySet<number>;
+  readonly canDecideApproval: boolean;
+  readonly onDecideApproval: SessionClient["decideApproval"];
   readonly onOpenBot: (conversationId: number) => void;
 }
 
@@ -76,8 +86,13 @@ export function Workbench({
   tools,
   activity,
   unread,
+  approvals,
+  needsApproval,
+  canDecideApproval,
+  onDecideApproval,
   onOpenBot,
 }: WorkbenchProps) {
+  const waitingOnOwner = approvalsForBot(conversations, approvals, bot.id);
   const tasks = tasksOfBot(conversations, graph, bot.id);
   const running = tasks.filter((task) => groupOf(task) === "running");
   const waiting = tasks.filter((task) => groupOf(task) === "waiting");
@@ -88,12 +103,15 @@ export function Workbench({
   const name = label(bot);
 
   /** A task run in a conversation of this bot other than its own: says which kind. */
-  const taskWhere = (task: TaskGraphNode) => {
-    if (task.conversationId === undefined || task.conversationId === bot.id) return null;
-    const where = conversations.find(({ id }) => id === task.conversationId);
+  const whereText = (conversationId: number) => {
+    if (conversationId === bot.id) return undefined;
+    const where = conversations.find(({ id }) => id === conversationId);
     // A subagent is made by a tool call; a cobot is a side chat with this bot.
-    const note = where?.owner !== undefined ? "for a helper" : "for a side chat";
-    return <span className="workbench-card-note">{note}</span>;
+    return where?.owner !== undefined ? "for a helper" : "for a side chat";
+  };
+  const taskWhere = (task: TaskGraphNode) => {
+    const note = whereText(task.conversationId);
+    return note === undefined ? null : <span className="workbench-card-note">{note}</span>;
   };
 
   const open = (event: MouseEvent<HTMLAnchorElement>, conversationId: number): void => {
@@ -109,6 +127,29 @@ export function Workbench({
       <h2 id="workbench-heading" className="visually-hidden">
         {name}'s workbench
       </h2>
+
+      {waitingOnOwner.length === 0 ? null : (
+        <section className="workbench-group" aria-labelledby="workbench-approvals">
+          <h3 id="workbench-approvals" className="section-label">
+            Waiting on you
+          </h3>
+          <ol className="approval-cards">
+            {waitingOnOwner.map((approval) => {
+              const where = whereText(approval.conversationId);
+              return (
+                <li key={approval.id}>
+                  <ApprovalCard
+                    approval={approval}
+                    disabled={!canDecideApproval}
+                    onDecide={(decision, note) => onDecideApproval(approval.id, decision, note)}
+                    {...(where === undefined ? {} : { where })}
+                  />
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
 
       <section className="workbench-group" aria-labelledby="workbench-running">
         <h3 id="workbench-running" className="section-label">
@@ -188,6 +229,7 @@ export function Workbench({
                     <span>
                       {botStatusLabel(activity.get(other.id))}
                       {unread.has(other.id) ? " · new messages" : ""}
+                      {needsApproval.has(other.id) ? " · needs approval" : ""}
                     </span>
                   </span>
                 </a>

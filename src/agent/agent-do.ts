@@ -113,7 +113,7 @@ import {
 } from "./alarm.ts";
 import { type HeartbeatStatus, readHeartbeat } from "./heartbeat.ts";
 import { WakeSources } from "./wake-sources.ts";
-import { ApprovalWatch } from "./approvals.ts";
+import { approvalSummary, ApprovalWatch, resolveApproval } from "./approvals.ts";
 import { DIAG_TABLE, type DiagInput, DiagLog, type DiagQuery, errorText } from "./diag.ts";
 import { isTelegramChange, TelegramChannelRuntime } from "../doors/telegram/channel.ts";
 import { botApiSender } from "../doors/telegram/bot-api.ts";
@@ -1035,13 +1035,14 @@ export class MipiAgent extends DurableObject<Env> {
         const settings = await tx.doc(AgentSettings);
         if (settings.timeZone !== timeZone) settings.timeZone = timeZone;
       }, BACKGROUND_CONTEXT);
-      // Pending approvals (COD-173), read off the task graph: their diagnostics, and a notice while nobody watches.
+      // Pending approvals (COD-173), read off the task graph for the web list and owner notices.
       const approvals = new ApprovalWatch({
         harness,
         delivery: composition.connectors.delivery,
         tools: composition.extensions.tools,
         diag: this.#diag,
         watched: () => this.#connections().length > 0,
+        origins: composition.connectors.origins,
         now: Date.now,
         // A notice cut off by a close for maintenance is told again from the graph at the next open.
         report: (error) => {
@@ -1049,6 +1050,9 @@ export class MipiAgent extends DurableObject<Env> {
             reportError("Telling the owner about an approval failed", error);
           }
         },
+        // Every tab sees the list change: the card where it was asked, a dot on its bot everywhere else.
+        onList: (list) =>
+          this.#broadcast({ type: "approvals.list", approvals: list.map(approvalSummary) }),
       });
       this.#approvals = approvals;
       activity = await harness.watchTaskGraph(BACKGROUND_CONTEXT);
@@ -1584,6 +1588,10 @@ export class MipiAgent extends DurableObject<Env> {
       BACKGROUND_CONTEXT,
     );
     await this.#sendSessionSnapshot(server);
+    this.#send(server, {
+      type: "approvals.list",
+      approvals: (this.#approvals?.list ?? []).map(approvalSummary),
+    });
     await this.#watchConversation(server, bound);
   }
 
@@ -1981,6 +1989,53 @@ export class MipiAgent extends DurableObject<Env> {
           command: command.type,
           requestId: command.requestId,
           ok: true,
+        });
+        return;
+      }
+      case "approval.decide": {
+        const approvals = this.#approvals;
+        const ref = approvals?.pending.find(({ id }) => id === command.approvalId);
+        if (approvals === undefined || ref === undefined) {
+          throw new Error("That approval was already answered or has ended.");
+        }
+        // Archiving aborts what a bot was doing, so this only catches the moment in between.
+        const archived = await this.#harness.commit(
+          (tx) => archivedRefusal(tx, ref.conversationId),
+          BACKGROUND_CONTEXT,
+        );
+        if (archived !== undefined) throw new Error(archived);
+        // The answer wakes the call: armed first, as before `submit()`.
+        await this.#alarm.schedule({ ...this.#harness.wake(), active: true });
+        const result = await resolveApproval(
+          this.#harness,
+          this.#activity.value,
+          command.approvalId,
+          {
+            decision: command.decision,
+            decidedBy: "web",
+            ...(command.note === undefined ? {} : { note: command.note }),
+          },
+          Date.now(),
+          BACKGROUND_CONTEXT,
+        );
+        switch (result.kind) {
+          case "resolved":
+            approvals.answered(command.approvalId);
+            break;
+          case "already_decided":
+          case "not_found":
+            throw new Error("That approval was already answered or has ended.");
+          default: {
+            const _: never = result;
+            throw new Error("Unknown approval result");
+          }
+        }
+        this.#send(socket, {
+          type: "command.result",
+          command: command.type,
+          requestId: command.requestId,
+          ok: true,
+          conversationId: ref.conversationId,
         });
         return;
       }
