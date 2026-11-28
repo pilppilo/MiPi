@@ -522,6 +522,26 @@ describe("approval decisions", () => {
   };
   const list = { type: "approvals.list", approvals: [approval] };
 
+  it("keeps the same state when an empty list arrives with no pending approvals", () => {
+    const { client, transport } = setup();
+    transport.connected();
+    transport.receive(snapshot(["approvals"]));
+
+    const initial = client.getState();
+    const listener = vi.fn();
+    client.subscribe(listener);
+    const empty = { ...list, approvals: [] };
+
+    transport.receive(empty);
+    expect(client.getState()).toBe(initial);
+    expect(listener).not.toHaveBeenCalled();
+
+    transport.receive(list);
+    transport.receive(empty);
+    expect(client.getState().approvals).toBe(initial.approvals);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
+
   it("shows the latest list and returns decision results to the card", async () => {
     const { client, transport } = setup();
     transport.connected();

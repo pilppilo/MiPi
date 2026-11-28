@@ -374,7 +374,8 @@ export class SessionClient {
     if (parsed.type === "command.result" && parsed.command === "diag.unsubscribe") return;
     if (parsed.type === "approvals.list") {
       if (this.#capabilities.has("approvals")) {
-        this.#update({ ...this.#state, approvals: parsed.approvals });
+        const approvals = parsed.approvals.length === 0 ? NO_APPROVALS : parsed.approvals;
+        if (approvals !== this.#state.approvals) this.#update({ ...this.#state, approvals });
       }
       return;
     }
