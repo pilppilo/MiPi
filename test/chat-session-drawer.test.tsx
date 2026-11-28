@@ -9,7 +9,7 @@ import type { PiSession } from "../src/client/usePiSession.ts";
  * COD-244: the spaces drawer as the page draws it, closed and open. Its rules are in `drawer.test.ts`; that a bot pick,
  * Settings and Escape reach them was checked in a browser (the PR's preview).
  */
-const mocked = vi.hoisted(() => ({ drawer: undefined as DrawerState | undefined }));
+const mocked = vi.hoisted(() => ({ drawer: undefined as DrawerState | undefined, waiting: false }));
 
 vi.mock("react", async (original) => {
   const react = await original<typeof import("react")>();
@@ -25,14 +25,33 @@ vi.mock("react", async (original) => {
 vi.mock("../src/client/usePiSession.ts", () => ({
   usePiSession: (): Pick<
     PiSession,
-    "status" | "capabilities" | "conversations" | "activeConversationId" | "activeConversation"
+    | "status"
+    | "capabilities"
+    | "conversations"
+    | "activeConversationId"
+    | "activeConversation"
+    | "approvals"
+    | "decideApproval"
   > => ({
     status: "connected",
-    capabilities: new Set(["activity", "diagnostics", "usage"]),
+    capabilities: new Set(["activity", "approvals", "diagnostics", "usage"]),
     conversations: [
       { id: 4, kind: "main", name: "MiPi", latestEntryId: 2 },
       { id: 6, kind: "bot", name: "Groceries", purpose: "Keep the list.", profile: "default" },
     ],
+    approvals: mocked.waiting
+      ? [
+          {
+            id: "52",
+            conversationId: 6,
+            tool: "remember",
+            summary: "Save the lesson",
+            reason: "This turn read a web page.",
+            arguments: "{}",
+          },
+        ]
+      : [],
+    decideApproval: async () => ({ ok: true }),
     activeConversationId: 4,
     activeConversation: {
       id: 4,
@@ -56,6 +75,7 @@ const render = (drawer: DrawerState): string => {
 
 afterEach(() => {
   mocked.drawer = undefined;
+  mocked.waiting = false;
   vi.unstubAllGlobals();
 });
 
@@ -67,6 +87,17 @@ describe("the spaces drawer on the page (COD-244)", () => {
       /<button[^>]*class="round-button drawer-toggle"[^>]*aria-controls="spaces-drawer" aria-expanded="false"/,
     );
     expect(html).not.toMatch(/<main class="conversation-view" inert/);
+  });
+
+  it("marks the closed toggle and links to a waiting bot in the drawer", () => {
+    mocked.waiting = true;
+    const html = render(DRAWER_CLOSED);
+    expect(html).toMatch(
+      /aria-label="Bots and settings, approval waiting"[^>]*aria-expanded="false"[^>]*>.*?drawer-approval-dot.*?<\/button>/,
+    );
+    expect(html).toMatch(
+      /class="approval-banner".*?<a href="\?conversation=6">Groceries<\/a>.*?Save the lesson/,
+    );
   });
 
   it("open: the drawer shows, the conversation behind it is inert, and the scrim can close it", () => {

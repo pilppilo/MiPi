@@ -2,7 +2,12 @@
  * The web list of bots (COD-197): which conversations it shows, what each is doing, and which have something unread.
  * Pure functions over the session's summaries and activity graph, so the sidebar only draws them.
  */
-import type { ConversationSummary, TaskGraph, TaskGraphNode } from "../../protocol.ts";
+import type {
+  ApprovalSummary,
+  ConversationSummary,
+  TaskGraph,
+  TaskGraphNode,
+} from "../../protocol.ts";
 import type { PlatformStorage } from "./platform.ts";
 
 /** MiPi first, then purpose bots. Cobots and subagents hang from their parent conversations. */
@@ -59,6 +64,24 @@ export function unreadByBot(
     for (const parent of branch) result.add(parent);
   }
   return result;
+}
+
+/** Mark both the conversation asking for approval and its parents in the drawer. */
+export function approvalsByBot(
+  conversations: readonly ConversationSummary[],
+  approvals: readonly ApprovalSummary[],
+): ReadonlySet<number> {
+  return unreadByBot(conversations, new Set(approvals.map(({ conversationId }) => conversationId)));
+}
+
+/** Approvals for this bot, including its side chats and helpers. */
+export function approvalsForBot(
+  conversations: readonly ConversationSummary[],
+  approvals: readonly ApprovalSummary[],
+  botId: number,
+): readonly ApprovalSummary[] {
+  const summaries = new Map(conversations.map((summary) => [summary.id, summary]));
+  return approvals.filter(({ conversationId }) => branchOf(summaries, conversationId).has(botId));
 }
 
 /**

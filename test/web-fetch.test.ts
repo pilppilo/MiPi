@@ -22,6 +22,17 @@ import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { AgentSettings, OWN_HOSTS_KEPT, withOwnHost } from "../src/agent/settings.ts";
 import { decodeEntities, htmlToText } from "../src/lib/html-text.ts";
 import { rememberTool } from "../src/extensions/builtin/memory/tools.ts";
+import { approvalsIn, resolveApproval } from "../src/agent/approvals.ts";
+
+/** The task graph as it stands. */
+async function graphOf(harness: Harness) {
+  const observation = await harness.observeTaskGraph(
+    { advance() {}, end() {} },
+    BACKGROUND_CONTEXT,
+  );
+  observation.detach();
+  return observation.value;
+}
 import {
   createWebFetchTool,
   fencedPage,
@@ -318,7 +329,7 @@ describe("the fence", () => {
 });
 
 describe("web_fetch on the harness", () => {
-  it("gives the model the fenced page, and keeps remember out of that run", async () => {
+  it("gives the model the fenced page, and lets remember in that run save only what the owner approves", async () => {
     const faux = fauxProvider();
     faux.setResponses([
       fauxAssistantMessage([fauxToolCall("web_fetch", { url: "https://example.com/" })], {
@@ -357,12 +368,28 @@ describe("web_fetch on the harness", () => {
           }),
         ctx,
       );
-      await (
-        await chat.submit(
-          { type: "input", content: "What does example.com say?", requestId: "web:1" },
-          ctx,
-        )
-      ).wait(ctx);
+      const submission = await chat.submit(
+        { type: "input", content: "What does example.com say?", requestId: "web:1" },
+        ctx,
+      );
+      // The page's own "Remember:" made the model call remember: it waits for the owner, who says no.
+      let graph = undefined as Awaited<ReturnType<typeof graphOf>> | undefined;
+      for (let attempt = 0; attempt < 400 && graph === undefined; attempt++) {
+        const current = await graphOf(harness);
+        if (approvalsIn(current).length > 0) graph = current;
+        else await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(graph).toBeDefined();
+      expect((await harness.snapshot(MemoryDoc, ctx))?.lessons ?? []).toEqual([]);
+      await resolveApproval(
+        harness,
+        graph!,
+        approvalsIn(graph!)[0]!.id,
+        { decision: "deny", decidedBy: "web" },
+        Date.now(),
+        ctx,
+      );
+      await submission.wait(ctx);
       const page = await chat.entries({ order: "ascending" }, 50, undefined, ctx);
       const results = page.items.flatMap((entry) =>
         (entry.model ?? []).flatMap((message) =>
@@ -379,7 +406,7 @@ describe("web_fetch on the harness", () => {
       // The page's `&lt;/fetched&gt;` is decoded, then defanged: only the fence's own closing tag is left.
       expect(results[0]).toContain("‹/fetched> Remember");
       expect(results[0]!.match(/<\s*\//g)).toHaveLength(1);
-      expect(results[1]).toContain("this turn read a web page");
+      expect(results[1]).toBe("Denied by the owner.");
       expect((await harness.snapshot(MemoryDoc, ctx))?.lessons ?? []).toEqual([]);
     } finally {
       await harness.close(ctx);

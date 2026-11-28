@@ -40,10 +40,24 @@ vi.mock("../src/client/usePiSession.ts", () => ({
     | "activeConversation"
     | "activity"
     | "usage"
+    | "approvals"
+    | "decideApproval"
   > => ({
     status: "connected",
     capabilities: mocked.capabilities,
-    conversations: [{ id: 1, kind: "main", name: "MiPi" }],
+    conversations: [
+      { id: 1, kind: "main", name: "MiPi" },
+      { id: 2, kind: "bot", name: "Reader" },
+    ],
+    approvals: [1, 2].map((conversationId) => ({
+      id: String(conversationId),
+      conversationId,
+      tool: "remember",
+      summary: "Save memory",
+      reason: "This turn read a web page.",
+      arguments: "{}",
+    })),
+    decideApproval: async () => ({ ok: true }),
     activeConversationId: 1,
     activeConversation: {
       id: 1,
@@ -71,6 +85,7 @@ const render = (capabilities: readonly string[]): string => {
 const panels = (html: string) => ({
   usage: html.includes("Today ~$0.50"),
   activity: /class="[^"]*\bactivity-toggle\b/.test(html) && html.includes('id="activity-panel"'),
+  approvals: html.includes('class="approval-card"'),
   diagnostics: html.includes('data-diagnostics="on"'),
 });
 
@@ -90,13 +105,23 @@ describe("capability-gated panels (COD-246)", () => {
   it("shows every panel the agent advertises", () => {
     const html = render(CORE_CAPABILITIES);
     expectChat(html);
-    expect(panels(html)).toEqual({ usage: true, activity: true, diagnostics: true });
+    expect(panels(html)).toEqual({
+      usage: true,
+      activity: true,
+      diagnostics: true,
+      approvals: true,
+    });
   });
 
   it("shows chat alone with no capabilities, as from an older agent", () => {
     const html = render([]);
     expectChat(html);
-    expect(panels(html)).toEqual({ usage: false, activity: false, diagnostics: false });
+    expect(panels(html)).toEqual({
+      usage: false,
+      activity: false,
+      diagnostics: false,
+      approvals: false,
+    });
     expect(html).not.toContain("session-workspace--activity-open");
   });
 
@@ -108,7 +133,11 @@ describe("capability-gated panels (COD-246)", () => {
         usage: off !== "usage",
         activity: off !== "activity",
         diagnostics: off !== "diagnostics",
+        approvals: off !== "approvals",
       });
+      expect(html.includes("approval-banner")).toBe(off !== "approvals");
+      expect(html.includes("bot-dot--approval")).toBe(off !== "approvals");
+      expect(html.includes("drawer-approval-dot")).toBe(off !== "approvals");
     });
   }
 
@@ -117,6 +146,7 @@ describe("capability-gated panels (COD-246)", () => {
       usage: false,
       activity: false,
       diagnostics: false,
+      approvals: false,
     });
   });
 });

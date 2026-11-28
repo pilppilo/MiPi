@@ -72,6 +72,10 @@ const render = (bot: number, overrides: Partial<Parameters<typeof Workbench>[0]>
         [9, "running"],
       ]),
       unread: new Set([9]),
+      approvals: [],
+      needsApproval: new Set(),
+      canDecideApproval: true,
+      onDecideApproval: async () => ({ ok: true }),
       onOpenBot: () => {},
       ...overrides,
     }),
@@ -94,6 +98,33 @@ describe("Workbench", () => {
     expect(running.match(/for a helper/g)).toHaveLength(1);
     expect(running.match(/aria-label="Steps"/g)).toHaveLength(1);
     expect(running).not.toMatch(/search_history|web_fetch|pi\.generation/);
+  });
+
+  it("puts approvals for this bot, side chats and helpers before Running now", () => {
+    const html = render(6, {
+      approvals: [6, 7, 8, 9].map((conversationId) => ({
+        id: String(conversationId),
+        conversationId,
+        tool: "remember",
+        summary: "Save lesson " + conversationId,
+        reason: "This turn read a web page.",
+        arguments: "{}",
+      })),
+      needsApproval: new Set([6, 9]),
+    });
+    const approvals =
+      html.match(/aria-labelledby="workbench-approvals">(.*?)<\/section>/)?.[1] ?? "";
+    expect(approvals).toContain("Waiting on you");
+    expect(approvals.match(/class="approval-card"/g)).toHaveLength(3);
+    expect(approvals).toContain("for a side chat");
+    expect(approvals).toContain("for a helper");
+    expect(approvals).toMatch(/title="remember">Remember</);
+    expect(approvals).not.toContain("Save lesson 9");
+    expect(html.indexOf("Waiting on you")).toBeLessThan(html.indexOf("Running now"));
+    expect(html).toMatch(
+      /<strong>Reader<\/strong><span>Working · new messages · needs approval<\/span>/,
+    );
+    expect(render(6)).not.toContain("Waiting on you");
   });
 
   it("shows what it waits on, with when it wakes", () => {

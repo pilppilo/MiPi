@@ -37,8 +37,15 @@ import {
   resolveApproval,
 } from "../src/agent/approvals.ts";
 import { createHarnessOptions } from "../src/agent/composition.ts";
+import {
+  InvalidClientCommand,
+  MAX_APPROVAL_NOTE_CHARACTERS,
+  parseClientCommand,
+  parseServerEventEnvelope,
+} from "../src/protocol.ts";
 import type { DiagInput } from "../src/agent/diag.ts";
 import type { MipiExtension } from "../src/agent/extensions.ts";
+import { Origins } from "../src/agent/origin.ts";
 import { abortConversation, type ToolRegistration } from "../src/agent/pi/durable.ts";
 import { openDurableObjectSqliteStorage } from "../src/agent/pi/sqlite.ts";
 import { BUILT_IN_EXTENSIONS } from "../src/extensions/builtins.ts";
@@ -501,7 +508,12 @@ const seen = (): Seen => ({ told: [], events: [] });
 function approvalWatch(
   harness: Harness,
   into: Seen,
-  options: { watched?: () => boolean; reach?: () => boolean; now?: () => number } = {},
+  options: {
+    watched?: () => boolean;
+    reach?: () => boolean;
+    now?: () => number;
+    origins?: Origins;
+  } = {},
 ): ApprovalWatch {
   return new ApprovalWatch({
     harness,
@@ -518,6 +530,7 @@ function approvalWatch(
     ]),
     diag: { emit: (event) => into.events.push(event) },
     watched: options.watched ?? (() => false),
+    ...(options.origins === undefined ? {} : { origins: options.origins }),
     now: options.now ?? Date.now,
     report: (error) => {
       throw error;
@@ -766,6 +779,27 @@ describe("the approval watch", () => {
     }
   });
 
+  it("notifies the owner once for a reminder's run even with a web tab open", async () => {
+    const agent = await openAgent([call("post", { text: "scheduled" }), say("Posted.")]);
+    try {
+      const chat = await conversation(agent.harness);
+      await chat.submit({ type: "input", content: "post scheduled", requestId: "sched:test" }, ctx);
+      const graph = await pending(agent.harness);
+      const notices = seen();
+      const watch = () =>
+        approvalWatch(agent.harness, notices, {
+          watched: () => true,
+          origins: new Origins([{ prefix: "sched", source: "reminder", automated: true }]),
+        });
+
+      await watch().seed(graph, ctx);
+      await watch().seed(graph, ctx);
+      expect(notices.told).toHaveLength(1);
+    } finally {
+      await agent.close();
+    }
+  });
+
   it("doesn't announce a request answered before its notice runs, or describe one that ended", async () => {
     const agent = await openAgent([call("post", { text: "quick" }), say("Posted.")]);
     try {
@@ -788,6 +822,44 @@ describe("the approval watch", () => {
       expect(await describeApproval(agent.harness, ref!, new Map([["post", postTool]]), ctx)).toBe(
         undefined,
       );
+    } finally {
+      await agent.close();
+    }
+  });
+
+  it("hands the web the described list as it changes: seeded, answered, ended", async () => {
+    const agent = await openAgent([call("post", { text: "list" }), say("Posted.")]);
+    try {
+      const lists: string[][] = [];
+      const watch = new ApprovalWatch({
+        harness: agent.harness,
+        delivery: { tellOwner: async () => true },
+        tools: new Map([["post", postTool]]),
+        diag: { emit() {} },
+        watched: () => true,
+        now: () => agent.clock.now,
+        report: (error) => {
+          throw error;
+        },
+        onList: (list) => lists.push(list.map(({ id, summary }) => `${id}:${summary}`)),
+      });
+      const chat = await conversation(agent.harness);
+      const submission = await send(agent.harness, chat.id, "post list");
+      const graph = await pending(agent.harness);
+      const [ref] = approvalsIn(graph);
+      await watch.seed(graph, ctx);
+      expect(lists).toEqual([[`${ref!.id}:Post "list"`]]);
+      expect(watch.list.map(({ tool }) => tool)).toEqual(["post"]);
+      // The same graph again changes nothing.
+      await watch.observe(graph, ctx);
+      expect(lists).toHaveLength(1);
+
+      await resolveApproval(agent.harness, graph, ref!.id, answer("approve"), agent.clock.now, ctx);
+      watch.answered(ref!.id);
+      expect(lists.at(-1)).toEqual([]);
+      await submission.wait(ctx);
+      await watch.observe(await graphOf(agent.harness), ctx);
+      expect(lists).toHaveLength(2);
     } finally {
       await agent.close();
     }
@@ -834,5 +906,74 @@ describe("the approval watch", () => {
     } finally {
       await agent.close();
     }
+  });
+});
+
+describe("the approval protocol", () => {
+  const decide = (fields: Record<string, unknown>) =>
+    parseClientCommand(
+      JSON.stringify({ type: "approval.decide", requestId: "r1", approvalId: "22", ...fields }),
+    );
+
+  it("takes an answer with an optional note, trimmed, and drops a blank one", () => {
+    expect(decide({ decision: "approve", note: "  ok  " })).toEqual({
+      type: "approval.decide",
+      requestId: "r1",
+      approvalId: "22",
+      decision: "approve",
+      note: "ok",
+    });
+    expect(decide({ decision: "deny", note: "   " })).toEqual({
+      type: "approval.decide",
+      requestId: "r1",
+      approvalId: "22",
+      decision: "deny",
+    });
+  });
+
+  it.each([
+    [{ decision: "maybe" }, /decision must be approve or deny/],
+    [{ decision: "approve", approvalId: "abc" }, /approvalId must be an approval's id/],
+    [{ decision: "approve", approvalId: "" }, /approvalId/],
+    [{ decision: "approve", approvalId: "1".repeat(21) }, /approvalId/],
+    [{ decision: "approve", note: 3 }, /note must be text/],
+    [
+      { decision: "approve", note: "x".repeat(MAX_APPROVAL_NOTE_CHARACTERS + 1) },
+      /note cannot exceed 500 characters/,
+    ],
+  ])("refuses %j", (fields, message) => {
+    expect(() => decide(fields)).toThrow(InvalidClientCommand);
+    expect(() => decide(fields)).toThrow(message);
+  });
+
+  it("reads the list, and refuses a malformed one", () => {
+    const approval = {
+      id: "22",
+      conversationId: 4,
+      tool: "remember",
+      summary: "s",
+      reason: "r",
+      arguments: "{}",
+      expiresAt: 5,
+    };
+    expect(
+      parseServerEventEnvelope(JSON.stringify({ type: "approvals.list", approvals: [approval] })),
+    ).toEqual({ type: "approvals.list", approvals: [approval] });
+    for (const invalid of [
+      { ...approval, id: "abc" },
+      { ...approval, arguments: "x".repeat(2001) },
+    ]) {
+      expect(() =>
+        parseServerEventEnvelope(JSON.stringify({ type: "approvals.list", approvals: [invalid] })),
+      ).toThrow("Approval summary is invalid");
+    }
+    expect(() =>
+      parseServerEventEnvelope(
+        JSON.stringify({ type: "approvals.list", approvals: [{ ...approval, conversationId: 0 }] }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseServerEventEnvelope(JSON.stringify({ type: "approvals.list", approvals: {} })),
+    ).toThrow(/Approvals payload is invalid/);
   });
 });

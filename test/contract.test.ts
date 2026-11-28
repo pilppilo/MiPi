@@ -670,7 +670,12 @@ describe("Pi seam contract", () => {
       expect(snapshot.type).toBe("session.snapshot");
       if (snapshot.type !== "session.snapshot") throw new Error("Expected a session snapshot");
       // COD-246: core's capabilities, sorted, in every snapshot (no built-in extension adds one yet).
-      expect(snapshot.session.capabilities).toEqual(["activity", "diagnostics", "usage"]);
+      expect(snapshot.session.capabilities).toEqual([
+        "activity",
+        "approvals",
+        "diagnostics",
+        "usage",
+      ]);
       expect(snapshot.session.conversations.find(({ id }) => id === child)).toEqual({
         id: child,
         owner: { conversationId: cobot },

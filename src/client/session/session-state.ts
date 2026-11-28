@@ -238,6 +238,8 @@ function reduceServerEvent(state: SessionState, event: ReceivedServerEvent): Ses
       });
       return changed ? { ...state, conversations } : state;
     }
+    case "approvals.list":
+      return state;
     case "session.activity":
       return { ...state, activity: event.activity };
     // Views and their operations are merged into the conversation's transcript first; see `view` actions.

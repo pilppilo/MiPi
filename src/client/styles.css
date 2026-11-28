@@ -2395,3 +2395,148 @@ ul.diagnostics {
     animation: none;
   }
 }
+
+/* Approval cards (COD-238). Chat keeps them between the transcript and composer. */
+.conversation-view:has(> .approval-cards--chat) {
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
+}
+
+.bot-dot--approval {
+  background: #c98a00;
+}
+
+.drawer-toggle {
+  position: relative;
+}
+
+.drawer-approval-dot {
+  position: absolute;
+  inset-block-start: 0.35rem;
+  inset-inline-end: 0.35rem;
+}
+
+.approval-banner {
+  max-block-size: min(7rem, 20dvh);
+  margin: 0 0.75rem 0.5rem;
+  padding: 0.5rem 0.75rem;
+  overflow: auto;
+  border-inline-start: 3px solid #c98a00;
+  border-radius: 0.5rem;
+  background: var(--card);
+  font-size: 0.8125rem;
+  overflow-wrap: anywhere;
+}
+
+.approval-banner p,
+.approval-banner ul {
+  margin: 0;
+}
+
+.approval-banner ul {
+  padding-inline-start: 1rem;
+}
+
+.approval-cards {
+  display: grid;
+  gap: 0.625rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.approval-cards--chat {
+  max-block-size: min(21rem, 46dvh);
+  margin-inline: auto;
+  inline-size: min(100%, 52rem);
+  padding: 0.5rem calc(0.75rem + var(--safe-right)) 0.625rem calc(0.75rem + var(--safe-left));
+  overflow: auto;
+}
+
+.approval-card {
+  display: grid;
+  gap: 0.375rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--line);
+  border-inline-start: 3px solid #c98a00;
+  border-radius: var(--radius-card);
+  background: var(--card);
+  box-shadow: var(--shadow-float);
+  overflow-wrap: anywhere;
+}
+
+.approval-card header {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+}
+
+.approval-card h3,
+.approval-card p {
+  margin: 0;
+}
+
+.approval-card h3 {
+  font-size: 1rem;
+}
+
+.approval-tool,
+.approval-expiry,
+.approval-reason,
+.approval-arguments,
+.approval-form label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.approval-summary {
+  font-weight: 600;
+}
+
+.approval-arguments pre {
+  max-block-size: 8rem;
+  margin: 0.25rem 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.approval-form {
+  display: grid;
+  gap: 0.375rem;
+}
+
+.approval-form input {
+  min-inline-size: 0;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--line);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.approval-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.approval-actions button {
+  min-block-size: var(--touch);
+  padding-inline: 0.875rem;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--touch) / 2);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.approval-actions .approval-deny {
+  background: var(--soft);
+  color: var(--ink);
+}
+
+.approval-actions button:disabled {
+  opacity: 0.6;
+}
+
+.approval-error {
+  color: var(--danger);
+}

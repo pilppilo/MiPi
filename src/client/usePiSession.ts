@@ -5,6 +5,8 @@
  */
 import { useEffect, useMemo, useSyncExternalStore } from "react";
 import type {
+  ApprovalDecision,
+  ApprovalSummary,
   ConnectionStatus,
   ConversationSummary,
   Options,
@@ -15,7 +17,7 @@ import { webPlatform } from "./platform/web.ts";
 import { connectWebTransport } from "./platform/web-transport.ts";
 import type { DiagState } from "./session/diag-buffer.ts";
 import type { Platform } from "./session/platform.ts";
-import { SessionClient } from "./session/session-client.ts";
+import { type DecisionResult, SessionClient } from "./session/session-client.ts";
 import type { ConversationSnapshot, TranscriptGap } from "./session/session-state.ts";
 import type { ConnectTransport } from "./session/transport.ts";
 
@@ -35,6 +37,12 @@ export interface PiSession {
   readonly options: Options | undefined;
   /** Today's spend and usage (M9); undefined until the server sent it. Refreshed when the agent is awake anyway. */
   readonly usage: UsageReadout | undefined;
+  readonly approvals: readonly ApprovalSummary[];
+  decideApproval(
+    approvalId: string,
+    decision: ApprovalDecision,
+    note?: string,
+  ): Promise<DecisionResult>;
   /** The diagnostic events and health Settings → Diagnostics shows (COD-236), kept apart from the transcript's state. */
   readonly diag: DiagState;
   /**
@@ -94,7 +102,7 @@ export function usePiSession(
     client.start();
     return () => client.stop();
   }, [client]);
-  const { session, options, usage, diag } = useSyncExternalStore(
+  const { session, options, usage, diag, approvals } = useSyncExternalStore(
     client.subscribe,
     client.getState,
     client.getState,
@@ -113,6 +121,8 @@ export function usePiSession(
     error: session.error,
     options,
     usage,
+    approvals,
+    decideApproval: client.decideApproval,
     diag,
     subscribeDiag: client.subscribeDiag,
     unsubscribeDiag: client.unsubscribeDiag,

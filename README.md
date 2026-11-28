@@ -10,7 +10,7 @@ MiPi runs in your own Cloudflare account, so your conversations stay with you an
 
 - **Pick up where you left off.** The web app always opens your conversation, on any device, so you can start on your phone and carry on at your desk.
 - **Remind you and do things later.** Ask for a reminder or a repeating task in plain words, such as "remind me to call the dentist tomorrow at 9" or "every Monday, ask me for my weekly goals". Times use your own time zone.
-- **Remember what you tell it to.** Ask it to keep a preference or a fact about you, and it carries that into every later conversation.
+- **Remember what you tell it to.** Ask it to keep a preference or a fact about you, and it carries that into every later conversation. If it read a web page in that turn, it asks you to approve first, on the web, so a page can't put words in your memory.
 - **Look back.** Ask what you decided about something last month, and it searches your past conversations for the answer.
 
 MiPi only does what it has been given tools for. It cannot read your files or run programs on your computer.

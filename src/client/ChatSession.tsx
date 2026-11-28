@@ -24,6 +24,7 @@ import type { ConversationSnapshot } from "./session/session-state.ts";
 import {
   activityByBot,
   advanceLastRead,
+  approvalsByBot,
   archivePrompt,
   type BotActivity,
   type LastRead,
@@ -34,6 +35,7 @@ import {
   unreadByBot,
   unreadIds,
 } from "./session/bots-list.ts";
+import { ApprovalCard } from "./ApprovalCard.tsx";
 import { ActivityPanel } from "./ActivityPanel.tsx";
 import { SettingsPanel } from "./SettingsPanel.tsx";
 import { askMiPi } from "./diagnostics.ts";
@@ -231,6 +233,7 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   const activeSummary = session.conversations.find(({ id }) => id === activeConversationId);
   // Optional panels follow what the agent advertises (COD-246): one it doesn't is simply not there.
   const hasUsage = session.capabilities.has("usage");
+  const hasApprovals = session.capabilities.has("approvals");
   const hasActivity = session.capabilities.has("activity");
   const hasDiagnostics = session.capabilities.has("diagnostics");
   const activityGraph = hasActivity ? session.activity : undefined;
@@ -249,6 +252,14 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     space === "chat" ? activeConversationId : undefined,
   );
   const unread = unreadByBot(session.conversations, ownUnread);
+  const approvals = hasApprovals ? session.approvals : [];
+  const needsApproval = approvalsByBot(session.conversations, approvals);
+  const approvalsHere = approvals.filter(
+    ({ conversationId }) => conversationId === activeConversationId,
+  );
+  const approvalsElsewhere = approvals.filter(
+    ({ conversationId }) => conversationId !== activeConversationId,
+  );
   const activityCount = Object.keys(activityGraph?.tasks ?? {}).length;
   const isConnected = session.status === "connected";
   // An archived conversation opens read-only (COD-201): the agent refuses its messages too.
@@ -490,7 +501,11 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
       <span className="bot-text">
         <span className="bot-name">
           {conversationLabel(summary)}
-          <BotDots activity={activity.get(summary.id)} unread={unread.has(summary.id)} />
+          <BotDots
+            activity={activity.get(summary.id)}
+            unread={unread.has(summary.id)}
+            approval={needsApproval.has(summary.id)}
+          />
         </span>
         <span className="bot-status">{botStatusLabel(activity.get(summary.id))}</span>
       </span>
@@ -689,6 +704,31 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
           </nav>
         )}
 
+        {approvalsElsewhere.length === 0 ? null : (
+          <div className="approval-banner" role="status">
+            <p>Approvals waiting in other chats</p>
+            <ul>
+              {approvalsElsewhere.map((approval) => {
+                const where = session.conversations.find(
+                  ({ id }) => id === approval.conversationId,
+                );
+                return (
+                  <li key={approval.id}>
+                    <a
+                      href={conversationHref(approval.conversationId, space)}
+                      onClick={(event) => followConversationLink(event, approval.conversationId)}
+                    >
+                      {where === undefined ? "A bot" : conversationLabel(where)}
+                    </a>
+                    {" · "}
+                    {approval.summary}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
         <nav className="conversation-navigation" aria-labelledby="conversations-heading">
           <div className="conversation-navigation-header">
             <h2 id="conversations-heading" className="section-label">
@@ -754,12 +794,22 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 ref={drawerToggleRef}
                 className="round-button drawer-toggle"
                 type="button"
-                aria-label="Bots and settings"
+                aria-label={
+                  approvalsElsewhere.length
+                    ? "Bots and settings, approval waiting"
+                    : "Bots and settings"
+                }
                 aria-controls="spaces-drawer"
                 aria-expanded={drawer.open}
                 onClick={() => dispatchDrawer({ type: "toggle" })}
               >
                 <MenuIcon />
+                {approvalsElsewhere.length === 0 ? null : (
+                  <span
+                    className="bot-dot bot-dot--approval drawer-approval-dot"
+                    aria-hidden="true"
+                  />
+                )}
               </button>
               <details className="bot-profile">
                 <summary aria-label="Bot details">
@@ -935,6 +985,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 tools={activeConversation?.tools ?? []}
                 activity={activity}
                 unread={unread}
+                approvals={approvals}
+                needsApproval={needsApproval}
+                canDecideApproval={isConnected && !readOnly}
+                onDecideApproval={session.decideApproval}
                 onOpenBot={openInWorkbench}
               />
             </div>
@@ -1045,6 +1099,26 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
               )}
             </section>
           )}
+
+          {space === "chat" && approvalsHere.length > 0 ? (
+            <ol
+              className="approval-cards approval-cards--chat"
+              aria-label="Waiting for your approval"
+              tabIndex={0}
+            >
+              {approvalsHere.map((approval) => (
+                <li key={approval.id}>
+                  <ApprovalCard
+                    approval={approval}
+                    disabled={!isConnected || readOnly}
+                    onDecide={(decision, note) =>
+                      session.decideApproval(approval.id, decision, note)
+                    }
+                  />
+                </li>
+              ))}
+            </ol>
+          ) : null}
 
           <form className="prompt-bar" onSubmit={submit}>
             <label className="visually-hidden" htmlFor="prompt">
@@ -1180,16 +1254,26 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
   );
 }
 
-/** A bot's dots: working or waiting (from the activity graph), and something unread. */
+/** A bot's dots for pending approvals, activity and unread messages. */
 function BotDots({
   activity,
   unread,
+  approval,
 }: {
   readonly activity: BotActivity | undefined;
   readonly unread: boolean;
+  readonly approval: boolean;
 }) {
   return (
     <>
+      {approval ? (
+        <span
+          className="bot-dot bot-dot--approval"
+          role="img"
+          aria-label="Needs your approval"
+          title="Needs your approval"
+        />
+      ) : null}
       {activity === undefined ? null : (
         <span
           className={`bot-dot bot-dot--${activity}`}

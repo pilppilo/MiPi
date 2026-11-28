@@ -2,7 +2,13 @@ import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { applyImmutable, type Op } from "@earendil-works/chord/delta";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxText } from "@earendil-works/pi-ai";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+  fauxText,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
 import {
   type ConversationId,
   type ConversationView,
@@ -26,6 +32,8 @@ import {
   queuedInputs,
 } from "../src/protocol.ts";
 import { DeliverScheduledInstruction } from "../src/extensions/builtin/reminders/schedule-task.ts";
+import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
+import { approvalsIn } from "../src/agent/approvals.ts";
 
 /**
  * Opens a socket on a session's object directly. The Worker routes only the owner's id (tested on its own), and each
@@ -124,10 +132,13 @@ const jsonMessages = (socket: WebSocket) => {
         await next();
       }
     },
-    /** Session snapshot, the bound bot's view (MiPi's at first), and typing presence: the bot's id. */
+    /**
+     * Session snapshot, the pending approvals, the bound bot's view (MiPi's at first), and typing presence: the bot's
+     * id.
+     */
     skipConnectFrames: async (): Promise<number> => {
       let opened: number | undefined;
-      for (let index = 0; index < 3; index++) {
+      for (let index = 0; index < 4; index++) {
         const frame = await next<{ type?: string; conversationId?: number }>();
         if (frame.type === "conversation.view") opened = frame.conversationId;
       }
@@ -1182,10 +1193,12 @@ describe("chat application", () => {
         conversations: [{ id: expect.any(Number), kind: "main", name: "MiPi", profile: "main" }],
         activity: { tasks: {} },
         // What the agent can do beyond chat (COD-246).
-        capabilities: ["activity", "diagnostics", "usage"],
+        capabilities: ["activity", "approvals", "diagnostics", "usage"],
       },
     });
     const main = session.session.conversations[0]!.id;
+    // Nothing waits for the owner's approval (COD-173).
+    await expect(messages.next()).resolves.toEqual({ type: "approvals.list", approvals: [] });
 
     await expect(messages.next()).resolves.toMatchObject({
       type: "conversation.view",
@@ -1392,6 +1405,151 @@ describe("chat application", () => {
     );
     expect(extraSegmentResponse.status).toBe(404);
     await extraSegmentResponse.body?.cancel();
+  });
+
+  it("asks the owner on the web to save a lesson from a turn that read a page, and saves it once approved (COD-173)", async () => {
+    const sessionId = "approval-remember";
+    // An earlier process: MiPi read a page (web_fetch, refused here for its arguments: the call alone counts) and
+    // then tried to remember from it, so `remember` waits for the owner. The process stops while it waits.
+    const models = createModels();
+    const faux = fauxProvider();
+    faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall("web_fetch", {}),
+          fauxToolCall("remember", { text: "The owner's library closes at six." }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+    ]);
+    models.setProvider(faux.provider);
+    const main = await seedSession(
+      sessionId,
+      createHarnessOptions({ models, model: { provider: "faux", modelId: "faux-1" } }),
+      async (harness) => {
+        const main = (await harness.commit(
+          async (tx) => (await tx.doc(Bots)).mainId,
+          BACKGROUND_CONTEXT,
+        ))! as ConversationId;
+        const conversation = (await harness.conversation(main, BACKGROUND_CONTEXT))!;
+        await conversation.configure(
+          { model: { provider: "faux", modelId: "faux-1" } },
+          BACKGROUND_CONTEXT,
+        );
+        await conversation.submit(
+          {
+            type: "input",
+            content: "Read the library page and remember when it closes",
+            requestId: "web:seed",
+          },
+          BACKGROUND_CONTEXT,
+        );
+        for (let attempt = 0; attempt < 400; attempt++) {
+          const observation = await harness.observeTaskGraph(
+            { advance() {}, end() {} },
+            BACKGROUND_CONTEXT,
+          );
+          observation.detach();
+          if (approvalsIn(observation.value).length > 0) return main;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        throw new Error("remember never asked for approval");
+      },
+    );
+
+    // The object starts again: the waiting call is on the list from the graph it opens with.
+    const response = await openSession(sessionSocketUrl(sessionId, "owner", "approver"));
+    const socket = response.webSocket!;
+    const messages = jsonMessages(socket);
+    socket.accept();
+    type List = {
+      type: "approvals.list";
+      approvals: Array<{ id: string; conversationId: number; tool: string; summary: string }>;
+    };
+    const listed = await messages.nextMatching<List>(
+      (frame) => frame.type === "approvals.list" && frame.approvals.length === 1,
+    );
+    const [approval] = listed.approvals;
+    expect(approval).toMatchObject({
+      conversationId: main,
+      tool: "remember",
+      summary: 'Save memory: "The owner\'s library closes at six."',
+      reason: expect.stringContaining("read a web page"),
+      expiresAt: expect.any(Number),
+    });
+    expect(JSON.parse((approval as unknown as { arguments: string }).arguments)).toEqual({
+      text: "The owner's library closes at six.",
+    });
+
+    type Result = {
+      type: "command.result";
+      command: string;
+      requestId: string;
+      ok: boolean;
+      conversationId?: number;
+      error?: { message: string };
+    };
+    socket.send(
+      JSON.stringify({
+        type: "approval.decide",
+        requestId: "decide-1",
+        approvalId: approval!.id,
+        decision: "approve",
+        note: "Yes, keep it",
+      }),
+    );
+    // Off every tab's list at once, then the answer to this tab.
+    await messages.nextMatching<List>(
+      (frame) => frame.type === "approvals.list" && frame.approvals.length === 0,
+    );
+    await expect(
+      messages.nextMatching<Result>((frame) => frame.type === "command.result"),
+    ).resolves.toMatchObject({
+      command: "approval.decide",
+      requestId: "decide-1",
+      ok: true,
+      conversationId: main,
+    });
+
+    // A second answer (another tab, a double click) is refused.
+    socket.send(
+      JSON.stringify({
+        type: "approval.decide",
+        requestId: "decide-2",
+        approvalId: approval!.id,
+        decision: "deny",
+      }),
+    );
+    await expect(
+      messages.nextMatching<Result>((frame) => frame.type === "command.result"),
+    ).resolves.toMatchObject({
+      command: "approval.decide",
+      requestId: "decide-2",
+      ok: false,
+      error: { message: "That approval was already answered or has ended." },
+    });
+
+    // The call ran with the lesson it asked about.
+    const stub = env.AGENT.getByName(sessionId);
+    let lessons: readonly { text: string }[] = [];
+    for (let attempt = 0; attempt < 200 && lessons.length === 0; attempt++) {
+      lessons = await runInDurableObject(stub, async (_instance, state) => {
+        const storage = await openDurableObjectSqliteStorage(state.storage);
+        const reader = await Harness.open(
+          storage,
+          { ...createHarnessOptions(), readOnly: true },
+          BACKGROUND_CONTEXT,
+        );
+        try {
+          return (await reader.snapshot(MemoryDoc, BACKGROUND_CONTEXT))?.lessons ?? [];
+        } finally {
+          await reader.close(BACKGROUND_CONTEXT);
+        }
+      });
+      if (lessons.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(lessons.map(({ text }) => text)).toEqual(["The owner's library closes at six."]);
+    socket.close(1000, "test complete");
   });
 
   it("creates a durable fork at a committed transcript entry", async () => {
