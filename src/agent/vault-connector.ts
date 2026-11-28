@@ -6,6 +6,8 @@
  *
  * Core code: it names no door, extension or provider.
  */
+import type { VaultLock } from "../lib/vault.ts";
+export type { VaultLock } from "../lib/vault.ts";
 import type { Extension, RegistrySnapshot } from "./pi/durable.ts";
 import type { FetchLike } from "./providers.ts";
 import { CORE_EXTENSION_NAME } from "./untrusted.ts";
@@ -60,11 +62,6 @@ export function createVaultProviders(
   }
   return providers;
 }
-
-/** Whether bot secrets can be used, and why not. */
-export type VaultLock =
-  | { readonly state: "open" }
-  | { readonly state: "locked"; readonly reason: string };
 
 /** The vault as the admin status shows it: never a key, a value or a name. */
 export interface VaultStatus {

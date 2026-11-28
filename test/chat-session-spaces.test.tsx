@@ -97,6 +97,18 @@ describe("spaces on the page (COD-249)", () => {
     expect(chat).not.toContain('space=workbench"');
   });
 
+  it("shows Vault only when advertised and takes bot links back to Chat", () => {
+    const vault = render(["activity", "vault"], "?space=vault");
+    expect(vault).toContain('class="vault-scroll"');
+    expect(vault).not.toContain('class="prompt-bar"');
+    expect(vault).not.toContain('class="approval-cards approval-cards--chat"');
+    expect(vault).toContain('href="?conversation=4"');
+    expect(vault).toContain('href="?conversation=6"');
+    const older = render(["activity"], "?space=vault");
+    expect(older).not.toContain('class="vault-scroll"');
+    expect(older).toContain('class="prompt-bar"');
+  });
+
   it("leaves the open bot's new messages unread while its Workbench shows", () => {
     // MiPi was read up to entry 10 on this device, and has 12.
     const stored = {

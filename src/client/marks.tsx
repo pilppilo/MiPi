@@ -2,6 +2,7 @@
  * The Spaces shell's small marks (COD-244, D · Spaces): a bot's mark, a rounded square in its own colour that glows
  * while the bot works and fades while it sleeps, and the shell's line icons.
  */
+import type { SpaceId } from "./spaces.ts";
 import type { CSSProperties } from "react";
 import type { ConversationSummary } from "../protocol.ts";
 import type { BotActivity } from "./session/bots-list.ts";
@@ -90,13 +91,22 @@ export const WorkbenchIcon = () => (
   </svg>
 );
 
+export const VaultIcon = () => (
+  <svg {...icon}>
+    <rect x="4" y="10" width="16" height="10" rx="2" />
+    <path d="M8 10V7a4 4 0 0 1 8 0v3m-4 4v2" />
+  </svg>
+);
+
 /** A space's icon by id (`spaces.ts`). */
-export function SpaceIcon({ id }: { readonly id: "chat" | "workbench" }) {
+export function SpaceIcon({ id }: { readonly id: SpaceId }) {
   switch (id) {
     case "chat":
       return <ChatIcon />;
     case "workbench":
       return <WorkbenchIcon />;
+    case "vault":
+      return <VaultIcon />;
     default: {
       const _: never = id;
       return null;

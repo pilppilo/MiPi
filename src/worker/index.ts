@@ -1,3 +1,4 @@
+import { handleVault, isVaultPath, withVaultHeaders } from "./vault.ts";
 import { handleAdmin } from "./admin.ts";
 import { handleRelay, isRelayPath } from "./relay.ts";
 import { handleTelegramWebhook } from "./telegram.ts";
@@ -79,6 +80,13 @@ export default {
 
     // Everything else under /api, the WebSocket upgrade included, is the owner's.
     const caller = await authenticate(request, env, "web");
+    if (isVaultPath(url.pathname)) {
+      return withVaultHeaders(
+        caller.kind === "owner"
+          ? await handleVault(request, url, () => ownerAgent(env))
+          : refuse(request, caller),
+      );
+    }
     if (caller.kind !== "owner") return refuse(request, caller);
 
     if (url.pathname === "/api/spike/probe") {

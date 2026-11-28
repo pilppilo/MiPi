@@ -133,7 +133,7 @@ const snapshot = (
   session: { conversations, ...(capabilities === undefined ? {} : { capabilities }) },
 });
 
-const ALL = ["activity", "approvals", "diagnostics", "usage"];
+const ALL = ["activity", "approvals", "diagnostics", "usage", "vault"];
 
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });

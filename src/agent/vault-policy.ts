@@ -4,15 +4,26 @@
  *
  * Core code: it names no door, extension or provider.
  */
+import {
+  BOT_ACCESS,
+  HTTP_METHODS,
+  MAX_SECRET_LENGTH,
+  MIN_SECRET_LENGTH,
+  type BotAccess,
+  type HttpMethod,
+  type SecretPolicy,
+} from "../lib/vault.ts";
+export {
+  BOT_ACCESS,
+  HTTP_METHODS,
+  MAX_SECRET_LENGTH,
+  MIN_SECRET_LENGTH,
+  type BotAccess,
+  type HttpMethod,
+  type SecretPolicy,
+} from "../lib/vault.ts";
 import { normalHost } from "./settings.ts";
 import { refusedUrl } from "./outbound.ts";
-
-/** Who may use a bot secret without asking: nobody, each use asked, or reads allowed. */
-export const BOT_ACCESS = ["none", "approve", "auto"] as const;
-export type BotAccess = (typeof BOT_ACCESS)[number];
-
-export const HTTP_METHODS = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"] as const;
-export type HttpMethod = (typeof HTTP_METHODS)[number];
 
 /** Methods that only read: the ones `auto` may allow, and the only ones that follow a redirect. */
 export const READ_METHODS: readonly HttpMethod[] = ["GET", "HEAD"];
@@ -22,30 +33,6 @@ export const PERSONAL_ONLY_CATEGORIES = ["payment", "login", "contact"] as const
 
 /** A bot secret's category: lowercase letters, digits and dashes, never a personal-only one. */
 const CATEGORY = /^[a-z][a-z0-9-]{0,31}$/;
-
-/** Saving refuses a shorter value, so scrubbing it can never mangle ordinary text. */
-export const MIN_SECRET_LENGTH = 8;
-/** A value longer than this isn't a key or a token. */
-export const MAX_SECRET_LENGTH = 8192;
-
-/** Where the value goes: a header, with `{}` standing for the value. Never the URL. */
-export type SecretInjection = { readonly header: string; readonly template: string };
-
-export type SecretPolicy = {
-  readonly botAccess: BotAccess;
-  /** The conversation ids of the bots that may use it (MiPi, purpose bots). Ids, never names. */
-  readonly bots: readonly number[];
-  /** Exact hostnames, normalized like `normalHost`. */
-  readonly hosts: readonly string[];
-  /** The one port, when not 443. */
-  readonly port?: number;
-  readonly methods: readonly HttpMethod[];
-  /** Path prefixes matched on whole segments; absent: every path. */
-  readonly paths?: readonly string[];
-  readonly inject: SecretInjection;
-  /** Refused from this time (ms since the epoch). */
-  readonly expiresAt?: number;
-};
 
 /** Headers the model may never set: the secret's own header is refused besides these. */
 export const FORBIDDEN_HEADERS = [

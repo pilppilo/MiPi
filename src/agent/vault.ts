@@ -21,6 +21,20 @@
  * Tools reach the agent's vault from their registry snapshot (`vaultOf(api.registry)`), bound on the agent's own core
  * extension, as connectors are (`vault-connector.ts`). Core code: it names no door, extension or provider.
  */
+import {
+  SECRET_ID,
+  MAX_SECRET_AUDIT_ROWS,
+  type AuditDecision,
+  type AuditRow,
+  type BotSecretInfo,
+  type BotSecretPatch,
+  type NewBotSecret,
+  type SecretAuditQuery,
+  type VaultItem,
+  type VaultProviderInfo,
+  type VaultResult,
+} from "../lib/vault.ts";
+export type { AuditDecision, AuditRow, BotSecretInfo, NewBotSecret } from "../lib/vault.ts";
 import { type ConversationId, type RegistrySnapshot, type Tx } from "./pi/durable.ts";
 import {
   type AgentVault,
@@ -123,28 +137,6 @@ export function readVaultRows(sql: SqlStorage): {
 
 // ---- Items ----
 
-/** A bot secret as the vault lists it: metadata only. */
-export interface BotSecretInfo {
-  readonly id: string;
-  readonly category: string;
-  readonly name: string;
-  readonly hint?: string;
-  readonly provider: string;
-  readonly policy: SecretPolicy;
-  readonly createdAt: number;
-  readonly updatedAt: number;
-}
-
-/** What saving a bot secret takes. `value` is the secret itself, or a provider's reference to it. */
-export interface NewBotSecret {
-  readonly category: string;
-  readonly name: string;
-  readonly hint?: string;
-  readonly policy: unknown;
-  readonly value: string;
-  readonly provider?: string;
-}
-
 /** A personal item's row: encrypted in the browser, opaque here (COD-258). */
 export interface PersonalRow {
   readonly category: string;
@@ -184,8 +176,6 @@ const hex = (bytes: Uint8Array): string =>
 
 /** A new item id: the handle the model sees (`sec_…`). */
 export const newSecretId = (): string => `sec_${hex(randomBytes(12))}`;
-
-const SECRET_ID = /^sec_[0-9a-f]{24}$/;
 
 // ---- fetchWithSecret ----
 
@@ -236,25 +226,37 @@ export type SecretFetchResult =
   /** Sent, but no answer came (a timeout, a network error, a refused redirect): scrubbed. */
   | { readonly kind: "failed"; readonly reason: string };
 
-/** An audit decision: allowed without asking, approved by the owner, refused by policy, denied by the owner. */
-export type AuditDecision = "allowed" | "approved" | "refused" | "denied";
+type StoredAuditRow = {
+  id: number;
+  at: number;
+  secret_id: string;
+  conversation_id: number | null;
+  tool: string;
+  method: string;
+  host: string;
+  path: string;
+  decision: string;
+  status: number | null;
+  reason: string | null;
+  prev_hash: string;
+  hash: string;
+};
 
-/** One audit row, as read back. */
-export interface AuditRow {
-  readonly id: number;
-  readonly at: number;
-  readonly secretId: string;
-  readonly conversationId: number | null;
-  readonly tool: string;
-  readonly method: string;
-  readonly host: string;
-  readonly path: string;
-  readonly decision: AuditDecision;
-  readonly status: number | null;
-  readonly reason: string | null;
-  readonly prevHash: string;
-  readonly hash: string;
-}
+const auditRow = (row: StoredAuditRow): AuditRow => ({
+  id: row.id,
+  at: row.at,
+  secretId: row.secret_id,
+  conversationId: row.conversation_id,
+  tool: row.tool,
+  method: row.method,
+  host: row.host,
+  path: row.path,
+  decision: row.decision as AuditDecision,
+  status: row.status,
+  reason: row.reason,
+  prevHash: row.prev_hash,
+  hash: row.hash,
+});
 
 type AuditInput = Omit<AuditRow, "id" | "at" | "prevHash" | "hash">;
 
@@ -555,18 +557,11 @@ export class Vault implements AgentVault {
     if (refused !== undefined) return { ok: false, reason: refused };
     const checked = checkPolicy(input.policy);
     if (!checked.ok) return { ok: false, reason: checked.reason };
-    if (this.#dataKey === undefined || this.#lock.state !== "open") {
-      return { ok: false, reason: this.#lockReason() };
-    }
     const provider = input.provider ?? MIPI_PROVIDER;
     const id = newSecretId();
-    const { key, version } = this.#dataKey;
-    const iv = randomBytes(12);
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv, additionalData: itemAad(id, "bot", provider, version) },
-      key,
-      new TextEncoder().encode(input.value),
-    );
+    const encrypted = await this.#encryptBotValue(id, provider, input.value);
+    if (encrypted === undefined) return { ok: false, reason: this.#lockReason() };
+    const { ciphertext, iv, version } = encrypted;
     const now = this.#now();
     this.#sql.exec(
       `INSERT INTO ${VAULT_ITEMS_TABLE}
@@ -587,19 +582,120 @@ export class Vault implements AgentVault {
     return { ok: true, id };
   }
 
+  async #encryptBotValue(id: string, provider: string, value: string) {
+    if (this.#dataKey === undefined || this.#lock.state !== "open") return undefined;
+    const { key, version } = this.#dataKey;
+    const iv = randomBytes(12);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv, additionalData: itemAad(id, "bot", provider, version) },
+      key,
+      new TextEncoder().encode(value),
+    );
+    return { ciphertext, iv, version };
+  }
+
   #botSecretRefusal(input: NewBotSecret): string | undefined {
-    const category = categoryRefusal(input.category);
-    if (category !== undefined) return category;
-    const name = input.name.trim();
-    if (name.length === 0 || name.length > MAX_NAME) return `a name is 1–${MAX_NAME} characters`;
-    if ((input.hint?.length ?? 0) > MAX_HINT) return `a hint is at most ${MAX_HINT} characters`;
-    const provider = input.provider ?? MIPI_PROVIDER;
-    if (provider !== MIPI_PROVIDER && !this.#providers.has(provider)) {
-      return `the provider "${provider}" isn't installed`;
+    return (
+      secretMetadataRefusal(input) ??
+      this.#secretValueRefusal(input.provider ?? MIPI_PROVIDER, input.value)
+    );
+  }
+
+  #secretValueRefusal(provider: string, value: string): string | undefined {
+    if (provider === MIPI_PROVIDER) return valueRefusal(value);
+    if (!this.#providers.has(provider)) return `the provider "${provider}" isn't installed`;
+    return value.length === 0 ? "a provider reference can't be empty" : undefined;
+  }
+
+  installedProviders(): VaultProviderInfo[] {
+    return [
+      { id: MIPI_PROVIDER, label: "MiPi" },
+      ...[...this.#providers.values()].map(({ provider, label }) => ({ id: provider, label })),
+    ];
+  }
+
+  botSecret(id: string): BotSecretInfo | undefined {
+    const row = this.#row(id);
+    if (row?.tier !== "bot") return undefined;
+    const read = botInfo(row);
+    return read.kind === "ok" ? read.info : undefined;
+  }
+
+  /** Edits metadata while locked, or replaces the value in place under the current data key. */
+  async updateBotSecret(id: string, patch: BotSecretPatch): Promise<VaultResult<VaultItem>> {
+    const row = this.#row(id);
+    if (row?.tier !== "bot") return { ok: false, kind: "missing", reason: "No such bot secret" };
+    const refused = secretMetadataRefusal(patch);
+    if (refused !== undefined) return { ok: false, kind: "invalid", reason: refused };
+
+    let policy: string | null = null;
+    if (patch.policy !== undefined) {
+      const checked = checkPolicy(patch.policy);
+      if (!checked.ok) return { ok: false, kind: "invalid", reason: checked.reason };
+      policy = JSON.stringify(checked.policy);
+    } else if (botInfo(row).kind === "bad") {
+      return { ok: false, kind: "invalid", reason: "Replace the invalid policy before saving" };
     }
-    // A provider's reference isn't the value, so only the built-in store's values have a minimum length.
-    if (provider === MIPI_PROVIDER) return valueRefusal(input.value);
-    return input.value.length === 0 ? "a provider reference can't be empty" : undefined;
+
+    let encrypted:
+      | { provider: string; ciphertext: ArrayBuffer; iv: Uint8Array; version: number }
+      | undefined;
+    if (patch.value === undefined) {
+      if (patch.provider !== undefined && patch.provider !== row.provider) {
+        return { ok: false, kind: "invalid", reason: "Changing provider requires a new value" };
+      }
+    } else {
+      const provider = patch.provider ?? row.provider;
+      const refusedValue = this.#secretValueRefusal(provider, patch.value);
+      if (refusedValue !== undefined) return { ok: false, kind: "invalid", reason: refusedValue };
+      const value = await this.#encryptBotValue(id, provider, patch.value);
+      if (value === undefined) return { ok: false, kind: "locked", reason: this.#lockReason() };
+      encrypted = { provider, ...value };
+    }
+
+    // The DO serializes owner writes against each other and maintenance while encryption is in flight.
+    const changed = this.#sql.exec(
+      `UPDATE ${VAULT_ITEMS_TABLE}
+       SET category = COALESCE(?, category), name = COALESCE(?, name),
+           hint = CASE WHEN ? THEN ? ELSE hint END, policy = COALESCE(?, policy),
+           provider = COALESCE(?, provider), ciphertext = COALESCE(?, ciphertext),
+           iv = COALESCE(?, iv), key_version = COALESCE(?, key_version), updated_at = ?
+       WHERE id = ? AND tier = 'bot'`,
+      patch.category ?? null,
+      patch.name?.trim() ?? null,
+      patch.hint === undefined ? 0 : 1,
+      patch.hint?.trim() || null,
+      policy,
+      encrypted?.provider ?? null,
+      encrypted?.ciphertext ?? null,
+      encrypted?.iv ?? null,
+      encrypted?.version ?? null,
+      this.#now(),
+      id,
+    ).rowsWritten;
+    if (changed === 0) return { ok: false, kind: "missing", reason: "No such bot secret" };
+    const item = this.botSecret(id);
+    if (item === undefined)
+      return { ok: false, kind: "invalid", reason: "The secret metadata is invalid" };
+    const lastUsedAt =
+      this.#sql
+        .exec<{ at: number | null }>(
+          `SELECT MAX(at) AS at FROM ${VAULT_AUDIT_TABLE} WHERE secret_id = ?`,
+          id,
+        )
+        .one().at ?? undefined;
+    return {
+      ok: true,
+      data: { item: { ...item, ...(lastUsedAt === undefined ? {} : { lastUsedAt }) } },
+    };
+  }
+
+  /** Deletes only bot secrets. Their audit rows stay. */
+  removeBotSecret(id: string): boolean {
+    return (
+      this.#sql.exec(`DELETE FROM ${VAULT_ITEMS_TABLE} WHERE id = ? AND tier = 'bot'`, id)
+        .rowsWritten > 0
+    );
   }
 
   /** Replaces a bot secret's policy, checked. */
@@ -966,37 +1062,52 @@ export class Vault implements AgentVault {
   }: { readonly after?: number; readonly limit?: number } = {}): AuditRow[] {
     if (!tableExists(this.#sql, VAULT_AUDIT_TABLE)) return [];
     return this.#sql
-      .exec<{
-        id: number;
-        at: number;
-        secret_id: string;
-        conversation_id: number | null;
-        tool: string;
-        method: string;
-        host: string;
-        path: string;
-        decision: string;
-        status: number | null;
-        reason: string | null;
-        prev_hash: string;
-        hash: string;
-      }>(`SELECT * FROM ${VAULT_AUDIT_TABLE} WHERE id > ? ORDER BY id LIMIT ?`, after, limit)
+      .exec<StoredAuditRow>(
+        `SELECT * FROM ${VAULT_AUDIT_TABLE} WHERE id > ? ORDER BY id LIMIT ?`,
+        after,
+        limit,
+      )
       .toArray()
-      .map((row) => ({
-        id: row.id,
-        at: row.at,
-        secretId: row.secret_id,
-        conversationId: row.conversation_id,
-        tool: row.tool,
-        method: row.method,
-        host: row.host,
-        path: row.path,
-        decision: row.decision as AuditDecision,
-        status: row.status,
-        reason: row.reason,
-        prevHash: row.prev_hash,
-        hash: row.hash,
-      }));
+      .map(auditRow);
+  }
+
+  lastUsedBySecret(): ReadonlyMap<string, number> {
+    return new Map(
+      this.#sql
+        .exec<{ secret_id: string; at: number }>(
+          `SELECT secret_id, MAX(at) AS at FROM ${VAULT_AUDIT_TABLE} GROUP BY secret_id`,
+        )
+        .toArray()
+        .map(({ secret_id, at }) => [secret_id, at]),
+    );
+  }
+
+  /** Newest first, before an audit id. Deleted bot secrets remain readable while they have audit rows. */
+  readSecretAudit(
+    id: string,
+    { before, limit = 100 }: SecretAuditQuery = {},
+  ): AuditRow[] | undefined {
+    const item = this.#row(id);
+    if (item !== undefined && item.tier !== "bot") return undefined;
+    const rows = this.#sql
+      .exec<StoredAuditRow>(
+        `SELECT * FROM ${VAULT_AUDIT_TABLE} WHERE secret_id = ?
+         AND (? IS NULL OR id < ?) ORDER BY id DESC LIMIT ?`,
+        id,
+        before ?? null,
+        before ?? null,
+        Math.max(1, Math.min(limit, MAX_SECRET_AUDIT_ROWS)),
+      )
+      .toArray();
+    if (
+      item === undefined &&
+      rows.length === 0 &&
+      this.#sql.exec(`SELECT 1 FROM ${VAULT_AUDIT_TABLE} WHERE secret_id = ? LIMIT 1`, id).toArray()
+        .length === 0
+    ) {
+      return undefined;
+    }
+    return rows.map(auditRow);
   }
 
   /**
@@ -1019,6 +1130,18 @@ export class Vault implements AgentVault {
       if (page.length < 500) return { ok: true, rows: expected - 1 };
     }
   }
+}
+
+function secretMetadataRefusal({ category, name, hint }: BotSecretPatch): string | undefined {
+  if (category !== undefined) {
+    const refused = categoryRefusal(category);
+    if (refused !== undefined) return refused;
+  }
+  if (name !== undefined && (name.trim().length === 0 || name.trim().length > MAX_NAME)) {
+    return `a name is 1–${MAX_NAME} characters`;
+  }
+  if ((hint?.length ?? 0) > MAX_HINT) return `a hint is at most ${MAX_HINT} characters`;
+  return undefined;
 }
 
 /** A stored bot row read back: the trust boundary for what an older or broken build wrote. */

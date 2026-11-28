@@ -3,9 +3,9 @@
 > [!NOTE]
 > Linear is the source of truth for the vault: the parent issue COD-254 and its issues COD-255 to COD-261. This file is
 > the design they share, kept in the repo and updated in the same PR as each issue's code. Where the two disagree,
-> Linear and the code win, and this file is fixed. The end-user guide will be `docs/vault.md` (COD-256).
+> Linear and the code win, and this file is fixed. The end-user guide is [Using the Vault](vault.md).
 
-**Status:** issue 1 (COD-255, vault core) is implemented. Issues 2 to 7 are planned.
+**Status:** issues 1 and 2 (vault core, owner API and Vault space) are implemented. Issues 3 to 7 are planned.
 
 ## What the vault is
 
@@ -264,14 +264,14 @@ build on them. Each PR carries a changeset and its docs, and updates this file.
 | #           | Issue                               | Scope                                                                                                                                                                                                                                          | Needs         | Status  |
 | ----------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- | ------- |
 | 1 · COD-255 | Vault core                          | Tables, envelope keys and AAD, `MIPI_VAULT_KEY` and `_PREVIOUS` in `deploy.yml`, the deploy's vault check, vault status in admin status. `fetchWithSecret` with bot scoping, URL, header and redirect rules, the ask decision, scrubber, audit | —             | Done    |
-| 2 · COD-256 | Vault routes and space              | `/api/vault/*` behind the owner check, same-origin checks on changes, JSON only on POST, PUT and PATCH, `no-store`. The Vault space: bot secrets and their policy, the bots checklist, the audit view, **Make a lane key**                     | 1             | Planned |
+| 2 · COD-256 | Vault routes and space              | `/api/vault/*` behind the owner check, same-origin checks on changes, JSON only on POST, PUT and PATCH, `no-store`. The Vault space: bot secrets and their policy, the bots checklist, the audit view, **Make a lane key**                     | 1             | Done    |
 | 3 · COD-257 | Vault extension                     | `vault_list`, `secret_get`, `secret_request`, approval cards that name the secret, offered in `main` and `default`                                                                                                                             | 1             | Planned |
 | 4 · COD-258 | Personal items                      | `src/lib/vault-crypto.ts`, encrypted names and hints, unlock, recovery key, idle lock, CSP on `index.html`                                                                                                                                     | 2             | Planned |
 | 5 · COD-259 | Assistant asks for a missing secret | A masked input card with the policy pre-filled: Save & continue, Save locked, Deny                                                                                                                                                             | 2, 3          | Planned |
 | 6 · COD-260 | Bitwarden spike, then extension     | HTTP API with Web Crypto first; the Rust SDK only if needed. Then `optional/bitwarden/`                                                                                                                                                        | 1             | Planned |
 | 7 · COD-261 | Sandbox egress (COD-191)            | Outbound Worker handler using the same policy; only pre-approved grants or clean `auto` reads pass                                                                                                                                             | 1, containers | Planned |
 
-**Owner setup, once issue 1 merges:** make a key per lane (`node -e "console.log(crypto.randomBytes(32).toString('base64'))"`),
+**Owner setup:** in Vault, choose **Make a lane key** and copy a different key for each lane,
 then GitHub → the MiPi repo → **Settings** → **Environments** → **staging** → **Add environment secret**, name
 `MIPI_VAULT_KEY`; the same in **production** with a **different** key. See [Deployment](deployment.md#the-vault-key).
 

@@ -388,6 +388,31 @@ export interface DiagSnapshot {
   readonly health: DiagHealth;
 }
 
+export {
+  BOT_ACCESS,
+  HTTP_METHODS,
+  MIN_SECRET_LENGTH,
+  MAX_SECRET_LENGTH,
+  MAX_SECRET_AUDIT_ROWS,
+  SECRET_ID,
+} from "./lib/vault.ts";
+export type {
+  AuditDecision,
+  AuditRow,
+  BotAccess,
+  BotSecretInfo,
+  BotSecretPatch,
+  HttpMethod,
+  NewBotSecret,
+  SecretAuditQuery,
+  SecretPolicy,
+  VaultAudit,
+  VaultItem,
+  VaultList,
+  VaultLock,
+  VaultProviderInfo,
+} from "./lib/vault.ts";
+
 /**
  * Capabilities (COD-246): door-agnostic domain feature ids the agent advertises in every `session.snapshot`. Core's
  * own are below; an active extension adds its own (`MipiExtension.capabilities`). They name what the agent can do,
@@ -395,7 +420,13 @@ export interface DiagSnapshot {
  * list, reconnecting) is the door contract and has no capability. A capability the snapshot doesn't list is off, so
  * an older agent (no `capabilities` at all) turns every optional panel off rather than breaking the client.
  */
-export const CORE_CAPABILITIES = ["activity", "approvals", "diagnostics", "usage"] as const;
+export const CORE_CAPABILITIES = [
+  "activity",
+  "approvals",
+  "diagnostics",
+  "usage",
+  "vault",
+] as const;
 export type CoreCapability = (typeof CORE_CAPABILITIES)[number];
 
 /** A capability id: lower-case words joined by `-` or `.`, such as `usage` or `memory.search`. */
