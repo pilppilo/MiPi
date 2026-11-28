@@ -241,7 +241,10 @@ describe("export and restore", () => {
     expect(exported.consistent).toBe(true);
     expect(exported.header.meta.app_version).toBe(MIPI_VERSION);
     expect(exported.header.schema.some(({ name }) => name.startsWith("_cf_"))).toBe(false);
-    expect(countsOf(exported.rows)).toEqual(before.rows);
+    // A table with no rows (the vault's, before anything is saved) has no rows to count in the export.
+    expect(countsOf(exported.rows)).toEqual(
+      Object.fromEntries(Object.entries(before.rows).filter(([, count]) => count > 0)),
+    );
 
     // Something written after the export is gone after the restore.
     await seed(owner, "A later message");
@@ -405,7 +408,8 @@ describe("diagnostic log in export and restore", () => {
     expect(after.rows).toEqual(before.rows);
     // The restore starts the log afresh: the earlier events are gone, and the reopen is the first.
     const restored = await diagEvents(owner);
-    expect(restored.map(({ kind }) => kind)).toEqual(["startup.open"]);
+    // The vault opens with the lane key just before the agent does (COD-255).
+    expect(restored.map(({ kind }) => kind)).toEqual(["vault.open", "startup.open"]);
     expect(await diagObjects(owner)).toHaveLength(3);
   });
 
@@ -455,7 +459,10 @@ describe("diagnostic log in export and restore", () => {
       rows: countsOf(rows),
     });
     expect(after.state).toEqual({ kind: "open" });
-    expect((await diagEvents(owner)).map(({ kind }) => kind)).toEqual(["startup.open"]);
+    expect((await diagEvents(owner)).map(({ kind }) => kind)).toEqual([
+      "vault.open",
+      "startup.open",
+    ]);
   });
 
   it("reads and records nothing that breaks an export's consistency", async () => {

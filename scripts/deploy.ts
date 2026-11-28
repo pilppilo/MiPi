@@ -9,6 +9,7 @@
  *   node scripts/deploy.ts restore         --url … --file backup.json --confirm <export's MiPi version>
  *   node scripts/deploy.ts restore-bookmark --url … --bookmark <bookmark>
  *   node scripts/deploy.ts check-rollback  --from <deployed version> --to <target version> [--force]
+ *   node scripts/deploy.ts vault-check     --url …   (refuses a deploy whose MIPI_VAULT_KEY would lock bot secrets)
  *
  * A backup pauses the agent for as long as the export takes (its harness is closed and doors answer 503), then
  * reopens it. A restore wipes the agent first; the startup guard then decides whether the running build may open it.
@@ -17,6 +18,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { adminClientFromEnv, hasAgentToBackUp } from "./admin-client.ts";
 import { oneWayReleasesCrossed, parseChangelog } from "./release-notes.ts";
+import { type DeployedVault, vaultDeployCheck } from "./vault-check.ts";
 
 interface ExportRow {
   readonly table: string;
@@ -162,6 +164,25 @@ async function status(): Promise<void> {
   );
 }
 
+/**
+ * Before `wrangler deploy` (COD-255): the key this deploy ships (`MIPI_VAULT_KEY`, and `MIPI_VAULT_KEY_PREVIOUS` while
+ * rotating, from the environment) against what the running agent stored. A lane with no agent yet passes.
+ */
+async function vaultCheck(): Promise<void> {
+  const call = adminClient(required("url"));
+  if (!(await hasAgentToBackUp(call))) {
+    console.log("Vault check: no agent yet (404).");
+    return;
+  }
+  const status = await call<{ vault?: DeployedVault }>("GET", "/api/admin/status");
+  const result = await vaultDeployCheck(status.vault, {
+    current: process.env.MIPI_VAULT_KEY,
+    previous: process.env.MIPI_VAULT_KEY_PREVIOUS,
+  });
+  if (!result.ok) throw new Error(`Vault check refused the deploy: ${result.reason}`);
+  console.log(`Vault check: ${result.message}`);
+}
+
 function checkRollback(): void {
   const from = required("from");
   const to = required("to");
@@ -193,6 +214,7 @@ const commands: Record<string, () => void | Promise<void>> = {
   restore,
   "restore-bookmark": restoreBookmark,
   "check-rollback": checkRollback,
+  "vault-check": vaultCheck,
 };
 
 const command = commands[positionals[0] ?? ""];

@@ -54,6 +54,7 @@ import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
+import { readVaultRows, Vault, type VaultStatus } from "./vault.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
 import { measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
 import { bindLimitRecorder } from "./limits.ts";
@@ -346,6 +347,11 @@ export interface AdminStatus {
   /** The usage readout (M9) as last measured, with providers' cached figures, while open; absent if it failed. */
   readonly usage?: UsageReadout;
   readonly heartbeat?: HeartbeatStatus;
+  /**
+   * The vault (COD-255): whether bot secrets can be used, the stored key's fingerprint, and row counts. Never a key, a
+   * value or a name. The deploy reads it before it deploys a lane's key.
+   */
+  readonly vault: VaultStatus;
   /** The extensions in use, in default order, and any replaced at startup (COD-209); absent until composed. */
   readonly extensions?: {
     readonly active: readonly string[];
@@ -491,6 +497,11 @@ export class MipiAgent extends DurableObject<Env> {
       await this.ctx.storage.deleteAlarm();
       return;
     }
+    // The vault opens with the lane's keys before anything can use it. A missing or wrong key locks the vault alone.
+    await composition.vault?.open({
+      current: this.env.MIPI_VAULT_KEY,
+      previous: this.env.MIPI_VAULT_KEY_PREVIOUS,
+    });
     const opening = Date.now();
     await this.#initialize(checkAlarm && !staleExport && meta.app_version !== undefined);
     // Recorded only after Pi Durable opened the data successfully.
@@ -615,6 +626,7 @@ export class MipiAgent extends DurableObject<Env> {
       },
       ...(bookmark === undefined ? {} : { bookmark }),
       rows: rowCounts(this.ctx.storage.sql),
+      vault: this.#vaultStatus(),
       ...(usage === undefined ? {} : { usage }),
       ...(heartbeat === undefined ? {} : { heartbeat }),
       ...(this.#composition === undefined
@@ -625,6 +637,23 @@ export class MipiAgent extends DurableObject<Env> {
               replaced: this.#composition.extensions.replacements,
             },
           }),
+    };
+  }
+
+  /** The vault's status; before it opened (refused, maintenance), what is stored, read without writing. */
+  #vaultStatus(): VaultStatus {
+    const vault = this.#composition?.vault;
+    if (vault !== undefined && this.#state.kind === "open") return vault.status();
+    const state = this.#state;
+    return {
+      state: "locked",
+      reason:
+        state.kind === "refused"
+          ? `the agent isn't open: ${state.reason}`
+          : state.kind === "maintenance"
+            ? `the agent is in maintenance (${state.mode})`
+            : "the vault hasn't opened",
+      ...readVaultRows(this.ctx.storage.sql),
     };
   }
 
@@ -701,6 +730,7 @@ export class MipiAgent extends DurableObject<Env> {
         const value: unknown = (this.env as unknown as Record<string, unknown>)[name];
         return typeof value === "string" ? value : undefined;
       },
+      vault: (providers) => new Vault(this.ctx.storage.sql, { providers, diag: this.#diag }),
     });
     for (const replacement of composition.extensions.replacements) {
       console.log(JSON.stringify({ message: "Replaced a built-in extension", ...replacement }));

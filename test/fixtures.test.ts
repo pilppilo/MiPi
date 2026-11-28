@@ -24,7 +24,8 @@ import { createHarnessOptions } from "../src/agent/composition.ts";
 import { MemoryDoc } from "../src/extensions/builtin/memory/memory.ts";
 import { ScheduledReminder } from "../src/extensions/builtin/reminders/reminder-task.ts";
 import worker from "../src/worker/index.ts";
-import type { Fixture } from "./fixture-capture.test.ts";
+import { FIXTURE_SECRET, type Fixture } from "./fixture-capture.test.ts";
+import { Vault } from "../src/agent/vault.ts";
 import { PROFILES } from "./mipi.ts";
 import { clock, openAgent, said, userTexts } from "./reminder-agent.ts";
 import { withSpikeToken } from "./spike.ts";
@@ -89,6 +90,8 @@ describe("fixture databases", () => {
       const status = await restoreInto(owner);
       // The startup guard read it and Pi Durable opened it.
       expect(status.state).toEqual({ kind: "open" });
+      // The vault opens on every fixture: one from before it gets its tables, one with it opens with the test key.
+      expect(status.vault.state).toBe("open");
 
       const stub = env.AGENT.getByName(owner);
       // The relay still answers the key it answered then.
@@ -222,6 +225,62 @@ describe("fixture databases", () => {
       });
       await evictDurableObject(stub);
     }, 30_000);
+
+    it.skipIf(!fixture.rows.some(({ table }) => table === "app_vault_items"))(
+      `unlocks ${version}'s vault with the test key and still refuses a wrong host (COD-255)`,
+      async () => {
+        const owner = `fixture-vault-${version}`.replace(/[^\w-]/g, "-");
+        const status = await restoreInto(owner);
+        expect(status.vault).toMatchObject({ state: "open" });
+        expect(status.vault.rows.personal).toBeGreaterThanOrEqual(1);
+        expect(status.vault.rows.bot).toBeGreaterThanOrEqual(1);
+        expect(status.vault.rows.audit).toBeGreaterThanOrEqual(1);
+        await runInDurableObject(env.AGENT.getByName(owner), async (_instance, state) => {
+          const sent: string[] = [];
+          const vault = new Vault(state.storage.sql, {
+            fetch: async (request) => {
+              sent.push(request.headers.get("Authorization") ?? "");
+              return new Response(`echo ${request.headers.get("Authorization")}`);
+            },
+          });
+          await vault.open({ current: env.MIPI_VAULT_KEY, previous: undefined });
+          expect(vault.lock).toEqual({ state: "open" });
+          expect(await vault.verifyAudit()).toMatchObject({ ok: true });
+          const secret = vault.listBotSecrets().find(({ name }) => name === FIXTURE_SECRET.name);
+          expect(secret).toBeDefined();
+          const caller = {
+            conversationId: 1,
+            botId: 1,
+            tool: "secret_get",
+            facts: { untrustedRun: false, nonOwnerInput: false, automated: false },
+          };
+          expect(
+            await vault.fetchWithSecret(
+              { secretId: secret!.id, intent: "read", method: "GET", url: "https://evil.example/" },
+              caller,
+            ),
+          ).toMatchObject({
+            kind: "refused",
+            reason: "evil.example is not a host this secret is for",
+          });
+          expect(sent).toEqual([]);
+          const used = await vault.fetchWithSecret(
+            {
+              secretId: secret!.id,
+              intent: "read",
+              method: "GET",
+              url: `https://${FIXTURE_SECRET.host}/`,
+            },
+            caller,
+          );
+          expect(sent).toEqual([`Bearer ${FIXTURE_SECRET.value}`]);
+          expect(used).toMatchObject({
+            kind: "response",
+            body: `echo Bearer [REDACTED:${secret!.id}]`,
+          });
+        });
+      },
+    );
 
     it(`wakes and runs the reminder sleeping in ${version}, now a task of the reminders extension`, async () => {
       const owner = `fixture-run-${version}`.replace(/[^\w-]/g, "-");

@@ -11,43 +11,26 @@ import type { ToolRegistration } from "../../../agent/pi/durable.ts";
 import { clip } from "../../../lib/fence.ts";
 import { htmlToText, tidyText } from "../../../lib/html-text.ts";
 import { MIPI_VERSION } from "../../../version.ts";
-import { AgentSettings, normalHost } from "../../../agent/settings.ts";
+import { AgentSettings } from "../../../agent/settings.ts";
+import {
+  FETCH_TIMEOUT_MS,
+  MAX_RAW_BYTES,
+  MAX_REDIRECTS,
+  readCapped,
+  refusedUrl,
+} from "../../../agent/outbound.ts";
 import { fencedPage, type FetchedPage } from "./fenced.ts";
 import { MAX_TEXT, MAX_URL_LENGTH, webFetchDefinition } from "./definition.ts";
 
 export { fencedPage, type FetchedPage } from "./fenced.ts";
 export { MAX_TEXT, MAX_URL_LENGTH, WEB_FETCH_TOOL_NAME } from "./definition.ts";
-
-export const MAX_REDIRECTS = 3;
-export const FETCH_TIMEOUT_MS = 10_000;
-/** The most of a response body read; past it the rest is cancelled and the page is marked cut. */
-export const MAX_RAW_BYTES = 1024 * 1024;
-
-/** Host names that only mean something on a local network, or to the machine itself. */
-const LOCAL_SUFFIXES = ["localhost", "local", "internal", "home.arpa", "lan", "intranet"];
-
-/**
- * Why a URL may not be fetched, or undefined when it may. `ownHosts` are the hostnames MiPi itself answers on: fetching
- * them would show a page its own Access login or open routes.
- */
-export function refusedUrl(url: URL, ownHosts: readonly string[] = []): string | undefined {
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return "only http and https URLs can be fetched";
-  }
-  if (url.username !== "" || url.password !== "")
-    return "URLs with a username or password are refused";
-  // `URL` lowercases the host and normalizes IPv4 written in hex, octal or as one number to dotted decimal.
-  const host = normalHost(url.hostname);
-  if (host.startsWith("[") || host.includes(":"))
-    return "IP addresses are refused; use a host name";
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return "IP addresses are refused; use a host name";
-  if (!host.includes(".")) return "single-label and local host names are refused";
-  if (LOCAL_SUFFIXES.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))) {
-    return "local and internal host names are refused";
-  }
-  if (ownHosts.some((own) => normalHost(own) === host)) return "MiPi doesn't fetch its own address";
-  return undefined;
-}
+// The URL rules and limits live in core since COD-255, shared with the vault; re-exported so callers keep one import.
+export {
+  FETCH_TIMEOUT_MS,
+  MAX_RAW_BYTES,
+  MAX_REDIRECTS,
+  refusedUrl,
+} from "../../../agent/outbound.ts";
 
 /** Content types read as text; anything else (images, PDFs, archives) is refused. */
 export function textType(contentType: string | null): "html" | "text" | undefined {
@@ -63,39 +46,6 @@ export function textType(contentType: string | null): "html" | "text" | undefine
 
 function charsetOf(contentType: string | null): string {
   return /charset\s*=\s*"?([\w-]+)"?/i.exec(contentType ?? "")?.[1] ?? "utf-8";
-}
-
-/** A response body, read up to `limit` bytes; the rest is cancelled. */
-async function readCapped(
-  response: Response,
-  limit: number,
-): Promise<{ readonly bytes: Uint8Array; readonly cut: boolean }> {
-  if (response.body === null) return { bytes: new Uint8Array(), cut: false };
-  const reader = response.body.getReader();
-  const parts: Uint8Array[] = [];
-  let size = 0;
-  let cut = false;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (size + value.byteLength > limit) {
-      // More than the limit: keep what fits, and stop the download.
-      parts.push(value.subarray(0, limit - size));
-      size = limit;
-      cut = true;
-      await reader.cancel().catch(() => undefined);
-      break;
-    }
-    parts.push(value);
-    size += value.byteLength;
-  }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const part of parts) {
-    bytes.set(part, offset);
-    offset += part.byteLength;
-  }
-  return { bytes, cut };
 }
 
 export interface WebFetchOptions {

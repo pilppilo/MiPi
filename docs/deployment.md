@@ -12,12 +12,47 @@ Where MiPi runs, how it deploys, and how to back up, restore and roll back. The 
 
 Each lane has its own Durable Object storage. Every deploy backs up the target's agent first (a 30-day workflow artifact); if the backup can't be taken (a wrong token, a failing Worker), the deploy stops. Only a lane with no agent yet (404) deploys without one.
 
-Secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets; `OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN` and `ADMIN_TOKEN` (24+ random characters) per lane in the GitHub Environments `staging` and `production` (a repository secret of the same name is the fallback). To rotate a lane's `ADMIN_TOKEN`, set the new one and put the old one in `ADMIN_TOKEN_PREVIOUS` for one deploy, then delete it.
+Secrets: `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` as repository secrets; `OPENCODE_API_KEY`, `MIPI_SPIKE_TOKEN` and `ADMIN_TOKEN` (24+ random characters) per lane in the GitHub Environments `staging` and `production` (a repository secret of the same name is the fallback), and `MIPI_VAULT_KEY` per lane for the vault ([below](#the-vault-key)). To rotate a lane's `ADMIN_TOKEN`, set the new one and put the old one in `ADMIN_TOKEN_PREVIOUS` for one deploy, then delete it.
+
+- **The vault key.** Each lane has its own `MIPI_VAULT_KEY`; see [The vault key](#the-vault-key).
 
 - **Startup guard.** Before Pi Durable opens the stored data, the agent checks the stored schema and task versions. Data from a newer build is refused with a 503 that names both versions; nothing runs, nothing is corrupted.
 
 - **Rolling back:** Actions → **rollback** (target, release tag). It refuses to cross a one-way release unless forced. After a one-way release, the old build refuses the newer data until you restore a backup taken before the upgrade: Actions → **restore** (the deploy run's ID and the backup's version). `restore` can also roll storage back to a point-in-time bookmark from the agent's status.
 - **Admin API** (`/api/admin/*`, Access service token when enabled, otherwise `Authorization: Bearer $ADMIN_TOKEN`): status, paged export, restore. `node scripts/deploy.ts` wraps it. Only the startup guard really protects the data: a rollback from the Cloudflare dashboard or `wrangler rollback` skips the workflow's one-way check, but never the guard.
+
+## The vault key
+
+The vault (COD-255, [plan](vault-plan.md)) keeps bot secrets encrypted in the agent's own storage. Each lane's
+`MIPI_VAULT_KEY` wraps that lane's data key, which encrypts the secrets. The key is a Worker secret, never in the
+database, so a backup holds no usable secret without it. Staging and production must have **different** keys: a
+production backup restored to staging can't open production's bot secrets, which is intended.
+
+**Set it up** (once per lane):
+
+1. Make a key: `node -e "console.log(crypto.randomBytes(32).toString('base64'))"`. It is 32 random bytes, base64.
+2. GitHub → the MiPi repo → **Settings** → **Environments** → **staging** → **Add environment secret**, name
+   `MIPI_VAULT_KEY`, paste the key.
+3. The same in **production**, with a different key.
+4. Staging deploys on the next merge to `main`; production when you run the deploy workflow.
+
+**Rotate it:** set the new key as `MIPI_VAULT_KEY` and the old one as `MIPI_VAULT_KEY_PREVIOUS`, deploy, then delete
+`MIPI_VAULT_KEY_PREVIOUS`. On open the agent rewraps the data key with the new key; no secret is re-encrypted.
+
+**How it fails:**
+
+- The deploy always writes both names, an unset one as `off` (`--secrets-file` only adds, so a deleted secret would
+  otherwise stay live in Cloudflare). `off` is never a key.
+- Before the backup and `wrangler deploy`, `node scripts/deploy.ts vault-check` reads the running agent's admin status
+  and refuses the deploy when the lane has bot secrets and this deploy's `MIPI_VAULT_KEY` is missing, isn't a 32-byte
+  base64 key, or matches neither the stored key's fingerprint nor `MIPI_VAULT_KEY_PREVIOUS`. A lane with no bot secrets
+  deploys with or without a key.
+- If the running agent still has no key or the wrong one (set by hand in Cloudflare, say), the vault alone is locked:
+  the admin status shows `vault.state: "locked"` with the reason, every secret call refuses with it, and chat, Telegram
+  and reminders keep working. With no bot secrets stored, a new key simply replaces the data key.
+
+The admin status's `vault` holds the lock state and reason, the stored key's fingerprint (a hash, never the key) and
+row counts per tier. It never holds a key, a value or a secret's name.
 
 ## Spend cap, pause and usage
 

@@ -27,3 +27,8 @@ TELEGRAM_BOT_USERNAME=
 RELAY_TOKEN=
 # Only while rotating RELAY_TOKEN: the old token, still accepted until PiDu has the new one.
 RELAY_TOKEN_PREVIOUS=
+# The vault (COD-255): 32 random bytes, base64, that wrap this lane's bot-secret data key. Make one with
+# node -e "console.log(crypto.randomBytes(32).toString('base64'))". Empty or "off": the vault stays locked.
+MIPI_VAULT_KEY=
+# Only while rotating MIPI_VAULT_KEY: the old key, so the agent can rewrap the data key with the new one.
+MIPI_VAULT_KEY_PREVIOUS=

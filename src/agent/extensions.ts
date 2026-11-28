@@ -16,6 +16,7 @@ import type { MutableModels } from "./pi/ai.ts";
 import type { Extension, Harness, ToolRegistration, Tx } from "./pi/durable.ts";
 import type { OriginRegistration, Origins } from "./origin.ts";
 import type { ProviderRegistration } from "./providers.ts";
+import type { VaultProviderRegistration } from "./vault-connector.ts";
 import type { ReportSourceError, WakeSource } from "./wake-sources.ts";
 import type { DiagSink } from "./diag.ts";
 import { capabilityList, isCapabilityId } from "../protocol.ts";
@@ -88,6 +89,11 @@ export interface MipiExtension {
   readonly schedules?: ScheduleReader;
   /** A provider's usage reader and model list (`providers.ts`). Not registered for an extension that was replaced. */
   readonly providers?: readonly ProviderRegistration[];
+  /**
+   * Stores that can hold a bot secret's value (`vault.ts`, COD-255), such as Bitwarden. Each only resolves a value; the
+   * policy, the ask and the audit stay in core. Not registered for an extension that was replaced.
+   */
+  readonly vaultProviders?: readonly VaultProviderRegistration[];
   /**
    * Door-agnostic domain capability ids it adds (COD-246), such as `memory.search`: what the agent can do, never a UI
    * label, icon or layout hint (each door maps ids to its own panels). Advertised in `session.snapshot` only while the
