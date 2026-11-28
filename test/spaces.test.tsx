@@ -19,6 +19,14 @@ describe("spaces", () => {
     ]);
   });
 
+  it("adds Vault only with its capability and resolves its deep link", () => {
+    const spaces = availableSpaces(new Set(["activity", "vault"]));
+    expect(spaces.map(({ id }) => id)).toEqual(["chat", "workbench", "vault"]);
+    expect(shownSpace("vault", spaces)).toBe("vault");
+    expect(shownSpace("vault", availableSpaces(new Set(["activity"])))).toBe("chat");
+    expect(spaceFromSearch("?space=vault")).toBe("vault");
+  });
+
   it("falls back to Chat when the chosen space isn't backed any more", () => {
     const both = availableSpaces(new Set(["activity"]));
     const chatOnly = availableSpaces(new Set());

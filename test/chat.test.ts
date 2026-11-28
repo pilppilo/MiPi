@@ -1193,7 +1193,7 @@ describe("chat application", () => {
         conversations: [{ id: expect.any(Number), kind: "main", name: "MiPi", profile: "main" }],
         activity: { tasks: {} },
         // What the agent can do beyond chat (COD-246).
-        capabilities: ["activity", "approvals", "diagnostics", "usage"],
+        capabilities: ["activity", "approvals", "diagnostics", "usage", "vault"],
       },
     });
     const main = session.session.conversations[0]!.id;

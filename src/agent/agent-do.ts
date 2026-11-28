@@ -54,6 +54,15 @@ import { nameFromFirstMessage, writeTitle } from "./titles.ts";
 import { AgentSettings, withOwnHost } from "./settings.ts";
 import { ownerTimeZone, stampInput } from "./stamp.ts";
 import { checkStoredData } from "./guard.ts";
+import type {
+  BotSecretPatch,
+  NewBotSecret,
+  SecretAuditQuery,
+  VaultAudit,
+  VaultItem,
+  VaultList,
+  VaultResult,
+} from "../lib/vault.ts";
 import { readVaultRows, Vault, type VaultStatus } from "./vault.ts";
 import { parseDailyRunCap, Proactive } from "./proactive.ts";
 import { measureSpend, PAUSED_REPLY, parsePaused, parseSpendCap, Spend } from "./spend.ts";
@@ -638,6 +647,69 @@ export class MipiAgent extends DurableObject<Env> {
             },
           }),
     };
+  }
+
+  async #withVault<T>(work: (vault: Vault) => Promise<VaultResult<T>>): Promise<VaultResult<T>> {
+    await this.#reopenIfStaleExport();
+    return this.#exclusive(async () => {
+      const vault = this.#composition?.vault;
+      if (this.#state.kind !== "open" || !(vault instanceof Vault)) {
+        return { ok: false, kind: "unavailable", reason: "The agent's vault is unavailable" };
+      }
+      return work(vault);
+    });
+  }
+
+  vaultListBotSecrets(): Promise<VaultResult<VaultList>> {
+    return this.#withVault(async (vault) => {
+      const lastUsed = vault.lastUsedBySecret();
+      const items = vault.listBotSecrets().map((item) => {
+        const lastUsedAt = lastUsed.get(item.id);
+        return lastUsedAt === undefined ? item : { ...item, lastUsedAt };
+      });
+      return {
+        ok: true,
+        data: { status: vault.lock, providers: vault.installedProviders(), items },
+      };
+    });
+  }
+
+  vaultCreateBotSecret(input: NewBotSecret): Promise<VaultResult<VaultItem>> {
+    return this.#withVault(async (vault) => {
+      const result = await vault.saveBotSecret(input);
+      if (!result.ok) {
+        return {
+          ok: false,
+          kind: result.reason.startsWith("locked:") ? "locked" : "invalid",
+          reason: result.reason,
+        };
+      }
+      const item = vault.botSecret(result.id);
+      if (item === undefined)
+        return { ok: false, kind: "unavailable", reason: "The saved metadata couldn't be read" };
+      return { ok: true, data: { item } };
+    });
+  }
+
+  vaultUpdateBotSecret(id: string, patch: BotSecretPatch): Promise<VaultResult<VaultItem>> {
+    return this.#withVault((vault) => vault.updateBotSecret(id, patch));
+  }
+
+  vaultDeleteBotSecret(id: string): Promise<VaultResult<null>> {
+    return this.#withVault(async (vault) =>
+      vault.removeBotSecret(id)
+        ? { ok: true, data: null }
+        : { ok: false, kind: "missing", reason: "No such bot secret" },
+    );
+  }
+
+  vaultReadAudit(id: string, query: SecretAuditQuery): Promise<VaultResult<VaultAudit>> {
+    return this.#withVault(async (vault) => {
+      const rows = vault.readSecretAudit(id, query);
+      return rows === undefined
+        ? { ok: false, kind: "missing", reason: "No such bot secret" }
+        : { ok: true, data: { rows } };
+    });
   }
 
   /** The vault's status; before it opened (refused, maintenance), what is stored, read without writing. */

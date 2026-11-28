@@ -1087,3 +1087,100 @@ describe("the turn the ask decision reads", () => {
     }
   });
 });
+
+describe("bot secret management", () => {
+  it("rotates the value and preserves the id, creation time, audit chain and policy", async () => {
+    await withSql("vault-rotate-bot-secret", async (sql) => {
+      const { vault, id, sent } = await seeded(sql);
+      const call = get(id, "https://api.github.com/repos/pilppilo/MiPi");
+      await vault.fetchWithSecret(call, caller());
+      const first = vault.botSecret(id)!;
+      const before = sql
+        .exec<{ iv: ArrayBuffer }>("SELECT iv FROM app_vault_items WHERE id = ?", id)
+        .one().iv;
+      expect(await vault.updateBotSecret(id, { value: "tiny" })).toMatchObject({
+        ok: false,
+        kind: "invalid",
+      });
+      expect(await vault.updateBotSecret(id, { provider: "other" })).toMatchObject({
+        ok: false,
+        kind: "invalid",
+      });
+
+      const value = "replacement-secret-value";
+      expect(
+        await vault.updateBotSecret(id, {
+          name: "New name",
+          category: "api-key",
+          hint: "Read access",
+          value,
+        }),
+      ).toMatchObject({
+        ok: true,
+        data: {
+          item: {
+            id,
+            name: "New name",
+            category: "api-key",
+            hint: "Read access",
+            policy: first.policy,
+            createdAt: first.createdAt,
+          },
+        },
+      });
+      const after = sql
+        .exec<{ iv: ArrayBuffer }>("SELECT iv FROM app_vault_items WHERE id = ?", id)
+        .one().iv;
+      expect(after.byteLength).toBe(12);
+      expect([...new Uint8Array(after)]).not.toEqual([...new Uint8Array(before)]);
+      await vault.fetchWithSecret(call, caller());
+      expect(sent.map(({ headers }) => headers.get("authorization"))).toEqual([
+        `Bearer ${SECRET}`,
+        `Bearer ${value}`,
+      ]);
+
+      const page = vault.readSecretAudit(id, { limit: 1 });
+      expect(page?.map(({ id }) => id)).toEqual([2]);
+      expect(vault.readSecretAudit(id, { before: 2 })?.map(({ id }) => id)).toEqual([1]);
+      expect(vault.lastUsedBySecret().get(id)).toBe(page?.[0]?.at);
+      expect(vault.removeBotSecret(id)).toBe(true);
+      expect(vault.readSecretAudit(id, { before: 1 })).toEqual([]);
+      expect(await vault.verifyAudit()).toEqual({ ok: true, rows: 2 });
+    });
+  });
+
+  it("edits metadata and revokes grants while locked, with personal rows excluded", async () => {
+    await withSql("vault-locked-metadata", async (sql) => {
+      const { vault, id } = await seeded(sql);
+      const personal = vault.putPersonal({
+        category: "login",
+        ciphertext: new Uint8Array([1]),
+        iv: new Uint8Array(12),
+        keyVersion: 1,
+      });
+      await vault.updateBotSecret(id, { hint: "Remove me" });
+      await vault.open({ current: undefined, previous: undefined });
+      expect(
+        await vault.updateBotSecret(id, {
+          hint: null,
+          policy: { ...POLICY, botAccess: "none", bots: [] },
+        }),
+      ).toMatchObject({ ok: true });
+      expect(vault.botSecret(id)?.hint).toBeUndefined();
+      expect(vault.botSecret(id)?.policy.bots).toEqual([]);
+      expect(await vault.updateBotSecret(id, { value: "replacement-secret" })).toMatchObject({
+        ok: false,
+        kind: "locked",
+        reason: expect.stringMatching(/^locked:/),
+      });
+      expect(await vault.updateBotSecret(personal, { name: "Personal" })).toMatchObject({
+        ok: false,
+        kind: "missing",
+      });
+      expect(vault.removeBotSecret(personal)).toBe(false);
+      expect(vault.readSecretAudit(personal)).toBeUndefined();
+      expect(vault.removeBotSecret(id)).toBe(true);
+      expect(vault.status().rows).toMatchObject({ bot: 0, personal: 1 });
+    });
+  });
+});

@@ -675,6 +675,7 @@ describe("Pi seam contract", () => {
         "approvals",
         "diagnostics",
         "usage",
+        "vault",
       ]);
       expect(snapshot.session.conversations.find(({ id }) => id === child)).toEqual({
         id: child,

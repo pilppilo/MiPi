@@ -222,3 +222,11 @@ export function isSameOrigin(request: Request): boolean {
     return false;
   }
 }
+
+/** Vault mutations require both browser origin signals, including the scheme and port. */
+export function isSameOriginBrowserRequest(request: Request): boolean {
+  return (
+    request.headers.get("Origin") === new URL(request.url).origin &&
+    request.headers.get("Sec-Fetch-Site") === "same-origin"
+  );
+}

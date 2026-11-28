@@ -83,6 +83,7 @@ const render = (capabilities: readonly string[]): string => {
 
 /** What the page shows of each optional panel. */
 const panels = (html: string) => ({
+  vault: html.includes("Manage bot secrets"),
   usage: html.includes("Today ~$0.50"),
   activity: /class="[^"]*\bactivity-toggle\b/.test(html) && html.includes('id="activity-panel"'),
   approvals: html.includes('class="approval-card"'),
@@ -106,6 +107,7 @@ describe("capability-gated panels (COD-246)", () => {
     const html = render(CORE_CAPABILITIES);
     expectChat(html);
     expect(panels(html)).toEqual({
+      vault: true,
       usage: true,
       activity: true,
       diagnostics: true,
@@ -117,6 +119,7 @@ describe("capability-gated panels (COD-246)", () => {
     const html = render([]);
     expectChat(html);
     expect(panels(html)).toEqual({
+      vault: false,
       usage: false,
       activity: false,
       diagnostics: false,
@@ -130,6 +133,7 @@ describe("capability-gated panels (COD-246)", () => {
       const html = render(CORE_CAPABILITIES.filter((id) => id !== off));
       expectChat(html);
       expect(panels(html)).toEqual({
+        vault: off !== "vault",
         usage: off !== "usage",
         activity: off !== "activity",
         diagnostics: off !== "diagnostics",
@@ -143,6 +147,7 @@ describe("capability-gated panels (COD-246)", () => {
 
   it("ignores a capability it has no panel for", () => {
     expect(panels(render(["future.thing"]))).toEqual({
+      vault: false,
       usage: false,
       activity: false,
       diagnostics: false,

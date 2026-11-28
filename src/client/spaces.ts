@@ -4,7 +4,7 @@
  * them: an agent without them has one space fewer, never a broken screen. Chat needs nothing; it is the door itself.
  */
 
-export type SpaceId = "chat" | "workbench";
+export type SpaceId = "chat" | "workbench" | "vault";
 
 export interface Space {
   readonly id: SpaceId;
@@ -21,6 +21,7 @@ const SPACES: readonly (Space & { readonly requires: readonly string[] })[] = [
     summary: "What the bot is doing, waiting on, and the other bots",
     requires: ["activity"],
   },
+  { id: "vault", label: "Vault", summary: "Manage bot secrets", requires: ["vault"] },
 ];
 
 /** The spaces this agent can back, in their order. Chat always. */

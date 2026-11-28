@@ -47,6 +47,7 @@ import {
   type SpaceId,
   spaceFromSearch,
 } from "./spaces.ts";
+import { VaultSpace } from "./VaultSpace.tsx";
 import { Workbench } from "./Workbench.tsx";
 import {
   modelName,
@@ -482,15 +483,16 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
     // Settings covers the conversation: picking one from the sidebar shows it.
     setSettingsOpen(false);
     pickedFromDrawer();
-    if (conversationId !== session.activeConversationId) {
+    if (space === "vault") setChosenSpace("chat");
+    if (space === "vault" || conversationId !== session.activeConversationId) {
       window.history.pushState(null, "", event.currentTarget.href);
-      session.openConversation(conversationId);
     }
+    if (conversationId !== session.activeConversationId) session.openConversation(conversationId);
   };
 
   const renderConversationLink = (summary: ConversationSummary) => (
     <a
-      href={conversationHref(summary.id, space)}
+      href={conversationHref(summary.id, space === "vault" ? "chat" : space)}
       className={summary.kind === "main" ? "bot-link bot-link--main" : "bot-link"}
       aria-current={summary.id === activeConversationId ? "page" : undefined}
       onClick={(event) => followConversationLink(event, summary.id)}
@@ -715,7 +717,10 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                 return (
                   <li key={approval.id}>
                     <a
-                      href={conversationHref(approval.conversationId, space)}
+                      href={conversationHref(
+                        approval.conversationId,
+                        space === "vault" ? "chat" : space,
+                      )}
                       onClick={(event) => followConversationLink(event, approval.conversationId)}
                     >
                       {where === undefined ? "A bot" : conversationLabel(where)}
@@ -787,7 +792,12 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
 
       <div className="session-main">
         {/* Behind the open drawer, only the scrim takes a tap: the conversation is inert. */}
-        <main className="conversation-view" inert={drawer.open || newBotOpen}>
+        <main
+          className={
+            space === "vault" ? "conversation-view conversation-view--vault" : "conversation-view"
+          }
+          inert={drawer.open || newBotOpen}
+        >
           <header className="conversation-header">
             <div className="conversation-titlebar">
               <button
@@ -811,148 +821,163 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
                   />
                 )}
               </button>
-              <details className="bot-profile">
-                <summary aria-label="Bot details">
-                  {activeSummary === undefined ? null : (
-                    <BotMark
-                      summary={activeSummary}
-                      activity={activity.get(activeSummary.id)}
-                      size="large"
-                    />
-                  )}
-                  <h2 ref={conversationHeadingRef} id="transcript-heading" tabIndex={-1}>
-                    {activeSummary === undefined
-                      ? "Conversation"
-                      : conversationLabel(activeSummary)}
-                  </h2>
-                </summary>
-                <div className="bot-profile-panel">
-                  {activeSummary?.kind !== "bot" || activeSummary.purpose === undefined ? null : (
-                    <p className="bot-purpose">{activeSummary.purpose}</p>
-                  )}
-                  {activeConversation === undefined ? null : (
-                    <ConversationDetails
-                      conversation={activeConversation}
-                      profile={activeSummary?.profile}
-                      fixedProfile={activeSummary?.kind === "main"}
-                      options={session.options}
-                      disabled={!isConnected || readOnly}
-                      onConfigure={(change) =>
-                        session.configureConversation(activeConversation.id, change)
-                      }
-                    />
-                  )}
-                  <div className="bot-profile-links">
-                    {/* A side chat under this bot (COD-200): here, beside its other actions, not under every bot in the list. */}
-                    {activeSummary === undefined ||
-                    activeSummary.archivedAt !== undefined ||
-                    (activeSummary.kind !== "main" &&
-                      activeSummary.kind !== "bot") ? null : newCobotUnder === activeSummary.id ? (
-                      <CobotNameForm
-                        key={`cobot-${activeSummary.id}`}
-                        label="New cobot"
-                        disabled={!isConnected}
-                        onSave={async (name) => {
-                          const bot = activeSummary.id;
-                          if (await session.createCobot(bot, name)) {
-                            setNewCobotUnder((current) => (current === bot ? undefined : current));
-                            setSettingsOpen(false);
-                          }
-                        }}
-                        onCancel={() => setNewCobotUnder(undefined)}
+              {space === "vault" ? (
+                <h2
+                  className="vault-title"
+                  ref={conversationHeadingRef}
+                  id="transcript-heading"
+                  tabIndex={-1}
+                >
+                  Vault
+                </h2>
+              ) : (
+                <details className="bot-profile">
+                  <summary aria-label="Bot details">
+                    {activeSummary === undefined ? null : (
+                      <BotMark
+                        summary={activeSummary}
+                        activity={activity.get(activeSummary.id)}
+                        size="large"
                       />
-                    ) : (
-                      <button
-                        className="text-button"
-                        type="button"
-                        aria-expanded={false}
-                        onClick={() => setNewCobotUnder(activeSummary.id)}
-                        disabled={!isConnected}
-                      >
-                        New cobot
-                      </button>
                     )}
-                    {activeSummary?.kind !== "cobot" ||
-                    activeSummary.archivedAt !== undefined ? null : renamingCobot ===
-                      activeSummary.id ? (
-                      <CobotNameForm
-                        key={activeSummary.id}
-                        label="Rename cobot"
-                        name={activeSummary.name ?? ""}
-                        disabled={!isConnected}
-                        onSave={(name) => {
-                          session.renameBot(activeSummary.id, name);
-                          setRenamingCobot(undefined);
-                        }}
-                        onCancel={() => setRenamingCobot(undefined)}
+                    <h2 ref={conversationHeadingRef} id="transcript-heading" tabIndex={-1}>
+                      {activeSummary === undefined
+                        ? "Conversation"
+                        : conversationLabel(activeSummary)}
+                    </h2>
+                  </summary>
+                  <div className="bot-profile-panel">
+                    {activeSummary?.kind !== "bot" || activeSummary.purpose === undefined ? null : (
+                      <p className="bot-purpose">{activeSummary.purpose}</p>
+                    )}
+                    {activeConversation === undefined ? null : (
+                      <ConversationDetails
+                        conversation={activeConversation}
+                        profile={activeSummary?.profile}
+                        fixedProfile={activeSummary?.kind === "main"}
+                        options={session.options}
+                        disabled={!isConnected || readOnly}
+                        onConfigure={(change) =>
+                          session.configureConversation(activeConversation.id, change)
+                        }
                       />
-                    ) : (
-                      <button
-                        className="text-button"
-                        type="button"
-                        disabled={!isConnected}
-                        onClick={() => setRenamingCobot(activeSummary.id)}
-                      >
-                        Rename cobot
-                      </button>
                     )}
-                    {archiveQuestion === undefined ||
-                    activeSummary === undefined ? null : confirmingArchive === activeSummary.id ? (
-                      <div className="archive-confirm" role="group" aria-label="Archive">
-                        <p>{archiveQuestion}</p>
+                    <div className="bot-profile-links">
+                      {/* A side chat under this bot (COD-200): here, beside its other actions, not under every bot in the list. */}
+                      {activeSummary === undefined ||
+                      activeSummary.archivedAt !== undefined ||
+                      (activeSummary.kind !== "main" &&
+                        activeSummary.kind !== "bot") ? null : newCobotUnder ===
+                        activeSummary.id ? (
+                        <CobotNameForm
+                          key={`cobot-${activeSummary.id}`}
+                          label="New cobot"
+                          disabled={!isConnected}
+                          onSave={async (name) => {
+                            const bot = activeSummary.id;
+                            if (await session.createCobot(bot, name)) {
+                              setNewCobotUnder((current) =>
+                                current === bot ? undefined : current,
+                              );
+                              setSettingsOpen(false);
+                            }
+                          }}
+                          onCancel={() => setNewCobotUnder(undefined)}
+                        />
+                      ) : (
                         <button
+                          className="text-button"
+                          type="button"
+                          aria-expanded={false}
+                          onClick={() => setNewCobotUnder(activeSummary.id)}
+                          disabled={!isConnected}
+                        >
+                          New cobot
+                        </button>
+                      )}
+                      {activeSummary?.kind !== "cobot" ||
+                      activeSummary.archivedAt !== undefined ? null : renamingCobot ===
+                        activeSummary.id ? (
+                        <CobotNameForm
+                          key={activeSummary.id}
+                          label="Rename cobot"
+                          name={activeSummary.name ?? ""}
+                          disabled={!isConnected}
+                          onSave={(name) => {
+                            session.renameBot(activeSummary.id, name);
+                            setRenamingCobot(undefined);
+                          }}
+                          onCancel={() => setRenamingCobot(undefined)}
+                        />
+                      ) : (
+                        <button
+                          className="text-button"
                           type="button"
                           disabled={!isConnected}
-                          onClick={() => {
-                            session.archiveBot(activeSummary.id);
-                            setConfirmingArchive(undefined);
-                          }}
+                          onClick={() => setRenamingCobot(activeSummary.id)}
                         >
-                          Archive
+                          Rename cobot
                         </button>
-                        <button type="button" onClick={() => setConfirmingArchive(undefined)}>
-                          Cancel
+                      )}
+                      {archiveQuestion === undefined ||
+                      activeSummary === undefined ? null : confirmingArchive ===
+                        activeSummary.id ? (
+                        <div className="archive-confirm" role="group" aria-label="Archive">
+                          <p>{archiveQuestion}</p>
+                          <button
+                            type="button"
+                            disabled={!isConnected}
+                            onClick={() => {
+                              session.archiveBot(activeSummary.id);
+                              setConfirmingArchive(undefined);
+                            }}
+                          >
+                            Archive
+                          </button>
+                          <button type="button" onClick={() => setConfirmingArchive(undefined)}>
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          className="text-button"
+                          type="button"
+                          disabled={!isConnected}
+                          onClick={() => setConfirmingArchive(activeSummary.id)}
+                        >
+                          {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
                         </button>
-                      </div>
-                    ) : (
-                      <button
-                        className="text-button"
-                        type="button"
-                        disabled={!isConnected}
-                        onClick={() => setConfirmingArchive(activeSummary.id)}
-                      >
-                        {activeSummary.kind === "cobot" ? "Archive cobot" : "Archive bot"}
-                      </button>
-                    )}
+                      )}
+                    </div>
+                    <div className="bot-profile-actions">
+                      <label className="system-toggle">
+                        <input
+                          type="checkbox"
+                          checked={showSystem}
+                          onChange={(event) => setShowSystem(event.currentTarget.checked)}
+                        />{" "}
+                        Show system entries
+                      </label>
+                      {hasActivity ? (
+                        <button
+                          ref={activityToggleRef}
+                          className="pill-button activity-toggle"
+                          type="button"
+                          aria-controls="activity-panel"
+                          aria-expanded={activityOpen}
+                          onClick={toggleActivity}
+                        >
+                          Activity <span aria-hidden="true">{activityCount}</span>
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
-                  <div className="bot-profile-actions">
-                    <label className="system-toggle">
-                      <input
-                        type="checkbox"
-                        checked={showSystem}
-                        onChange={(event) => setShowSystem(event.currentTarget.checked)}
-                      />{" "}
-                      Show system entries
-                    </label>
-                    {hasActivity ? (
-                      <button
-                        ref={activityToggleRef}
-                        className="pill-button activity-toggle"
-                        type="button"
-                        aria-controls="activity-panel"
-                        aria-expanded={activityOpen}
-                        onClick={toggleActivity}
-                      >
-                        Activity <span aria-hidden="true">{activityCount}</span>
-                      </button>
-                    ) : null}
-                  </div>
-                </div>
-              </details>
+                </details>
+              )}
               {/* Reserved for voice (D · Spaces): empty until the agent advertises it. */}
               <span className="titlebar-slot" aria-hidden="true" />
             </div>
-            {!readOnly ? null : (
+            {!readOnly || space === "vault" ? null : (
               <div className="read-only-banner" role="status">
                 <p>
                   {restoreHint === undefined
@@ -974,7 +999,9 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             )}
           </header>
 
-          {space === "workbench" && activeSummary !== undefined ? (
+          {space === "vault" ? (
+            <VaultSpace conversations={session.conversations} label={conversationLabel} />
+          ) : space === "workbench" && activeSummary !== undefined ? (
             <div className="workbench-scroll" tabIndex={0}>
               <Workbench
                 bot={activeSummary}
@@ -1120,35 +1147,37 @@ export function ChatSession({ sessionId }: ChatSessionProps) {
             </ol>
           ) : null}
 
-          <form className="prompt-bar" onSubmit={submit}>
-            <label className="visually-hidden" htmlFor="prompt">
-              Message
-            </label>
-            <textarea
-              ref={promptRef}
-              id="prompt"
-              name="prompt"
-              rows={1}
-              maxLength={MAX_PROMPT_CHARACTERS}
-              value={draft}
-              placeholder={readOnly ? "Archived: restore it to send a message." : "Message"}
-              onChange={(event) => updateDraft(event.currentTarget.value)}
-              onKeyDown={submitWithKeyboardShortcut}
-              aria-keyshortcuts="Meta+Enter Control+Enter"
-              disabled={!isConnected || activeConversationId === undefined || readOnly}
-            />
-            <button
-              className="send-button"
-              type="submit"
-              disabled={!canSubmit}
-              aria-label={submitting ? "Sending" : "Send"}
-            >
-              <SendIcon />
-            </button>
-            <p className="typing-indicator" aria-live="polite">
-              {typingLabel(activeConversation?.typing ?? [])}
-            </p>
-          </form>
+          {space === "vault" ? null : (
+            <form className="prompt-bar" onSubmit={submit}>
+              <label className="visually-hidden" htmlFor="prompt">
+                Message
+              </label>
+              <textarea
+                ref={promptRef}
+                id="prompt"
+                name="prompt"
+                rows={1}
+                maxLength={MAX_PROMPT_CHARACTERS}
+                value={draft}
+                placeholder={readOnly ? "Archived: restore it to send a message." : "Message"}
+                onChange={(event) => updateDraft(event.currentTarget.value)}
+                onKeyDown={submitWithKeyboardShortcut}
+                aria-keyshortcuts="Meta+Enter Control+Enter"
+                disabled={!isConnected || activeConversationId === undefined || readOnly}
+              />
+              <button
+                className="send-button"
+                type="submit"
+                disabled={!canSubmit}
+                aria-label={submitting ? "Sending" : "Send"}
+              >
+                <SendIcon />
+              </button>
+              <p className="typing-indicator" aria-live="polite">
+                {typingLabel(activeConversation?.typing ?? [])}
+              </p>
+            </form>
+          )}
 
           {/* On a phone, the spaces as tabs under the composer; on a wide screen the sidebar lists them. */}
           {spaces.length < 2 ? null : (
