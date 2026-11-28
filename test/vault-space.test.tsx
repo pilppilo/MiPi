@@ -76,6 +76,7 @@ describe("Vault space", () => {
 
   it("keeps archived grants editable while locked and leaves the value field absent", () => {
     const html = renderToStaticMarkup(<VaultSecretForm {...form} item={secret} locked />);
+    expect(html).toContain('aria-label="Edit Deploy key"');
     expect(html).toContain("Reader (archived)");
     expect(html).toMatch(/<input[^>]*name="bots"[^>]*checked=""[^>]*value="3"/);
     expect(html).toMatch(/<input[^>]*disabled=""[^>]*>Replace value/);

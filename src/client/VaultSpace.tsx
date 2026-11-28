@@ -321,6 +321,7 @@ export function VaultSpace(names: BotNames) {
   };
   const remove = async (id: string) => {
     await vaultApi.remove(id);
+    setEditor((current) => (current?.kind === "edit" && current.id === id ? undefined : current));
     setVault((current) =>
       current === undefined
         ? current

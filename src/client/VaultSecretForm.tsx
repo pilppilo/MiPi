@@ -146,7 +146,7 @@ export function VaultSecretForm({
   return (
     <form
       className="vault-card vault-form"
-      aria-label={item === undefined ? "Add secret" : "Edit secret"}
+      aria-label={item === undefined ? "Add secret" : `Edit ${item.name}`}
       onSubmit={save}
     >
       <h3>{item === undefined ? "Add bot secret" : `Edit ${item.name}`}</h3>
