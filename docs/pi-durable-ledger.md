@@ -40,7 +40,7 @@ Every place MiPi departs from, works around, or depends on the inside of Pi Dura
 - **Kind:** choice
 - **Since:** 0.1.0-alpha.5
 - **Upstream:** the sample this repo was seeded from re-renders a "Current time" section every minute. Each change becomes a new system entry, and Pi Durable's README warns that this defeats prompt caching.
-- **MiPi:** the system prompt is static. `stampInput` puts `[speaker · local time]` on every incoming message, including scheduled deliveries. Measured on staging: 1,920 of 4,683 tokens cached (44%) on the second turn.
+- **MiPi:** the system prompt is static. `stampInput` puts `[speaker · local time]` on every incoming message, including scheduled deliveries. Measured on staging: 1,920 of 4,683 tokens cached (41%) on the second turn.
 - **Revisit when:** Pi Durable adds a cache-safe way to give the model the time.
 
 ### L4 · Bigger compaction summary reserve

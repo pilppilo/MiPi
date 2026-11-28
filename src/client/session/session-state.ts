@@ -61,6 +61,7 @@ export interface TranscriptEntry {
   readonly diagnostics?: readonly ToolDiagnostic[];
   readonly toolCalls?: readonly TranscriptToolCall[];
   readonly toolResult?: TranscriptToolResult;
+  readonly modelResponse?: Pick<AssistantMessage, "provider" | "model" | "usage">;
   /** Who sent a user message and when, as the model read it (COD-248): shown only with the system entries. */
   readonly stamp?: Stamp;
 }
@@ -434,6 +435,11 @@ function transcriptEntry(entry: EntryRecord): TranscriptEntry {
     role,
     text,
     canFork: role === "user" || role === "assistant",
+    ...(first?.role === "assistant" &&
+    first.stopReason !== "error" &&
+    first.stopReason !== "aborted"
+      ? { modelResponse: { provider: first.provider, model: first.model, usage: first.usage } }
+      : {}),
     ...(toolCalls.length === 0 ? {} : { toolCalls }),
     ...(stamped.stamp === undefined ? {} : { stamp: stamped.stamp }),
   };

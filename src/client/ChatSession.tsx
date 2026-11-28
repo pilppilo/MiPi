@@ -1382,6 +1382,14 @@ function ConversationDetails({
 }) {
   const agent = conversation.agent;
   const totals = usageTotals(conversation.usage);
+  const latestResponse = conversation.entries.findLast(
+    (entry) => entry.modelResponse,
+  )?.modelResponse;
+  const latestUsage = latestResponse?.usage;
+  const latestPrompt =
+    latestUsage === undefined
+      ? 0
+      : latestUsage.input + latestUsage.cacheRead + latestUsage.cacheWrite;
   const modelId = agent?.model?.modelId ?? options?.defaultModel;
   const shownProfile = profile ?? (fixedProfile ? "main" : "default");
   const summary = profileSummary(shownProfile, options);
@@ -1485,9 +1493,17 @@ function ConversationDetails({
       </div>
 
       <p className="detail-stats">
-        {totals.tokens.toLocaleString()} tokens · {formatCached(totals)} cached ·{" "}
+        All time · {totals.tokens.toLocaleString()} tokens · {formatCached(totals)} cached ·{" "}
         {formatCost(totals.cost)} · Thinking: {thinkingName(agent?.thinkingLevel ?? "off")}
       </p>
+      {latestResponse === undefined ? null : (
+        <p className="detail-stats">
+          Latest recorded model response · {latestResponse.provider}/{latestResponse.model} ·{" "}
+          {latestUsage === undefined || latestPrompt === 0
+            ? "Prompt usage unavailable"
+            : `${formatCached({ cacheRead: latestUsage.cacheRead, prompt: latestPrompt })} cached of ${latestPrompt.toLocaleString()} prompt tokens`}
+        </p>
+      )}
     </section>
   );
 }

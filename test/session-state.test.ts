@@ -69,6 +69,35 @@ const show = (
   sessionReducer(state, { type: "view", conversationId: 1, view: client.merge(view) });
 
 describe("session state", () => {
+  it("keeps cache usage from a settled model response separate from streamed usage", () => {
+    const settledUsage = { ...usage, input: 256, cacheRead: 1024, totalTokens: 1280 };
+    const snapshot = show(
+      initialSessionState,
+      viewOf(
+        [
+          {
+            id: 3,
+            conversationId: 1,
+            kind: "pi.assistant",
+            model: [{ ...assistant("Done"), usage: settledUsage }],
+          },
+        ],
+        {
+          "pi.live": {
+            run: { taskId: 5, inputs: [4], turns: 0 },
+            generation: { attempt: 1, message: assistant("Next") },
+          },
+        },
+      ),
+    ).snapshots[1];
+    expect(snapshot?.entries[0]?.modelResponse).toEqual({
+      provider: "faux",
+      model: "faux",
+      usage: settledUsage,
+    });
+    expect(snapshot?.partial?.usage.cacheRead).toBe(0);
+  });
+
   it("renders a late join and the streamed answer from view operations", () => {
     const frame = event({
       type: "conversation.view",
