@@ -170,11 +170,10 @@ async function status(): Promise<void> {
  */
 async function vaultCheck(): Promise<void> {
   const call = adminClient(required("url"));
-  if (!(await hasAgentToBackUp(call))) {
-    console.log("Vault check: no agent yet (404).");
-    return;
-  }
-  const status = await call<{ vault?: DeployedVault }>("GET", "/api/admin/status");
+  // A new lane (404) has no vault yet, but its key is still checked: a malformed one would lock it from the start.
+  const status = (await hasAgentToBackUp(call))
+    ? await call<{ vault?: DeployedVault }>("GET", "/api/admin/status")
+    : {};
   const result = await vaultDeployCheck(status.vault, {
     current: process.env.MIPI_VAULT_KEY,
     previous: process.env.MIPI_VAULT_KEY_PREVIOUS,

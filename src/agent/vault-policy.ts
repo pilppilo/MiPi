@@ -212,8 +212,23 @@ export function rawPathOf(address: string): string | undefined {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^/?#\\]*([^?#]*)/.exec(address)?.[1];
 }
 
+/**
+ * Why an address as written is refused before anything parses it: ASCII control characters (tabs, newlines) or
+ * spaces anywhere. `URL` drops tabs and newlines and trims spaces before it resolves dot segments, so `/a/.\t./b`
+ * would pass a check on the raw path and still come out as `/b`. Spaces in a path are sent as `%20`.
+ */
+export function addressRefusal(address: string): string | undefined {
+  for (let index = 0; index < address.length; index += 1) {
+    const code = address.charCodeAt(index);
+    if (code <= 0x20 || code === 0x7f) return "control characters and spaces are refused";
+  }
+  return undefined;
+}
+
 /** Why a path as written is refused: a `..` or `.` segment, a backslash, or an encoded separator or dot. */
 export function rawPathRefusal(path: string): string | undefined {
+  const unsafe = addressRefusal(path);
+  if (unsafe !== undefined) return unsafe;
   if (/%(2f|5c|2e)/i.test(path)) return "encoded separators and dots are refused";
   if (path.includes("\\")) return "backslashes are refused";
   if (path.split("/").some((segment) => segment === ".." || segment === ".")) {
@@ -244,6 +259,8 @@ export function urlRefusal(
   | { readonly kind: "ok"; readonly url: URL }
   | { readonly kind: "refused"; readonly reason: string } {
   const refuse = (reason: string) => ({ kind: "refused" as const, reason });
+  const unsafe = addressRefusal(address);
+  if (unsafe !== undefined) return refuse(unsafe);
   const raw = rawPathOf(address);
   if (raw === undefined) return refuse("that is not a full https URL");
   const rawRefused = rawPathRefusal(raw);

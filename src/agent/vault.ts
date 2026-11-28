@@ -28,6 +28,7 @@ import {
   MIPI_PROVIDER,
   type VaultKeys,
   type VaultLock,
+  type VaultProviderRegistration,
   type VaultProviders,
   type VaultStatus,
 } from "./vault-connector.ts";
@@ -38,6 +39,7 @@ import { FETCH_TIMEOUT_MS, MAX_RAW_BYTES, MAX_REDIRECTS, readCapped } from "./ou
 import { normalHost } from "./settings.ts";
 import { type DiagSink, NOOP_DIAG } from "./diag.ts";
 import {
+  addressRefusal,
   type AskFacts,
   askDecision,
   categoryRefusal,
@@ -760,10 +762,7 @@ export class Vault implements AgentVault {
         row.ciphertext,
       );
       const stored = new TextDecoder().decode(plain);
-      value =
-        provider === undefined
-          ? stored
-          : await provider.resolve(stored, (input, init) => this.#fetch(new Request(input, init)));
+      value = provider === undefined ? stored : await this.#resolve(provider, stored);
     } catch {
       // Never the error text of a provider: it could hold what it resolved.
       return refuse(
@@ -793,6 +792,29 @@ export class Vault implements AgentVault {
     }
   }
 
+  /** A provider's value for one call, within the request deadline: a provider that hangs refuses. */
+  async #resolve(provider: VaultProviderRegistration, reference: string): Promise<string> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const resolving = provider.resolve(reference, (input, init) =>
+        this.#fetch(new Request(input, { ...init, signal: controller.signal })),
+      );
+      void resolving.catch(() => undefined);
+      return await Promise.race([
+        resolving,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            controller.abort(new Error("timeout"));
+            reject(new Error("timeout"));
+          }, this.#timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** Records the owner's no (or a timeout) to an asked call. */
   async recordDenied(
     call: SecretCall,
@@ -805,7 +827,7 @@ export class Vault implements AgentVault {
       conversationId: caller.conversationId,
       tool: clipText(caller.tool, 64),
       method: clipText(call.method.toUpperCase(), 16),
-      host,
+      host: clipText(host, 253),
       path: clipText(path, 512),
       decision: "denied",
       status: null,
@@ -830,7 +852,11 @@ export class Vault implements AgentVault {
       for (let hop = 0; ; hop++) {
         const headers = new Headers(call.headers ?? {});
         if (!headers.has("User-Agent")) headers.set("User-Agent", `mipi/${MIPI_VERSION}`);
-        headers.set(policy.inject.header, policy.inject.template.replace("{}", value));
+        // A function, so `$&`, `$$` and the like in a value are never read as replacement patterns.
+        headers.set(
+          policy.inject.header,
+          policy.inject.template.replace("{}", () => value),
+        );
         const response = await this.#fetch(
           new Request(url, {
             method,
@@ -852,6 +878,9 @@ export class Vault implements AgentVault {
           } catch {
             return failed("it redirects to an address that isn't a URL");
           }
+          // `URL` drops tabs and newlines and trims spaces before it resolves dot segments: refused as written.
+          const unsafe = addressRefusal(location);
+          if (unsafe !== undefined) return failed(`it redirects to a refused address: ${unsafe}`);
           const rawPath = rawPathOf(location) ?? location.split(/[?#]/)[0]!;
           const rawRefused = rawPathRefusal(rawPath);
           if (rawRefused !== undefined)

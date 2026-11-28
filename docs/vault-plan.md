@@ -140,8 +140,10 @@ leaves that function only in the outgoing request's header.
 
 1. Refuse when the vault is locked (with its reason), the id is unknown, the row is personal or doesn't read back,
    `botAccess` is `none`, the calling bot's id isn't in `bots`, the secret has expired, or its provider isn't installed.
-2. Check the request, all before decrypting: refuse a raw path with a `.` or `..` segment, a backslash, or an encoded
-   separator or dot (`%2f`, `%5c`, `%2e`, any case), as written and after parsing; check host, port, method (and that
+2. Check the request, all before decrypting: refuse an address with an ASCII control character or a space anywhere
+   (`URL` drops tabs and newlines and trims spaces before it resolves dot segments, so `/a/.\t./b` would become `/b`);
+   refuse a raw path with a `.` or `..` segment, a backslash, or an encoded separator or dot (`%2f`, `%5c`, `%2e`, any
+   case), as written and after parsing; check host, port, method (and that
    it fits the tool: reads for `secret_get`, changes for `secret_request`) and path; refuse any header the model may
    not set, and a body on a read.
 3. Decide whether to ask (`askDecision`). A change always asks. A read asks under `approve`, and under `auto` too when
@@ -152,9 +154,10 @@ leaves that function only in the outgoing request's header.
    A no or a timeout is recorded with `recordDenied`.
 5. Decrypt with AES-256-GCM under the lane's data key. The AAD binds the row id, tier, provider and key version, so
    ciphertext can't move between rows, tiers or providers. For another provider, the decrypted text is its reference,
-   resolved at send time.
+   resolved at send time within the request deadline. The value goes into the header template as is: `$&` or `$$` in a
+   value are never read as replacement patterns.
 6. Send with `redirect: "manual"`. Only `GET` and `HEAD` follow redirects; a change gets the redirect back unfollowed.
-   Every hop is checked again, and a hop to another host drops the secret and fails. The redirect limit, deadline and
+   Every hop is checked again, its `Location` as written too, and a hop to another host drops the secret and fails. The redirect limit, deadline and
    body cap are `web_fetch`'s.
 7. Scrub the body, response headers, URL and any error text: the value and its encoded forms (JSON-escaped,
    percent-encoded in any case, base64 and base64url, padded or not) become `[REDACTED:<id>]`. `Set-Cookie` is dropped.
@@ -293,4 +296,11 @@ Made while building COD-255:
 - A change (`secret_request`) gets a redirect back unfollowed; only reads follow.
 - `Set-Cookie` is dropped from what the model sees: a session cookie is a credential of its own.
 - A provider's error text never reaches a refusal: it could hold what the provider resolved.
-- The deploy compares the key's fingerprint, not only its presence, so a wrong key is refused before it ships.
+- The deploy compares the key's fingerprint, not only its presence, so a wrong key is refused before it ships. A new
+  lane (no agent yet) still has its key's format checked.
+
+From the review of PR #63:
+
+- Addresses and redirect locations with control characters or spaces are refused before parsing.
+- The header template is filled with a replacement function, so a value with `$` patterns is sent exactly as saved.
+- A provider's `resolve` runs within the request deadline.

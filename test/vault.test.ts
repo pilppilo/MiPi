@@ -393,6 +393,21 @@ describe("request checks before decrypting", () => {
     ]) {
       expect(refused(address), address).toBeDefined();
     }
+    // `URL` drops tabs and newlines and trims spaces before it resolves dot segments: refused as written.
+    for (const address of [
+      "https://api.github.com/repos/other/.\t./pilppilo/mipi",
+      "https://api.github.com/repos/other/.\n./pilppilo/mipi",
+      "https://api.github.com/repos/other/.\r./pilppilo/mipi",
+      "https://api.github.com/repos/pilppilo/.. ",
+      " https://api.github.com/repos/pilppilo/mipi",
+      "https://api.github.com/repos/pilppilo/a b",
+      "https://api.github.com/repos/pilppilo/\u0000x",
+      "https://api.github.com/repos/pilppilo/\u007fx",
+    ]) {
+      expect(refused(address), JSON.stringify(address)).toBe(
+        "control characters and spaces are refused",
+      );
+    }
     // A query may hold encoded slashes: only the path is checked.
     expect(refused("https://api.github.com/repos/pilppilo/mipi?next=%2Fa")).toBeUndefined();
   });
@@ -494,6 +509,36 @@ describe("fetchWithSecret", () => {
       });
       expect(result.headers.find(([name]) => name === "x-echo")?.[1]).toBe(`[REDACTED:${id}]`);
       expect(result.headers.some(([name]) => name === "set-cookie")).toBe(false);
+    });
+  });
+
+  it("puts a value holding $& or $$ in the header exactly as saved", async () => {
+    await withSql("vault-dollar", async (sql) => {
+      const value = "tok$&en$$x$'y$`z$1";
+      const sent: Headers[] = [];
+      const vault = new Vault(sql, {
+        fetch: async (request) => {
+          sent.push(request.headers);
+          return new Response(`echo ${request.headers.get("Authorization")}`);
+        },
+      });
+      await vault.open({ current: KEY_A, previous: undefined });
+      const saved = await vault.saveBotSecret({
+        category: "token",
+        name: "Dollar",
+        policy: POLICY,
+        value,
+      });
+      if (!saved.ok) throw new Error(saved.reason);
+      const result = await vault.fetchWithSecret(
+        get(saved.id, "https://api.github.com/repos/pilppilo/x"),
+        caller(),
+      );
+      expect(sent[0]!.get("Authorization")).toBe(`Bearer ${value}`);
+      expect(result).toMatchObject({
+        kind: "response",
+        body: `echo Bearer [REDACTED:${saved.id}]`,
+      });
     });
   });
 
@@ -628,6 +673,13 @@ describe("fetchWithSecret", () => {
         kind: "failed",
         reason: expect.stringMatching(/encoded/),
       });
+      hops["https://api.github.com/repos/pilppilo/tab"] = redirect("/repos/other/.\t./pilppilo/b");
+      expect(
+        await vault.fetchWithSecret(get(id, "https://api.github.com/repos/pilppilo/tab"), caller()),
+      ).toEqual({
+        kind: "failed",
+        reason: "it redirects to a refused address: control characters and spaces are refused",
+      });
       hops["https://api.github.com/repos/pilppilo/loop"] = redirect("/repos/pilppilo/loop");
       expect(
         await vault.fetchWithSecret(
@@ -733,6 +785,46 @@ describe("fetchWithSecret", () => {
       expect(
         sql.exec("SELECT count(*) AS n FROM app_vault_items WHERE provider = 'test-store'").one().n,
       ).toBe(1);
+    });
+  });
+
+  it("refuses when a provider doesn't answer within the deadline", async () => {
+    await withSql("vault-provider-timeout", async (sql) => {
+      const providers = createVaultProviders([
+        {
+          owner: "slow",
+          registration: {
+            provider: "slow",
+            label: "Slow store",
+            resolve: () => new Promise(() => {}),
+          },
+        },
+      ]);
+      const sent: string[] = [];
+      const vault = new Vault(sql, {
+        providers,
+        timeoutMs: 20,
+        fetch: async (request) => {
+          sent.push(request.url);
+          return new Response("ok");
+        },
+      });
+      await vault.open({ current: KEY_A, previous: undefined });
+      const saved = await vault.saveBotSecret({
+        category: "token",
+        name: "Slow",
+        policy: POLICY,
+        value: "ref",
+        provider: "slow",
+      });
+      if (!saved.ok) throw new Error(saved.reason);
+      expect(
+        await vault.fetchWithSecret(
+          get(saved.id, "https://api.github.com/repos/pilppilo/x"),
+          caller(),
+        ),
+      ).toEqual({ kind: "refused", reason: "Slow store couldn't resolve Slow" });
+      expect(sent).toEqual([]);
     });
   });
 
@@ -892,6 +984,10 @@ describe("the deploy's vault check", () => {
     expect(
       await vaultDeployCheck(undefined, { current: undefined, previous: KEY_A }),
     ).toMatchObject({ ok: false });
+    // A new lane (no agent, so no vault yet) still has its key's format checked.
+    expect(
+      await vaultDeployCheck(undefined, { current: "short", previous: undefined }),
+    ).toMatchObject({ ok: false, reason: "MIPI_VAULT_KEY is not base64" });
   });
 
   it("refuses a lane with bot secrets and no key or the wrong key, and passes the right key or a rotation", async () => {
