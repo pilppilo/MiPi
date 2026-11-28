@@ -53,6 +53,9 @@ jobs:
       # PiDu relay (M7): on once the lane's Environment has RELAY_TOKEN. RELAY_TOKEN_PREVIOUS only while rotating it.
       RELAY_TOKEN: ${{ secrets.RELAY_TOKEN }}
       RELAY_TOKEN_PREVIOUS: ${{ secrets.RELAY_TOKEN_PREVIOUS }}
+      # The vault (COD-255): 32 random bytes, base64, per lane. MIPI_VAULT_KEY_PREVIOUS only while rotating it.
+      MIPI_VAULT_KEY: ${{ secrets.MIPI_VAULT_KEY }}
+      MIPI_VAULT_KEY_PREVIOUS: ${{ secrets.MIPI_VAULT_KEY_PREVIOUS }}
       # Spend cap and pause (M9): an Environment variable overrides wrangler.jsonc's value for that lane. MIPI_PAUSED=1
       # holds every model call until a deploy without it.
       MIPI_DAILY_SPEND_CAP: ${{ vars.MIPI_DAILY_SPEND_CAP }}
@@ -126,6 +129,12 @@ jobs:
           name="mipi"; [ "$TARGET" = staging ] && name="mipi-staging"
           echo "WORKER_URL=https://$name.$subdomain.workers.dev" >> "$GITHUB_ENV"
 
+      - name: Check the vault key
+        # Before anything ships: refuses when the lane has bot secrets and this deploy's MIPI_VAULT_KEY is missing, isn't
+        # a key, or matches neither the stored key nor MIPI_VAULT_KEY_PREVIOUS, so an unset secret never replaces a live
+        # lane key with "off".
+        run: node scripts/deploy.ts vault-check --url "$WORKER_URL"
+
       - name: Back up the agent
         run: node scripts/deploy.ts backup --url "$WORKER_URL" --out "$RUNNER_TEMP/backup.json"
       - uses: actions/upload-artifact@v7
@@ -153,16 +162,21 @@ jobs:
             --arg bot "$TELEGRAM_BOT_TOKEN" --arg hook "$TELEGRAM_WEBHOOK_SECRET" \
             --arg relay "$RELAY_TOKEN" --arg relay_previous "$RELAY_TOKEN_PREVIOUS" \
             --arg usage_key "$OPENCODE_USAGE_KEY" \
+            --arg vault_key "$MIPI_VAULT_KEY" --arg vault_previous "$MIPI_VAULT_KEY_PREVIOUS" \
             '{OPENCODE_API_KEY: $key, MIPI_SPIKE_TOKEN: $spike, ADMIN_TOKEN: $admin}
               + (if $bot == "" then {} else {TELEGRAM_BOT_TOKEN: $bot, TELEGRAM_WEBHOOK_SECRET: $hook} end)
               + {OPENCODE_USAGE_KEY: (if $usage_key == "" then "off" else $usage_key end)}
               + {RELAY_TOKEN: (if $relay == "" then "off" else $relay end),
-                 RELAY_TOKEN_PREVIOUS: (if $relay_previous == "" then "off" else $relay_previous end)}' > "$secrets"
+                 RELAY_TOKEN_PREVIOUS: (if $relay_previous == "" then "off" else $relay_previous end)}
+              + {MIPI_VAULT_KEY: (if $vault_key == "" then "off" else $vault_key end),
+                 MIPI_VAULT_KEY_PREVIOUS: (if $vault_previous == "" then "off" else $vault_previous end)}' > "$secrets"
           # Secrets ship with the version itself, so no deployed version ever runs without its key.
           # --secrets-file only adds: a secret left out keeps its old value. So both relay tokens are always written, and
           # an unset one as "off", which is under 24 characters and accepted by nothing: removing RELAY_TOKEN turns the
           # relay off, and removing RELAY_TOKEN_PREVIOUS after a rotation stops the old token working. OPENCODE_USAGE_KEY
-          # is written the same way, so removing it stops the readout using it.
+          # is written the same way, so removing it stops the readout using it. Both vault keys are too: removing
+          # MIPI_VAULT_KEY_PREVIOUS after a rotation stops the old key working ("Check the vault key" already refused a
+          # deploy that would lock bot secrets).
           # Access settings ride with the version as vars (they're not secret); unset, Access stays off.
           access_vars=()
           if [ -n "$ACCESS_TEAM_DOMAIN" ] && [ -n "$ACCESS_AUD" ]; then

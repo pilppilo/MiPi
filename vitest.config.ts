@@ -13,6 +13,8 @@ export default defineConfig({
           OPENCODE_API_KEY: "test-opencode-key",
           MIPI_SPIKE_TOKEN: "test-spike-token",
           ADMIN_TOKEN: "test-admin-token",
+          // The vault's lane key in tests (COD-255): bytes 0 to 31. Fixtures with vault rows are captured with it.
+          MIPI_VAULT_KEY: "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
           // `node scripts/fixture-capture.ts` sets it: the capture test runs only then.
           MIPI_CAPTURE_FIXTURE: process.env.MIPI_CAPTURE_FIXTURE ?? "",
         },

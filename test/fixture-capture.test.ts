@@ -43,11 +43,19 @@ import type { ExportHeader, ExportPage, ExportRow } from "../src/agent/maintenan
 import worker from "../src/worker/index.ts";
 import { mainConversationId, parseServerEventEnvelope } from "../src/protocol.ts";
 import { MIPI_VERSION } from "../src/version.ts";
+import { Vault } from "../src/agent/vault.ts";
 
 const ctx = BACKGROUND_CONTEXT;
 const capturing =
   (env as unknown as { MIPI_CAPTURE_FIXTURE?: string }).MIPI_CAPTURE_FIXTURE === "1";
 const fixtures = (env as unknown as { FIXTURES: Fetcher }).FIXTURES;
+
+/** The bot secret the fixture holds (COD-255), saved under the test lane key (`vitest.config.ts`). */
+export const FIXTURE_SECRET = {
+  value: "fixture-bot-secret-0123456789",
+  name: "Fixture token",
+  host: "api.fixture.example",
+} as const;
 
 /** A fixture: an export, as `GET /api/admin/export/*` gives it. */
 export type Fixture = { readonly header: ExportHeader; readonly rows: readonly ExportRow[] };
@@ -306,6 +314,51 @@ async function seed(): Promise<void> {
   await evictDurableObject(stub);
 }
 
+/**
+ * The vault (COD-255): a personal row as the browser would store it (opaque here), a bot secret under the test lane
+ * key, and one audit row from a use of it.
+ */
+async function seedVault(): Promise<void> {
+  const stub = env.AGENT.getByName(OWNER);
+  await runInDurableObject(stub, async (_instance, state) => {
+    const vault = new Vault(state.storage.sql, {
+      fetch: async () => new Response("fixture ok"),
+    });
+    await vault.open({ current: env.MIPI_VAULT_KEY, previous: undefined });
+    expect(vault.lock).toEqual({ state: "open" });
+    vault.putPersonal({
+      category: "login",
+      ciphertext: new Uint8Array([0xf1, 0x7e, 0x5e, 0xed]),
+      iv: new Uint8Array(12),
+      keyVersion: 1,
+    });
+    const saved = await vault.saveBotSecret({
+      category: "token",
+      name: FIXTURE_SECRET.name,
+      policy: {
+        botAccess: "auto",
+        bots: [1],
+        hosts: [FIXTURE_SECRET.host],
+        methods: ["GET"],
+        inject: { header: "Authorization", template: "Bearer {}" },
+      },
+      value: FIXTURE_SECRET.value,
+    });
+    if (!saved.ok) throw new Error(saved.reason);
+    const used = await vault.fetchWithSecret(
+      { secretId: saved.id, intent: "read", method: "GET", url: `https://${FIXTURE_SECRET.host}/` },
+      {
+        conversationId: 1,
+        botId: 1,
+        tool: "secret_get",
+        facts: { untrustedRun: false, nonOwnerInput: false, automated: false },
+      },
+    );
+    expect(used.kind).toBe("response");
+  });
+  await evictDurableObject(stub);
+}
+
 async function seedCobot(): Promise<void> {
   // Use the real command so the capture also contains the durable cobot creation receipt.
   const response = await env.AGENT.getByName(OWNER).fetch(
@@ -354,6 +407,7 @@ describe.skipIf(!capturing)("fixture capture", () => {
     await seedCobot();
     await evictDurableObject(env.AGENT.getByName(OWNER));
     await seed();
+    await seedVault();
     const header = await call<ExportHeader>("POST", "/api/admin/export/begin");
     const rows: ExportRow[] = [];
     let cursor: string | undefined;
